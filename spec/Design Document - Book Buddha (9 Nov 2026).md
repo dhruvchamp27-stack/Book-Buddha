@@ -225,7 +225,7 @@ Customer (required) + at least one line with a quantity; invoice date (today by 
 Autosave is on. Leaving an unfinalised autosaved draft **warns every time** (the draft is saved, its number is used, continue from the Drafts list).
 
 ### 7.4 Lines & money
-Item + quantity (price fills from the item, editable); **line discount** and a **document-level lump-sum discount**; **extra charges** (name + amount typed, e.g. postage, freight); **optional tax per line**; **date tokens** in line text; MRP shown. Totals are **not rounded** (exact paise); **amount grouping** per Settings. Incomplete rows **block the save** (no silent dropping).
+Item + quantity (price fills from the item, editable); **line discount** and a **document-level lump-sum discount**; **extra charges** (name + amount typed, e.g. postage, freight); **optional tax per line**; **date tokens** in line text; MRP shown. **Invoice/quotation totals round to the nearest whole rupee** (≥50 paise up, <50 down); the document shows amount-before-rounding, the round-off adjustment and the final total; **actual receipts keep paise**. **Amount grouping** per Settings. *(Rounding adopted 12 Nov 2026, from Magazine PRD v4.)* Incomplete rows **block the save** (no silent dropping).
 
 ### 7.5 Save & posting
 Pre-checks run, then an **all-or-nothing** save. A "Delivered now" invoice posts the sale (+ stock/COGS for tracked direct sales); a "Deliver over time" invoice posts to **Unearned Revenue** (Section 11). Short stock is **blocked** with an "Add stock" step.

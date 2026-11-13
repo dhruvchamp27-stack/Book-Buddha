@@ -193,7 +193,7 @@
 **5.2 Create / edit invoice**
 - Purpose: Raise an invoice.
 - Required: customer; at least one line with a quantity.
-- Content: invoice date (today default); due date (30 days default, changeable/clearable); terms/notes (printed) + internal notes; PO number (warns on reuse); custom fields (gear icon); project (fair); tags; **Deliver now / Deliver over time** switch (pre-filled by customer Subscription flag); lines = item + qty (price fills, editable), line discount, document lump-sum discount, extra charges (name+amount), optional per-line tax, date tokens in line text, MRP shown; totals exact to paise, grouping per Settings. Inline math + fast date entry on fields.
+- Content: invoice date (today default); due date (30 days default, changeable/clearable); terms/notes (printed) + internal notes; PO number (warns on reuse); custom fields (gear icon); project (fair); tags; **Deliver now / Deliver over time** switch (pre-filled by customer Subscription flag); lines = item + qty (price fills, editable), line discount, document lump-sum discount, extra charges (name+amount), optional per-line tax, date tokens in line text, MRP shown; totals round to the nearest whole rupee (≥50 paise up, <50 down; show amount-before-rounding, round-off adjustment and final total; receipts keep paise), grouping per Settings. Inline math + fast date entry on fields.
 - Primary: "Save" (posts). Secondary: "Save & New", "Save as draft", Cancel.
 - Loading: "Saving…". Empty: blank form; next number shown on open. Error: incomplete rows **block save** (no silent drop); short stock **blocked** with "Add stock"; all-or-nothing.
 - → branches: Deliver now → posts sale (+stock/COGS for tracked direct); Deliver over time → posts to Unearned Revenue (Section 9/11).

@@ -1,0 +1,353 @@
+import { describe, expect, it } from "vitest";
+import { buildApi } from "./server.js";
+import { AccountingRepository } from "../database/repository.js";
+
+describe("local API", () => {
+  it("supports a validated invoice lifecycle", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyResponse = await app.inject({
+        method: "POST",
+        url: "/companies",
+        payload: { name: "API Company" },
+      });
+      expect(companyResponse.statusCode).toBe(201);
+      const companyId = companyResponse.json<{ id: string }>().id;
+
+      const businessResponse = await app.inject({
+        method: "POST",
+        url: "/businesses",
+        payload: { companyId, name: "API Business" },
+      });
+      const businessId = businessResponse.json<{ id: string }>().id;
+
+      const customerResponse = await app.inject({
+        method: "POST",
+        url: "/customers",
+        payload: { companyId, name: "API Customer" },
+      });
+      const customerId = customerResponse.json<{ id: string }>().id;
+      const itemResponse = await app.inject({
+        method: "POST",
+        url: "/items",
+        payload: { companyId, name: "API Book", unit: "each", trackStock: false },
+      });
+      const itemId = itemResponse.json<{ id: string }>().id;
+
+      const invoiceResponse = await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-001/26-27",
+          businessId,
+          customerId,
+          paymentAccount: "CASH",
+          lines: [{ itemId, description: "Book", quantity: 1, unitPricePaise: 10000 }],
+        },
+      });
+      expect(invoiceResponse.statusCode).toBe(201);
+      const invoiceId = invoiceResponse.json<{ id: string }>().id;
+      expect(invoiceResponse.json<InvoiceResponse>().lines[0]?.itemId).toBe(itemId);
+
+      const finalizeResponse = await app.inject({
+        method: "POST",
+        url: `/invoices/${invoiceId}/finalize`,
+      });
+      expect(finalizeResponse.statusCode).toBe(200);
+      expect(finalizeResponse.json().journalEntry.lines).toHaveLength(2);
+
+      const cancelResponse = await app.inject({
+        method: "POST",
+        url: `/invoices/${invoiceId}/cancel`,
+      });
+      expect(cancelResponse.statusCode).toBe(200);
+      expect(cancelResponse.json().reversalEntry.isReversal).toBe(true);
+
+      const profitAndLoss = await app.inject({
+        method: "GET",
+        url: "/reports/profit-and-loss",
+      });
+      expect(profitAndLoss.statusCode).toBe(200);
+      expect(profitAndLoss.json<{ netProfitPaise: number }>().netProfitPaise).toBe(0);
+
+      const balanceSheet = await app.inject({
+        method: "GET",
+        url: "/reports/balance-sheet",
+      });
+      expect(balanceSheet.statusCode).toBe(200);
+      expect(balanceSheet.json<{ totalAssetsPaise: number }>().totalAssetsPaise).toBe(0);
+
+      const generalLedger = await app.inject({
+        method: "GET",
+        url: "/reports/general-ledger",
+      });
+      expect(generalLedger.statusCode).toBe(200);
+      expect(generalLedger.json<unknown[]>().length).toBe(4);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("returns a clear validation response", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/companies",
+        payload: { name: "" },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        error: "Request validation failed.",
+      });
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("rejects invoice references from different companies", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyA = (await app.inject({
+        method: "POST",
+        url: "/companies",
+        payload: { name: "Company A" },
+      })).json<{ id: string }>().id;
+      const companyB = (await app.inject({
+        method: "POST",
+        url: "/companies",
+        payload: { name: "Company B" },
+      })).json<{ id: string }>().id;
+      const businessId = (await app.inject({
+        method: "POST",
+        url: "/businesses",
+        payload: { companyId: companyA, name: "Business A" },
+      })).json<{ id: string }>().id;
+      const customerAId = (await app.inject({
+        method: "POST",
+        url: "/customers",
+        payload: { companyId: companyA, name: "Customer A" },
+      })).json<{ id: string }>().id;
+      const customerId = (await app.inject({
+        method: "POST",
+        url: "/customers",
+        payload: { companyId: companyB, name: "Customer B" },
+      })).json<{ id: string }>().id;
+      const itemId = (await app.inject({
+        method: "POST",
+        url: "/items",
+        payload: { companyId: companyB, name: "Item B", unit: "each" },
+      })).json<{ id: string }>().id;
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-CROSS-COMPANY",
+          businessId,
+          customerId,
+          paymentAccount: "CASH",
+          lines: [{ itemId, description: "Item B", quantity: 1, unitPricePaise: 1000 }],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: "Invoice business and customer must belong to the same company.",
+      });
+
+      const itemResponse = await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-CROSS-ITEM",
+          businessId,
+          customerId: customerAId,
+          paymentAccount: "CASH",
+          lines: [{ itemId, description: "Item B", quantity: 1, unitPricePaise: 1000 }],
+        },
+      });
+      expect(itemResponse.statusCode).toBe(400);
+      expect(itemResponse.json()).toEqual({
+        error: "Invoice items must belong to the same company as the business.",
+      });
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("updates drafts but rejects edits after finalization", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyId = app
+        ? (await app.inject({ method: "POST", url: "/companies", payload: { name: "Edit Company" } })).json<{ id: string }>().id
+        : "";
+      const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Edit Business" } })).json<{ id: string }>().id;
+      const customerId = (await app.inject({ method: "POST", url: "/customers", payload: { companyId, name: "Edit Customer" } })).json<{ id: string }>().id;
+      const created = await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-EDIT",
+          businessId,
+          customerId,
+          paymentAccount: "CASH",
+          lines: [{ description: "Original", quantity: 1, unitPricePaise: 1000 }],
+        },
+      });
+      const invoiceId = created.json<{ id: string }>().id;
+      const updated = await app.inject({
+        method: "PUT",
+        url: `/invoices/${invoiceId}`,
+        payload: {
+          number: "INV-EDIT",
+          businessId,
+          customerId,
+          paymentAccount: "CASH",
+          lines: [{ description: "Updated", quantity: 2, unitPricePaise: 2500 }],
+        },
+      });
+      expect(updated.statusCode).toBe(200);
+      expect(updated.json<InvoiceResponse>().lines[0]?.description).toBe("Updated");
+
+      await app.inject({ method: "POST", url: `/invoices/${invoiceId}/finalize` });
+      const rejected = await app.inject({
+        method: "PUT",
+        url: `/invoices/${invoiceId}`,
+        payload: {
+          number: "INV-EDIT",
+          businessId,
+          customerId,
+          paymentAccount: "CASH",
+          lines: [{ description: "Not allowed", quantity: 1, unitPricePaise: 1000 }],
+        },
+      });
+      expect(rejected.statusCode).toBe(500);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("records receivable payments and exposes ageing data", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Payment Company" } })).json<{ id: string }>().id;
+      const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Payment Business" } })).json<{ id: string }>().id;
+      const customerId = (await app.inject({ method: "POST", url: "/customers", payload: { companyId, name: "Payment Customer" } })).json<{ id: string }>().id;
+      const created = await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-PAY",
+          businessId,
+          customerId,
+          paymentAccount: "RECEIVABLES",
+          lines: [{ description: "Book", quantity: 1, unitPricePaise: 25000 }],
+        },
+      });
+      const invoiceId = created.json<{ id: string }>().id;
+      await app.inject({ method: "POST", url: `/invoices/${invoiceId}/finalize` });
+      const payment = await app.inject({
+        method: "POST",
+        url: `/invoices/${invoiceId}/payments`,
+        payload: { amountPaise: 10000 },
+      });
+      expect(payment.statusCode).toBe(201);
+      expect(payment.json<{ amountPaise: number }>().amountPaise).toBe(10000);
+      const receivables = await app.inject({ method: "GET", url: "/reports/receivables" });
+      expect(receivables.json<Array<{ outstandingPaise: number }>>()[0]?.outstandingPaise).toBe(15000);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("creates fairs and reports finalized fair sales", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Fair API Company" } })).json<{ id: string }>().id;
+      const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Fair API Business" } })).json<{ id: string }>().id;
+      const customerId = (await app.inject({ method: "POST", url: "/customers", payload: { companyId, name: "Fair Host" } })).json<{ id: string }>().id;
+      const fairId = (await app.inject({
+        method: "POST",
+        url: "/fairs",
+        payload: { companyId, hostCustomerId: customerId, name: "Spring Fair" },
+      })).json<{ id: string }>().id;
+      const invoiceId = (await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-FAIR-API",
+          businessId,
+          customerId,
+          fairId,
+          buyerName: "Visitor",
+          buyerContact: "visitor@example.test",
+          paymentAccount: "CASH",
+          lines: [{ description: "Book", quantity: 2, unitPricePaise: 1500 }],
+        },
+      })).json<{ id: string }>().id;
+      await app.inject({ method: "POST", url: `/invoices/${invoiceId}/finalize` });
+      const report = await app.inject({ method: "GET", url: `/reports/fair-sales?fairId=${fairId}` });
+      expect(report.statusCode).toBe(200);
+      expect(report.json<Array<{ invoiceCount: number; totalPaise: number }>>()[0]).toMatchObject({
+        invoiceCount: 1,
+        totalPaise: 3000,
+      });
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("adds inventory and rejects a sale that would make stock negative", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Stock API Company" } })).json<{ id: string }>().id;
+      const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Stock API Business" } })).json<{ id: string }>().id;
+      const customerId = (await app.inject({ method: "POST", url: "/customers", payload: { companyId, name: "Stock API Customer" } })).json<{ id: string }>().id;
+      const itemId = (await app.inject({ method: "POST", url: "/items", payload: { companyId, name: "Tracked Book", unit: "each", trackStock: true } })).json<{ id: string }>().id;
+      const movement = await app.inject({
+        method: "POST",
+        url: "/inventory/movements",
+        payload: { itemId, movementType: "OPENING", quantity: 1, unitCostPaise: 1200 },
+      });
+      expect(movement.statusCode).toBe(201);
+      const created = await app.inject({
+        method: "POST",
+        url: "/invoices",
+        payload: {
+          number: "INV-STOCK-API",
+          businessId,
+          customerId,
+          paymentAccount: "CASH",
+          lines: [{ itemId, description: "Tracked Book", quantity: 2, unitPricePaise: 2500 }],
+        },
+      });
+      const invoiceId = created.json<{ id: string }>().id;
+      const finalized = await app.inject({ method: "POST", url: `/invoices/${invoiceId}/finalize` });
+      expect(finalized.statusCode).toBe(400);
+      expect(finalized.json()).toEqual({ error: `Insufficient stock for item ${itemId}.` });
+      const stock = await app.inject({ method: "GET", url: "/inventory/stock" });
+      expect(stock.json<Array<{ quantity: number }>>()[0]?.quantity).toBe(1);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+});
+
+interface InvoiceResponse {
+  lines: Array<{ itemId?: string; description: string }>;
+}

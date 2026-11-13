@@ -42,7 +42,7 @@
 
 ## 5. Invoices — v1
 - Create direct or Deliver-over-time (switch pre-filled by customer Subscription flag).
-- Lines: item+qty, line discount, document lump-sum discount, extra charges, optional per-line tax, date tokens, MRP shown; **totals exact to paise**.
+- Lines: item+qty, line discount, document lump-sum discount, extra charges, optional per-line tax, date tokens, MRP shown; **totals round to the nearest whole rupee** (≥50 paise up, <50 down; shows amount-before-rounding, round-off adjustment and final total; receipts keep paise).
 - Per-business numbering `INV-001/26-27`, resets each FY; number used on first save; autosave + draft warning.
 - Lifecycle Draft/Issued/Partial/Paid/Cancelled; Overdue/Unpaid calculated; edit keeps old version; cancel reverses + returns stock; receive payment on header.
 - Bulk actions + Excel list export; bulk Mark paid; delete Admin-only.

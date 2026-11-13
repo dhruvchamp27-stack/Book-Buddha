@@ -1,0 +1,32 @@
+{
+  "name": "book-buddha",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first accounting application for Book Buddha",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "build:web": "vite build",
+    "dev:web": "vite",
+    "start:api": "node dist/api/main.js",
+    "test": "vitest run --root .",
+    "test:watch": "vitest --root ."
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.12.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  }
+}

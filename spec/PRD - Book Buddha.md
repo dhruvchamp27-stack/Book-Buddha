@@ -63,7 +63,7 @@ A general-purpose, double-entry accounting app run as a local web app on one PC 
 - Required: customer + at least one line with a quantity. Fields: invoice date (today default); due date (30 days default, changeable/clearable); printed terms/notes + internal notes; PO number (warns on reuse); custom fields; project (fair); tags; **Deliver now / Deliver over time** switch (pre-filled by the customer Subscription flag).
 - Numbering `INV-001/26-27` per-business, resets each FY; next number shown on open, used up on first save (even as a draft).
 - Autosave on; leaving an unfinalised autosaved draft warns every time.
-- Lines: item + qty (price fills, editable); line discount + document lump-sum discount; extra charges (name + amount, e.g. postage/freight); optional per-line tax; date tokens in line text; MRP shown. **Totals exact to paise (not rounded);** amount grouping per Settings. Incomplete rows block the save.
+- Lines: item + qty (price fills, editable); line discount + document lump-sum discount; extra charges (name + amount, e.g. postage/freight); optional per-line tax; date tokens in line text; MRP shown. **Invoice/quotation totals round to the nearest whole rupee** (≥50 paise up, <50 down); the document shows amount-before-rounding, the round-off adjustment and the final total; **actual receipts keep paise**. Amount grouping per Settings. Incomplete rows block the save.
 - Save is all-or-nothing after pre-checks. Deliver-now posts the sale (+ stock/COGS for tracked direct); Deliver-over-time posts to Unearned Revenue. Short stock blocked with "Add stock".
 - Lifecycle: Draft/Issued/Partial/Paid/Cancelled; Overdue/Unpaid calculated (no due date ⇒ never overdue). Edit a finalised invoice keeps the old version. Cancel reverses the sale and returns stock. Receive payment on the header.
 - Bulk actions (Invoice-Ninja set) + Excel export of the list; delete Admin-only; bulk Mark paid records a real payment each.
@@ -149,7 +149,7 @@ Books always balance (Trial Balance matches); known-answer test (your hand-worke
 **CA:** principal vs agent (full sale value vs margin) and GST classification/timing for the magazine resale. **Lawyer:** buyers' personal data (India DPDP Rules 2025, staged start); and before giving away or selling the app. **GST:** magazine scope recorded as "Exempt" — unconfirmed.
 
 **Reconciliation / to confirm:**
-1. **Rounding conflict:** design doc (source of truth, 9 Nov) = totals exact to paise, not rounded. Magazine PRD v4 (30 Sep) = round invoice/quote totals to the nearest whole rupee. This PRD uses exact paise; whole-rupee rounding is treated as **superseded** pending your confirmation.
+1. **Rounding — resolved 12 Nov 2026:** invoice/quotation totals round to the nearest whole rupee (≥50 paise up, <50 down), showing amount-before-rounding, the round-off adjustment and the final total; actual receipts keep paise. Adopted from Magazine PRD v4; design doc, APP_FLOW and Features List updated to match.
 2. **Custom fields coverage:** confirmed on invoices/bills/items/customers/reports; quotations/credit notes/challans/POs not yet confirmed.
 3. **Dashboard/Home content, customer financial-summary panel, "Save & add another" on customers** — undecided (see APP_FLOW gaps).
 4. **Scale numbers** — design doc states none; magazine-PRD figures carried as a reference only.
