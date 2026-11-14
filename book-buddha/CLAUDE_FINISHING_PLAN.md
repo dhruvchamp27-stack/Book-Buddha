@@ -9,7 +9,7 @@ without losing context.
 Work only in:
 
 ```text
-D:\dhruv-book-accounting-app\book-buddha
+D:\dhruv-book-accounting-app\Book-Buddha-github\book-buddha
 ```
 
 The project is a TypeScript offline-first accounting application using:
@@ -22,14 +22,121 @@ The project is a TypeScript offline-first accounting application using:
 - Vite
 - Vitest
 
+The Git repository root is:
+
+```text
+D:\dhruv-book-accounting-app\Book-Buddha-github
+```
+
+The root repository contains the approved product specification and planning
+documents. The nested `book-buddha/` folder contains the current prototype.
+Do not confuse the prototype's implemented subset with the full target product.
+
+## 1A. Source-of-truth order
+
+When documents disagree, use this order:
+
+1. `spec/Design Document - Book Buddha (9 Nov 2026).md`
+2. `spec/APP_FLOW.md`
+3. `spec/PRD - Book Buddha.md`
+4. `spec/Features List - Book Buddha.md`
+5. `plan/Decisions - 9 Nov 2026 (the 15 questions).md`
+6. `plan/Build phase plan - Book Buddha (8 Nov 2026).md`
+7. `ARCHITECTURE_AND_DATABASE.md`
+8. This finishing plan
+9. Existing prototype code
+
+The specification is the target. Existing code is evidence of current
+progress, not permission to reduce the target scope. If a target behavior is
+not yet implemented, build it rather than documenting it as complete.
+
+The fixed product rules are:
+
+- Automatic balanced double-entry accounting.
+- A read-only, tamper-evident audit log.
+- Cancel-with-reversal for posted records.
+
+The build method is vertical slices:
+
+```text
+flow review -> mini-spec -> mini build plan -> build -> test
+-> hand-worked acceptance figures -> user-facing acceptance -> next slice
+```
+
+Do not implement the complete application in one unverified pass.
 ## 2. Product goal
 
 Book Buddha is intended for small businesses and non-accountants. It must
 provide simple workflows while preserving reliable, balanced, auditable
 double-entry accounting.
 
-The application should work locally/offline and eventually be packaged as a
-Windows desktop application.
+The application is a local web app on one PC with one company and one database
+file per installation. It should work offline by default and eventually be
+packaged as a Windows desktop application. A book fair is a normal
+customer-linked Project type, not a hardcoded special accounting system.
+
+The completed Phase 1 product must cover the approved v1 scope:
+
+- Company, businesses, shared chart of accounts, numbering, financial years,
+  and opening balances.
+- Admin login, sessions, lockout, and password recovery.
+- Customers, customer merge, contacts, addresses, credit ledgers, and
+  attachments.
+- Items, per-item stock tracking, FIFO, price history, supplier pricing, and
+  low-stock thresholds.
+- Invoices, quotations, credit notes, challans, recurring invoices, bills,
+  expenses, and purchase orders.
+- Payments, split allocation, advances, refunds, returns, write-offs, and
+  supplier payments.
+- Projects/fairs, buyer details, fair stock, fair P&L, and incentive expenses.
+- Subscription/deferred-revenue workflows using linked challans.
+- Fixed reports plus the simple report builder.
+- Tax, custom fields, tags, notes, import/export, backup/restore, settings,
+  audit log, and technical error log.
+
+Phase 2 is separate and begins only after the Phase 1 Admin MVP is accepted:
+scoped invoicing-only users on other devices on the same local network.
+
+## 2A. Updated repository reality
+
+The cloned repository currently contains:
+
+- Approved specification, app flow, PRD, feature list, decisions, build plan,
+  handoffs, prompts, references, and testing notes at the repository root.
+- A nested TypeScript/SQLite/Fastify/React prototype in `book-buddha/`.
+- A current prototype architecture/database description at
+  `ARCHITECTURE_AND_DATABASE.md`.
+
+The prototype currently contains:
+
+- Companies, businesses, customers, items, fairs.
+- Draft, quotation, finalized, and cancelled invoices.
+- Invoice lines, invoice dates, due dates, discounts, extra charges, notes,
+  terms, GST, cash/accrual basis, payments, receivables, and ageing.
+- FIFO stock movements, stock balances, COGS, and cancellation restoration.
+- Trial Balance, P&L, Balance Sheet, General Ledger, fair sales, and inventory
+  reports.
+- Backend credit notes and item-linked sales returns.
+- React/Vite UI, Fastify API, SQLite persistence, Vitest tests, and additive
+  prototype migrations.
+
+The prototype is not yet a finished product. Treat all of the following as
+missing until implemented and verified:
+
+- Credit-note frontend and dedicated credit-note reports.
+- Formal company setup, chart of accounts, numbering, opening balances, and
+  financial-year locking.
+- Suppliers, purchases, purchase tax, expenses, payables, and purchase
+  returns.
+- Challans, subscriptions, deferred revenue, and settlements.
+- Recurring invoices.
+- Payments across multiple invoices, advances, refunds, and write-offs.
+- Bank/UPI/cheque accounts, transfers, and reconciliation.
+- Complete reports and SQL-side filters.
+- Import/export, attachments, backup/restore, and integrity verification.
+- Authentication, password hashing, sessions, lockout, and authorization.
+- Tamper-evident audit hashing and structured technical logging.
+- Responsive production UI, print/PDF output, and desktop packaging.
 
 ## 3. Non-negotiable accounting rules
 
@@ -1072,6 +1179,197 @@ At the end of every session or before context/credit limits:
 Do not create a second competing progress document. Keep the durable status in
 `IMPLEMENTATION_PROGRESS.md` and the durable implementation rules in this
 plan.
+
+## 25B. Full-project completion roadmap
+
+Implement the following phases in order. A phase is complete only when its
+backend, API, UI, reports, tests, migration path, and documentation are
+complete.
+
+### Phase 0 - Baseline and decisions
+
+- Read the root `spec/`, `plan/`, `handoffs/`, and
+  `ARCHITECTURE_AND_DATABASE.md`.
+- Run the current prototype tests and builds.
+- Record baseline results in `IMPLEMENTATION_PROGRESS.md`.
+- Confirm technology, coding agent, installation/launch, and test-environment
+  decisions from the build plan.
+- Create a migration/version strategy before adding more tables.
+- Preserve the current prototype in a working branch or tagged baseline.
+
+Acceptance:
+
+- The current code builds and tests from the cloned repository.
+- Target scope and known gaps are recorded.
+- No implementation decision is silently invented.
+
+### Phase 1 - Foundation and security
+
+- Add formal migrations and startup schema validation.
+- Add company setup, businesses, shared chart of accounts, numbering sequences,
+  financial years, and opening balances.
+- Add Admin setup, password hashing, login/logout, session expiry, lockout,
+  password change, and protected routes.
+- Add actor-aware audit events and structured system logs.
+
+Acceptance:
+
+- A new company completes first-run setup offline.
+- Opening balances create balanced journals.
+- Unauthorized requests are rejected at API and repository boundaries.
+- A locked period rejects ordinary changes.
+
+### Phase 2 - Customers, items, and inventory
+
+- Expand customers with classification, contacts, addresses, duplicate
+  warnings, merge/alias handling, credit ledgers, custom fields, tags, and
+  attachments.
+- Expand items with prices, MRP, account links, duplicate keys, supplier
+  pricing, thresholds, price history, and images.
+- Implement FIFO layers, allocations, restoration, project dimensions, and
+  stock reservation for drafts.
+
+Acceptance:
+
+- Customer merge changes identity links without changing journal entries.
+- Tracked stock cannot become negative.
+- FIFO quantity and value reconcile after purchases, sales, returns, and
+  cancellation.
+
+### Phase 3 - Sales documents and money
+
+- Finish invoices with line-level tax, inclusive/exclusive tax, whole-rupee
+  rounding, date tokens, numbering, version history, autosave, attachments,
+  status lifecycle, and print data.
+- Finish quotations, credit notes, sales returns, and challans.
+- Add recurring invoice templates and safe draft generation.
+- Add customer payments, multi-invoice allocation, advances, refunds,
+  write-offs, and immutable payment corrections.
+
+Acceptance:
+
+- Hand-worked totals match system totals for tax, discount, rounding, and
+  partial payments.
+- Every posted action has a balanced journal and an audit event.
+- Cancellation returns stock and does not reuse document numbers.
+
+### Phase 4 - Purchasing and subscriptions
+
+- Add suppliers, supplier statements, purchase orders, bills, expenses,
+  purchase tax, supplier payments, purchase returns, and payables ageing.
+- Add deferred revenue, subscription profiles, rates, linked challans,
+  delivery recognition, period settlement, refunds, carry-forward, and
+  balance-due invoices.
+- Keep unresolved CA/legal treatment visible and configurable; do not
+  hardcode an unapproved conclusion.
+
+Acceptance:
+
+- Input tax is separate from output tax.
+- Inventory purchases, expense bills, supplier payments, and returns balance.
+- Subscription revenue and COGS follow approved delivery/settlement rules.
+
+### Phase 5 - Projects/fairs and reporting
+
+- Make Projects first-class and keep fairs as a project type.
+- Add host customer, buyer details, fair invoicing, Save & New, project
+  stock/COGS, incentive expenses, and project P&L.
+- Implement fixed reports and the simple report builder.
+- Add date, business, project/fair, customer, supplier, item, tax, account,
+  payment, and status filters in SQL.
+- Add cash and accrual report modes; cash reports use payment allocations.
+
+Acceptance:
+
+- Per-business and combined reports reconcile to the general ledger.
+- Project P&L reconciles to project-tagged journals.
+- Filters change query results, not only visible rows.
+
+### Phase 6 - Import, export, backup, and documents
+
+- Implement two-phase CSV/XLSX imports with mapping, preview, validation,
+  error rows, and atomic commit.
+- Implement CSV/JSON/XLSX/PDF exports for documents, master data, stock,
+  journals, and reports.
+- Add print-friendly invoice, quote, credit-note, and challan views.
+- Add PDF generation without private notes.
+- Add attachments with safe paths, MIME/size validation, hashes, and backup
+  inclusion choices.
+- Add SQLite backup, restore preview, safety backup, manifest, hash/integrity
+  verification, and attachment handling.
+
+Acceptance:
+
+- Invalid imports never partially change financial data.
+- Restoring a verified backup reproduces report figures.
+- Printed output matches the stored document snapshot.
+
+### Phase 7 - Production UX and desktop delivery
+
+- Complete dashboard, search, pagination, saved columns, status filters,
+  loading/empty/error states, confirmations, unsaved-change warnings,
+  accessible labels, keyboard accelerators, and responsive tablet layouts.
+- Add settings for themes, invoice designs, numbering, tax, fields, tags,
+  payments, backups, and localization.
+- Package with Tauri for Windows, including app-data migration, native
+  dialogs, printing, backup integration, safe uninstall, and update strategy.
+- Test install, upgrade, backup, restore, and clean-machine startup.
+
+Acceptance:
+
+- A non-technical user can install, create a company, enter a sale, receive a
+  payment, print an invoice, view reports, and back up the database.
+- The desktop package starts without a developer terminal.
+
+### Phase 8 - Phase 2 scoped invoicing users
+
+Only begin after Phase 1 is accepted:
+
+- Add invoicing-only accounts and permission matrix.
+- Scope every query to permitted businesses/projects/fairs at the data layer.
+- Support local-network tablet access to the PC.
+- Add conflict handling and recovery for connection loss.
+- Test two devices creating invoices without lost or duplicated records.
+
+## 25C. Database implementation rules for Claude
+
+Use `ARCHITECTURE_AND_DATABASE.md` as the database reference. Prefer a
+normalized target model with a common document header and typed child tables,
+but migrate the prototype incrementally.
+
+Required rules:
+
+1. Do not drop or rewrite existing tables without a tested migration.
+2. Add `schema_migrations` with ordered, idempotent migration identifiers.
+3. Keep foreign keys enabled and test `PRAGMA foreign_key_check`.
+4. Keep money in integer paise and quantities in explicit numeric units.
+5. Store posted accounting snapshots, not only recalculated current values.
+6. Store business/project dimensions on journals and lines for reporting.
+7. Use unique constraints for company-scoped numbers and recurrence keys.
+8. Add indexes for every supported list/report filter.
+9. Keep attachment bytes outside SQLite unless explicitly changed by a later
+   decision.
+10. Run `PRAGMA integrity_check` before declaring backup/restore complete.
+
+## 25D. Definition of "fully fledged ready"
+
+Do not call Book Buddha complete because the prototype builds or because a
+screen exists. The product is ready only when:
+
+- The approved v1 specification is implemented or an explicit deferral is
+  approved and documented.
+- First-run and daily user journeys work without developer-only steps.
+- Cash and accrual reporting are correct and reconcile.
+- Sales, purchases, expenses, payments, tax, inventory, subscriptions, and
+  reversals are balanced.
+- Customer and supplier balances reconcile to journals.
+- Imports, exports, backups, and restores work with realistic data.
+- Authentication and authorization protect all financial routes.
+- Audit events are append-only and hash-chain verification detects tampering.
+- Existing prototype databases migrate safely.
+- UI, API, repository, accounting, migration, and recovery tests pass.
+- Backend, frontend, installer, upgrade, and clean-machine checks pass.
+- README, SETUP, user guide, and handoff files match shipped behavior.
 
 ## 26. Progress handoff rule
 

@@ -16,6 +16,7 @@ Local, offline-first, **double-entry** accounting app for one PC. General-purpos
 | `reference/` | Invoice Ninja inspection + actual app-flow reference (reference only — not the spec) |
 | `prompts/` | Prompts for other AIs / next sessions |
 | `testing/` | Test notes |
+| `ARCHITECTURE_AND_DATABASE.md` | Target architecture, database model, and current prototype comparison |
 
 ## Fixed parts (never bend)
 Double-entry (automatic) · audit log (tamper-evident) · cancel-with-reversal.

@@ -47,11 +47,17 @@ limits are reached. Update it after every meaningful implementation phase.
 
 ## Current handoff
 
-The next safe implementation slice is **print/PDF invoices**. Credit notes now
-support finalized-invoice validation, partial item quantities, duplicate/over-return
-prevention, GST reversal, receivable/cash reduction, FIFO inventory restoration,
-COGS reversal, and audit events through the API. A frontend credit-note workflow
-and dedicated credit-note report still need to be added.
+The repository now has an updated completion plan in
+`CLAUDE_FINISHING_PLAN.md`. It reconciles the nested prototype with the
+approved target specification in the repository root and defines the full
+vertical-slice roadmap, migration rules, acceptance gates, and definition of
+fully fledged readiness.
+
+The next safe implementation slice is **credit-note frontend and report
+support**, followed by recurring invoices. Credit notes already support
+finalized-invoice validation, partial item quantities, duplicate/over-return
+prevention, GST reversal, receivable/cash reduction, FIFO inventory
+restoration, COGS reversal, and audit events through the API.
 
 Do not mark a feature complete until targeted tests and both builds pass:
 
@@ -63,7 +69,9 @@ npm run build:web
 
 ## Notes for the next session
 
-- Work only in `D:\dhruv-book-accounting-app\book-buddha`.
+- Work only in `D:\dhruv-book-accounting-app\Book-Buddha-github\book-buddha`.
+- Treat the root `spec/` documents and `ARCHITECTURE_AND_DATABASE.md` as the
+  target reference; the code in this folder is only a partial prototype.
 - Money is integer paise.
 - Finalized records are immutable; use reversal entries.
 - Existing databases need backward-compatible migrations.
