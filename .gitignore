@@ -1,0 +1,36 @@
+# --- Secrets / credentials (never commit) ---
+.env
+.env.*
+*.env
+config.json
+auth*.json
+reader_settings.bat
+
+# --- Databases & spreadsheets (real financial data) ---
+*.sqlite
+*.sqlite3
+*.db
+*.xlsx
+
+# --- Python ---
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# --- Node / prototype build output ---
+node_modules/
+dist/
+build/
+
+# --- Claude harness: local-only / logs ---
+.claude/logs/
+.claude/settings.local.json
+
+# --- This setup bundle (extracted archive + zip) ---
+_extracted_claude_setup/
+claude-setup-*.zip
+
+# --- OS / editor cruft ---
+Thumbs.db
+.DS_Store

@@ -1,0 +1,81 @@
+# architecture.md — Book Buddha
+
+*On-demand allied file (not auto-loaded). Seeded 2026-11-14 from the repo docs.
+Sources cited inline: DD = spec/Design Document (9 Nov), ARCH = ARCHITECTURE_AND_DATABASE.md,
+PROTO = book-buddha/ prototype files. Anything uncertain is flagged — do not treat
+this as settled truth; see `decisions.md` and `todos.md` for open conflicts.*
+
+## Two realities (read this first)
+The repo holds **two different things** and they do not fully agree:
+1. **Target** — the approved specification (DD, ARCH target sections) for a local,
+   offline-first, one-company accounting app.
+2. **Current prototype** — an earlier working codebase in `book-buddha/` that already
+   implements a subset. (ARCH §1)
+
+Do **not** assume a target screen or table already exists in the prototype. Label work
+as **Target** or **Current prototype**. The README/handoffs say "nothing is built,"
+which is stale — the prototype exists and self-reports passing tests. (conflict, see
+`todos.md`)
+
+## Target architecture (ARCH §3–§4, DD §2)
+Browser UI (React) → local app over HTTP/JSON on localhost. Layers:
+- **Presentation** — React UI (`web/`).
+- **API / auth** — validates ALL input, enforces company/business/project scope,
+  never trusts frontend totals or statuses.
+- **Application / accounting engine** — owns lifecycle, integer-paise math, rounding,
+  tax, cash/accrual, allocations, FIFO, deferred revenue, journal balancing,
+  reversals, FY locks, audit events.
+- **Repository** — every financial operation runs in ONE DB transaction; commit only
+  if all steps succeed.
+- **Storage** — one **SQLite file per company**.
+
+Target module tree (ARCH §4): `src/api`, `src/application/*`, `src/accounting/*`,
+`src/database/*`, `src/security`, `src/audit`, `web/src/*`. ARCH says extract modules
+gradually — avoid a big rewrite.
+
+Target SQLite settings (ARCH §3.5): foreign keys ON, integer paise, ISO
+dates/timestamps, explicit indexes, ordered transactional migrations, integrity
+checks at startup and before backup/restore.
+
+## Technology stack
+- **Target spec:** sets no formal language/framework; names SQLite as the DB and
+  React for UI. Formal stack choice is still officially "pending" (see `todos.md`).
+- **Current prototype (PROTO package.json / tsconfig / vite.config / README):**
+  TypeScript (strict, ES2022, NodeNext) · SQLite via `better-sqlite3` ^13 ·
+  **Fastify** ^5 API · **Zod** ^4 validation · **React 19** + **Vite 7** frontend
+  (web root `web/`, dev proxy `/api` → :3000, frontend :5173) · **Vitest 3** tests ·
+  Node 22+ (24 verified). Scripts: `npm test`, `npm run build` (tsc),
+  `npm run build:web`, `npm run start:api`, `npm run dev:web`. On Windows,
+  `better-sqlite3` needs VS C++ Build Tools.
+- **Desktop packaging:** undecided — Tauri (preferred in REQUIREMENTS) vs Electron
+  (IMPLEMENTATION_PROGRESS). Packaging is last in the delivery order.
+- **PDF/OCR (from Feature Design):** cites pdfplumber / Camelot (Python) and
+  Tesseract / PaddleOCR — note these are Python, while the prototype is TypeScript.
+  Unresolved (see `todos.md`).
+
+## Prototype structure & progress (PROTO/IMPLEMENTATION_PROGRESS.md — self-reported, unverified)
+Top level: `src/` (accounting/types.ts, accounting/engine.ts, database/schema.ts,
+database/repository.ts, api/server.ts, api/main.ts), `web/` (App.tsx), config files,
+README/REQUIREMENTS/SETUP/CLAUDE_FINISHING_PLAN/IMPLEMENTATION_PROGRESS.
+- **Reported done:** SQLite schema + repository + migrations + audit events;
+  companies/businesses/customers/items/fairs; cash/accrual per company;
+  draft/finalised/cancelled/quotation invoices; multi-line invoices; GST
+  CGST/SGST/IGST at invoice level; payments + ageing; FIFO + COGS; Trial Balance,
+  P&L, Balance Sheet, GL, fair & stock reports; quote→draft; credit notes + returns
+  (API). Claims 19 passing tests + successful builds (NOT run/verified here).
+- **Reported not done:** recurring invoices, print/PDF, suppliers, purchase
+  bills/returns, expenses, supplier payments, bank accounts & reconciliation, Cash
+  Flow, filters, consolidated reports, opening balances, CSV/Excel import/export,
+  backup/restore, attachments, auth/roles/sessions/lockout, FY locking, hash-chain
+  audit, versioned migrations, automated backups, desktop packaging.
+
+## Prototype vs spec — known divergences (ARCH §6)
+- One `invoices` table for drafts/quotes/finalised/cancelled (ARCH §6 wants a
+  deliberate choice; target uses a common `documents` header).
+- Hardcoded account codes (CASH, RECEIVABLES, SALES, INVENTORY, COGS, OUTPUT_*).
+- Invoice-level GST vs target's user-named per-line taxes (DD §13.1).
+- Roles in REQUIREMENTS vs spec's Phase-1-Admin-only (DD §15.1).
+- Cash/accrual per company vs spec's per-report (DD §4.5).
+
+*Note: `book-buddha/CLAUDE_FINISHING_PLAN.md` was NOT read and may govern the
+prototype's own next steps — read it before acting on the prototype.*

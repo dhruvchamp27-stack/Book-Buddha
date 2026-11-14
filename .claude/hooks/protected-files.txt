@@ -1,0 +1,25 @@
+# protected-files.txt
+# One pattern per line. Blank lines and lines starting with # are ignored.
+# Shell-glob syntax, matched against the absolute path (forward slashes)
+# AND against the bare filename, so a plain name blocks that file anywhere.
+#
+# Read by protect-files.py (same folder). Blocks Read/Edit/Write/NotebookEdit.
+# It does NOT block Bash -- `cat config.json` still works. See protect-files.py.
+#
+# To let Claude into one of these for a single task, comment the line out
+# with a #, do the work, then put it back.
+
+# --- Secrets. Tripwires so a future .env / credential file cannot be read
+# --- by accident.
+.env
+.env.*
+*.env
+auth_state.json
+config.json
+
+# --- The accounting database holds real financial data. The file tools are
+# --- blocked from reading it directly; use sqlite3 via Bash for schema/queries,
+# --- or comment these out for a single task if you must open the file.
+*.sqlite
+*.sqlite3
+*.db

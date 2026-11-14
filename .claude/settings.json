@@ -1,0 +1,28 @@
+{
+  "enabledMcpjsonServers": ["codebase-memory-mcp"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -ExecutionPolicy Bypass -NoProfile -File \"C:/Users/Admin/Desktop/Book Buddha/.claude/hooks/session-context-hook.ps1\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py \"C:/Users/Admin/Desktop/Book Buddha/.claude/hooks/protect-files.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
