@@ -256,6 +256,19 @@ const authRecoverInput = z.object({
   message: "Provide googleSub or email.",
 });
 
+const reportDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date written as YYYY-MM-DD.");
+/** Period reports (P&L, General Ledger): optional business and date range. */
+const periodReportQuery = z.object({
+  businessId: id.optional(),
+  fromDate: reportDate.optional(),
+  toDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+/** As-at reports (Trial Balance, Balance Sheet): optional business and a single as-at date. */
+const asAtReportQuery = z.object({
+  businessId: id.optional(),
+  asAtDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+
 /** Drops keys whose value is undefined (keeps null, which means "clear"). */
 function definedOnly<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K], undefined> } {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as { [K in keyof T]?: Exclude<T[K], undefined> };
@@ -878,10 +891,15 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   app.get("/reports/inventory-valuation", async () => repository.getInventoryValuation());
   app.get("/reports/low-stock", async () => repository.getLowStockItems());
   app.get("/reports/sales-by-item", async () => repository.getSalesByItem());
-  app.get("/reports/trial-balance", async () => repository.getTrialBalance());
-  app.get("/reports/profit-and-loss", async () => repository.getProfitAndLoss());
-  app.get("/reports/balance-sheet", async () => repository.getBalanceSheet());
-  app.get("/reports/general-ledger", async () => repository.getGeneralLedger());
+  // Optional report filters. No query string = consolidated, all dates (unchanged behaviour).
+  app.get("/reports/trial-balance", async (request) =>
+    repository.getTrialBalance(parseBody(asAtReportQuery, request.query)));
+  app.get("/reports/profit-and-loss", async (request) =>
+    repository.getProfitAndLoss(parseBody(periodReportQuery, request.query)));
+  app.get("/reports/balance-sheet", async (request) =>
+    repository.getBalanceSheet(parseBody(asAtReportQuery, request.query)));
+  app.get("/reports/general-ledger", async (request) =>
+    repository.getGeneralLedger(parseBody(periodReportQuery, request.query)));
   app.get("/reports/receivables", async () => repository.getReceivables());
   app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
   app.get<{ Querystring: { fairId?: string } }>(

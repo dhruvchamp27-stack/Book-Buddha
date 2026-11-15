@@ -379,7 +379,10 @@ export interface GeneralLedgerRow {
   readonly journalEntryId: string;
   readonly sourceId: string;
   readonly sourceType: JournalSourceType;
+  /** Posting timestamp (when the row was written). The ledger is ORDERED by entryDate. */
   readonly date: string;
+  /** Transaction date (YYYY-MM-DD, IST) — what the report is read and filtered by. */
+  readonly entryDate: string;
   readonly description: string;
   readonly isReversal: boolean;
   readonly account: AccountCode;
@@ -515,6 +518,28 @@ interface StockLayer {
   quantity: number;
   unitCostPaise: number;
   sourceId: string | null;
+}
+
+/** Optional filter for period reports (P&L, General Ledger). Omit everything for consolidated, all dates. */
+export interface PeriodReportFilter {
+  readonly businessId?: string;
+  readonly fromDate?: string;
+  readonly toDate?: string;
+}
+
+/** Optional filter for as-at reports (Trial Balance, Balance Sheet): everything with entry_date <= asAtDate. */
+export interface AsAtReportFilter {
+  readonly businessId?: string;
+  readonly asAtDate?: string;
+}
+
+/** The app assumes India Standard Time (UTC+5:30) for every business date. */
+const IST_OFFSET_MS = 330 * 60 * 1000;
+
+/** Calendar date (YYYY-MM-DD) in IST of an ISO instant; defaults to now. The single "today" source. */
+export function istDateOf(instant: string | Date = new Date()): string {
+  const ms = typeof instant === "string" ? Date.parse(instant) : instant.getTime();
+  return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 export class RepositoryValidationError extends Error {
@@ -1246,7 +1271,9 @@ export class AccountingRepository {
         ],
       };
       const inventoryCost = this.restoreCreditNoteStock(note);
-      this.insertJournalEntry(entry);
+      const noteRow = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
+      const dims = { businessId: invoice.businessId, entryDate: istDateOf(noteRow.created_at) };
+      this.insertJournalEntry(entry, dims);
       if (inventoryCost > 0) {
         this.insertJournalEntry({
           id: `je-credit-note-inventory-${note.id}`,
@@ -1254,7 +1281,7 @@ export class AccountingRepository {
           description: `Inventory returned for credit note ${note.number}`,
           lines: [{ account: "INVENTORY", debitPaise: inventoryCost, creditPaise: 0 }, { account: "COGS", debitPaise: 0, creditPaise: inventoryCost }],
           isReversal: false,
-        });
+        }, dims);
       }
       this.db.prepare("UPDATE credit_notes SET status = 'FINALIZED' WHERE id = ?").run(note.id);
       this.insertAuditEvent({ action: "credit_note.finalized", entityId: note.id, occurredAt: new Date().toISOString() });
@@ -1357,9 +1384,10 @@ export class AccountingRepository {
       this.db
         .prepare("UPDATE invoices SET status = ? WHERE id = ?")
         .run(result.invoice.status, invoiceId);
-      this.insertJournalEntry(result.journalEntry);
+      const dims = { businessId: invoice.businessId, entryDate: this.invoiceEntryDate(invoiceId) };
+      this.insertJournalEntry(result.journalEntry, dims);
       if (inventoryCostPaise > 0) {
-        this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, false));
+        this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, false), dims);
       }
       this.insertAuditEvent(result.auditEvent);
       return result.journalEntry;
@@ -1376,9 +1404,11 @@ export class AccountingRepository {
       this.db
         .prepare("UPDATE invoices SET status = ? WHERE id = ?")
         .run(result.invoice.status, invoiceId);
-      this.insertJournalEntry(result.reversalEntry);
+      // A cancellation is its own event, dated the day it happens (never the invoice's date).
+      const dims = { businessId: invoice.businessId, entryDate: istDateOf() };
+      this.insertJournalEntry(result.reversalEntry, dims);
       if (inventoryCostPaise > 0) {
-        this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, true));
+        this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, true), dims);
       }
       this.insertAuditEvent(result.auditEvent);
       return result.reversalEntry;
@@ -1423,7 +1453,7 @@ export class AccountingRepository {
         description: `Payment for invoice ${invoice.number}`,
         isReversal: false,
         lines: paymentLines,
-      });
+      }, { businessId: invoice.businessId, entryDate: istDateOf(result.paidAt) });
       this.insertAuditEvent({
         action: "invoice.payment_received",
         entityId: invoiceId,
@@ -1550,26 +1580,16 @@ export class AccountingRepository {
     return rows.map((row) => this.getJournalEntry(row));
   }
 
-  public getTrialBalance(): readonly TrialBalanceRow[] {
-    const rows = this.db
-      .prepare(
-        `SELECT account, SUM(debit_paise) AS debit_paise, SUM(credit_paise) AS credit_paise
-         FROM journal_lines GROUP BY account ORDER BY account`,
-      )
-      .all() as Array<{
-      account: AccountCode;
-      debit_paise: number;
-      credit_paise: number;
-    }>;
-    return rows.map((row) => ({
-      account: row.account,
-      debitPaise: row.debit_paise,
-      creditPaise: row.credit_paise,
+  public getTrialBalance(filter: AsAtReportFilter = {}): readonly TrialBalanceRow[] {
+    return this.getReportAccountRows(filter).map((row) => ({
+      account: row.account as AccountCode,
+      debitPaise: row.debitPaise,
+      creditPaise: row.creditPaise,
     }));
   }
 
-  public getProfitAndLoss(): ProfitAndLossReport {
-    const rows = this.getReportAccountRows();
+  public getProfitAndLoss(filter: PeriodReportFilter = {}): ProfitAndLossReport {
+    const rows = this.getReportAccountRows(filter);
     const income = rows.filter((row) => row.account === "SALES");
     const expenses = rows.filter((row) => row.account === "COGS" || row.account === "EXPENSE");
     const totalIncomePaise = income.reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
@@ -1583,8 +1603,8 @@ export class AccountingRepository {
     };
   }
 
-  public getBalanceSheet(): BalanceSheetReport {
-    const rows = this.getReportAccountRows();
+  public getBalanceSheet(filter: AsAtReportFilter = {}): BalanceSheetReport {
+    const rows = this.getReportAccountRows(filter);
     const assets = rows.filter((row) =>
       row.account === "CASH" || row.account === "RECEIVABLES" || row.account === "INVENTORY"
       || row.account === "INPUT_CGST" || row.account === "INPUT_SGST" || row.account === "INPUT_IGST");
@@ -1617,20 +1637,23 @@ export class AccountingRepository {
     };
   }
 
-  public getGeneralLedger(): readonly GeneralLedgerRow[] {
+  public getGeneralLedger(filter: PeriodReportFilter = {}): readonly GeneralLedgerRow[] {
+    const { where, params } = this.reportConditions(filter);
     const rows = this.db
       .prepare(
-        `SELECT je.id AS journal_entry_id, je.source_id, je.source_type, je.created_at, je.description,
-                je.is_reversal, jl.account, jl.debit_paise, jl.credit_paise
+        `SELECT je.id AS journal_entry_id, je.source_id, je.source_type, je.created_at, je.entry_date,
+                je.description, je.is_reversal, jl.account, jl.debit_paise, jl.credit_paise
          FROM journal_entries je
          JOIN journal_lines jl ON jl.journal_entry_id = je.id
-         ORDER BY je.created_at, je.id, jl.id`,
+         ${where}
+         ORDER BY je.entry_date, je.created_at, je.id, jl.id`,
       )
-      .all() as Array<{
+      .all(...params) as Array<{
       journal_entry_id: string;
       source_id: string;
       source_type: JournalSourceType;
       created_at: string;
+      entry_date: string | null;
       description: string;
       is_reversal: number;
       account: AccountCode;
@@ -1642,6 +1665,7 @@ export class AccountingRepository {
       sourceId: row.source_id,
       sourceType: row.source_type,
       date: row.created_at,
+      entryDate: row.entry_date ?? row.created_at.slice(0, 10),
       description: row.description,
       isReversal: row.is_reversal === 1,
       account: row.account,
@@ -1650,13 +1674,21 @@ export class AccountingRepository {
     }));
   }
 
-  private insertJournalEntry(entry: JournalEntry): void {
+  /**
+   * The columns are nullable in SQLite (migration v5), so the non-null guarantee for every
+   * NEW entry lives here: businessId and entryDate are required and validated.
+   */
+  private insertJournalEntry(entry: JournalEntry, dimensions: { businessId: string; entryDate: string }): void {
+    if (typeof dimensions.businessId !== "string" || dimensions.businessId.trim() === "") {
+      throw new RepositoryValidationError("A journal entry needs a business.");
+    }
+    this.assertIsoDate("Journal entry date", dimensions.entryDate);
     const now = new Date().toISOString();
     this.db
       .prepare(
-        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type, business_id, entry_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now, entry.sourceType ?? "INVOICE");
+      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now, entry.sourceType ?? "INVOICE", dimensions.businessId, dimensions.entryDate);
     const statement = this.db.prepare(
       "INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES (?, ?, ?, ?)",
     );
@@ -1790,6 +1822,12 @@ export class AccountingRepository {
     return totalCostPaise;
   }
 
+  /** The invoice's own date (plain YYYY-MM-DD), or today in IST when the nullable column is empty. */
+  private invoiceEntryDate(invoiceId: string): string {
+    const row = this.db.prepare("SELECT invoice_date FROM invoices WHERE id = ?").get(invoiceId) as { invoice_date: string | null } | undefined;
+    return row?.invoice_date ?? istDateOf();
+  }
+
   private inventoryJournalEntry(invoice: Invoice, costPaise: number, reversal: boolean): JournalEntry {
     return {
       id: reversal ? `je-inventory-${invoice.id}-reversal` : `je-inventory-${invoice.id}`,
@@ -1871,13 +1909,34 @@ export class AccountingRepository {
     return row.paid_paise;
   }
 
-  private getReportAccountRows(): readonly ReportAccountRow[] {
+  /**
+   * WHERE clause (alias `je` = journal_entries) for a report filter, with bound parameters.
+   * No filter at all yields an empty clause, i.e. consolidated and all dates.
+   */
+  private reportConditions(filter: { businessId?: string; fromDate?: string; toDate?: string; asAtDate?: string }): { where: string; params: string[] } {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.businessId !== undefined) { conditions.push("je.business_id = ?"); params.push(filter.businessId); }
+    if (filter.fromDate !== undefined) { this.assertIsoDate("From date", filter.fromDate); conditions.push("je.entry_date >= ?"); params.push(filter.fromDate); }
+    if (filter.toDate !== undefined) { this.assertIsoDate("To date", filter.toDate); conditions.push("je.entry_date <= ?"); params.push(filter.toDate); }
+    if (filter.asAtDate !== undefined) { this.assertIsoDate("As-at date", filter.asAtDate); conditions.push("je.entry_date <= ?"); params.push(filter.asAtDate); }
+    if (filter.fromDate !== undefined && filter.toDate !== undefined && filter.fromDate > filter.toDate) {
+      throw new RepositoryValidationError("From date cannot be after the to date.");
+    }
+    return { where: conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`, params };
+  }
+
+  private getReportAccountRows(filter: { businessId?: string; fromDate?: string; toDate?: string; asAtDate?: string } = {}): readonly ReportAccountRow[] {
+    const { where, params } = this.reportConditions(filter);
     const rows = this.db
       .prepare(
-        `SELECT account, SUM(debit_paise) AS debit_paise, SUM(credit_paise) AS credit_paise
-         FROM journal_lines GROUP BY account ORDER BY account`,
+        `SELECT jl.account AS account, SUM(jl.debit_paise) AS debit_paise, SUM(jl.credit_paise) AS credit_paise
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.journal_entry_id
+         ${where}
+         GROUP BY jl.account ORDER BY jl.account`,
       )
-      .all() as Array<{
+      .all(...params) as Array<{
       account: AccountCode;
       debit_paise: number;
       credit_paise: number;
@@ -2503,7 +2562,7 @@ export class AccountingRepository {
         taxRateBasisPoints: bill.taxRateBasisPoints,
         paymentAccount: bill.paymentAccount,
       }));
-      this.insertJournalEntry(result.entry);
+      this.insertJournalEntry(result.entry, { businessId: bill.businessId, entryDate: bill.billDate });
       this.db.prepare("UPDATE purchase_bills SET status = 'FINALIZED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.finalized", entityId: bill.id, occurredAt: new Date().toISOString() });
       return result.entry;
@@ -2549,7 +2608,7 @@ export class AccountingRepository {
         });
       }
       const reversal = this.guard(() => reverseEntry(original, `je-bill-${bill.id}-reversal`, `Cancellation of purchase bill ${bill.number}`));
-      this.insertJournalEntry(reversal);
+      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: istDateOf() });
       this.db.prepare("UPDATE purchase_bills SET status = 'CANCELLED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -2663,7 +2722,7 @@ export class AccountingRepository {
         taxRateBasisPoints: expense.taxRateBasisPoints,
         paymentAccount: expense.paymentAccount,
       }));
-      this.insertJournalEntry(result.entry);
+      this.insertJournalEntry(result.entry, { businessId: expense.businessId, entryDate: expense.expenseDate });
       this.db.prepare("UPDATE expenses SET status = 'FINALIZED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.finalized", entityId: expense.id, occurredAt: new Date().toISOString() });
       return result.entry;
@@ -2679,7 +2738,7 @@ export class AccountingRepository {
       }
       const original = this.getSourceJournalEntry(expense.id, "EXPENSE");
       const reversal = this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
-      this.insertJournalEntry(reversal);
+      this.insertJournalEntry(reversal, { businessId: expense.businessId, entryDate: istDateOf() });
       this.db.prepare("UPDATE expenses SET status = 'CANCELLED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.cancelled", entityId: expense.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -2699,11 +2758,11 @@ export class AccountingRepository {
       const doc = input.billId !== undefined
         ? (() => {
             const bill = this.getPurchaseBill(input.billId);
-            return { number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
+            return { businessId: bill.businessId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
           })()
         : (() => {
             const expense = this.getExpense(input.expenseId as string);
-            return { number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
+            return { businessId: expense.businessId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
           })();
       if (doc.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized documents can receive supplier payments.");
       if (doc.paymentAccount !== "PAYABLES") throw new RepositoryValidationError("Only documents payable later can receive supplier payments.");
@@ -2731,7 +2790,7 @@ export class AccountingRepository {
         sourceId,
         description: `Supplier payment for ${doc.number}`,
         amountPaise: payment.amountPaise,
-      })));
+      })), { businessId: doc.businessId, entryDate: istDateOf(payment.paidAt) });
       this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: payment.paidAt });
       return payment;
     })();

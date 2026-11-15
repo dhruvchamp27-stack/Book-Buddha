@@ -476,21 +476,21 @@ describe("migration v4", () => {
       INSERT INTO items (id, company_id, name, unit, track_stock, created_at) VALUES ('it1', 'c1', 'Item', 'each', 1, '2026-01-01');
       INSERT INTO invoices (id, business_id, customer_id, number, payment_account, status, created_at)
         VALUES ('inv1', 'b1', 'cu1', 'INV-1', 'CASH', 'FINALIZED', '2026-01-01');
-      INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at) VALUES ('je1', 'inv1', 'Invoice', 0, '2026-01-01');
-      INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES ('je1', 'CASH', 100, 0), ('je1', 'SALES', 0, 100);
+      INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at) VALUES ('je-inv1', 'inv1', 'Invoice', 0, '2026-01-01');
+      INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES ('je-inv1', 'CASH', 100, 0), ('je-inv1', 'SALES', 0, 100);
       INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at)
         VALUES ('zzz', 'it1', NULL, 'OPENING', 5, 10, '2026-01-01T00:00:00.000Z'), ('aaa', 'it1', NULL, 'OPENING', 3, 20, '2026-01-01T00:00:00.000Z');
       CREATE TRIGGER no_delete_entries BEFORE DELETE ON journal_entries BEGIN SELECT RAISE(ABORT, 'immutable'); END;
     `);
 
-    expect(runMigrations(db)).toEqual([4]);
+    expect(runMigrations(db)).toEqual([4, 5]);
 
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(db.pragma("foreign_key_check")).toEqual([]);
-    expect(db.prepare("SELECT source_type FROM journal_entries WHERE id = 'je1'").get()).toEqual({ source_type: "INVOICE" });
+    expect(db.prepare("SELECT source_type FROM journal_entries WHERE id = 'je-inv1'").get()).toEqual({ source_type: "INVOICE" });
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get()).toEqual({ n: 2 });
     expect((db.prepare("SELECT id FROM stock_movements ORDER BY occurred_at, rowid").all() as Array<{ id: string }>).map((r) => r.id)).toEqual(["zzz", "aaa"]);
-    expect(() => db.prepare("DELETE FROM journal_entries WHERE id = 'je1'").run()).toThrow("immutable");
+    expect(() => db.prepare("DELETE FROM journal_entries WHERE id = 'je-inv1'").run()).toThrow("immutable");
     for (const index of ["idx_journal_entries_source", "idx_journal_entries_source_type", "idx_stock_movements_item", "idx_stock_movements_source"]) {
       expect(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(index)).toBeDefined();
     }

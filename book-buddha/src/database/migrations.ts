@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { applyBaselineSchema } from "./schema.js";
 import { applyPurchasingExpensesSchema } from "./purchasing-schema.js";
+import { applyJournalDimensionsSchema } from "./journal-dimensions-schema.js";
 
 export interface Migration {
   version: number;
@@ -104,6 +105,13 @@ export const migrations: readonly Migration[] = [
     // PRAGMA foreign_keys = OFF (a no-op inside a transaction), so it manages its own.
     transactional: false,
     up: applyPurchasingExpensesSchema,
+  },
+  {
+    version: 5,
+    name: "journal_business_and_date",
+    // Additive: two nullable columns on journal_entries, backfilled from each entry source
+    // document. Default (transactional) so a failed assertion rolls everything back.
+    up: applyJournalDimensionsSchema,
   },
 ];
 
