@@ -16,9 +16,9 @@ describe("migrations", () => {
 
   it("running twice is a no-op", () => {
     const db = new Database(":memory:");
-    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(runMigrations(db)).toEqual([]);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("migration v2 creates the auth tables", () => {
@@ -38,7 +38,7 @@ describe("migrations", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'schema_migrations'").get()).toBeUndefined();
     runMigrations(db);
     expect(db.prepare("SELECT name FROM companies WHERE id = 'c1'").get()).toEqual({ name: "Old Co" });
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("runs migrations in version order, logs them, and rolls back a failing one", () => {

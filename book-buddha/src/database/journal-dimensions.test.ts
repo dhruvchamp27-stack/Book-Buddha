@@ -51,7 +51,7 @@ function columns(db: Database.Database): string[] {
 describe("migration v5: journal business_id and entry_date", () => {
   it("runs clean on a fresh database and adds both columns", () => {
     const db = new Database(":memory:");
-    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(columns(db)).toEqual(expect.arrayContaining(["business_id", "entry_date"]));
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()).toEqual({ n: 0 });
   });
@@ -84,7 +84,7 @@ describe("migration v5: journal business_id and entry_date", () => {
 
     const entriesBefore = db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get();
     const linesBefore = db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get();
-    expect(runMigrations(db)).toEqual([5]);
+    expect(runMigrations(db)).toEqual([5, 6]);
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()).toEqual(entriesBefore);
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get()).toEqual(linesBefore);
 
@@ -181,7 +181,7 @@ describe("migration v5: journal business_id and entry_date", () => {
     seedParties(db);
     addInvoice(db, "inv1", "bizA", "2026-01-10", "2026-01-10T00:00:00.000Z");
     addEntry(db, "je-inv1", "inv1", "INVOICE");
-    expect(runMigrations(db)).toEqual([5]);
+    expect(runMigrations(db)).toEqual([5, 6]);
     const snapshot = db.prepare("SELECT * FROM journal_entries ORDER BY id").all();
     expect(runMigrations(db)).toEqual([]);
     // Body re-run directly (columns already exist) must not error or change anything.

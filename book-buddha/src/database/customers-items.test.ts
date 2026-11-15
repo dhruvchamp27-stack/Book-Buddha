@@ -251,7 +251,7 @@ describe("migration v3", () => {
     db.prepare("INSERT INTO companies (id, name, created_at) VALUES ('c1', 'Co', '2026-01-01')").run();
     db.prepare("INSERT INTO customers (id, company_id, name, created_at) VALUES ('cu1', 'c1', 'Old Customer', '2026-01-01')").run();
     db.prepare("INSERT INTO items (id, company_id, name, unit, created_at) VALUES ('i1', 'c1', 'Old Item', 'each', '2026-01-01')").run();
-    expect(runMigrations(db)).toEqual([3, 4, 5]);
+    expect(runMigrations(db)).toEqual([3, 4, 5, 6]);
     expect(db.prepare("SELECT name, active, customer_number FROM customers WHERE id = 'cu1'").get()).toEqual({ name: "Old Customer", active: 1, customer_number: null });
     expect(db.prepare("SELECT name, active, selling_price_paise FROM items WHERE id = 'i1'").get()).toEqual({ name: "Old Item", active: 1, selling_price_paise: null });
   });

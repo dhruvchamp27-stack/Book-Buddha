@@ -483,7 +483,7 @@ describe("migration v4", () => {
       CREATE TRIGGER no_delete_entries BEFORE DELETE ON journal_entries BEGIN SELECT RAISE(ABORT, 'immutable'); END;
     `);
 
-    expect(runMigrations(db)).toEqual([4, 5]);
+    expect(runMigrations(db)).toEqual([4, 5, 6]);
 
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(db.pragma("foreign_key_check")).toEqual([]);

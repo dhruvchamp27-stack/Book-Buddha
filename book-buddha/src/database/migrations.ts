@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { applyBaselineSchema } from "./schema.js";
 import { applyPurchasingExpensesSchema } from "./purchasing-schema.js";
 import { applyJournalDimensionsSchema } from "./journal-dimensions-schema.js";
+import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 
 export interface Migration {
   version: number;
@@ -112,6 +113,14 @@ export const migrations: readonly Migration[] = [
     // Additive: two nullable columns on journal_entries, backfilled from each entry source
     // document. Default (transactional) so a failed assertion rolls everything back.
     up: applyJournalDimensionsSchema,
+  },
+  {
+    version: 6,
+    name: "project_dimension",
+    // Additive: a nullable (permanently optional) fair_id on journal entries, stock movements,
+    // purchase bills and expenses; journal entries backfilled from their source invoice.
+    // Default (transactional) so a failed gate rolls everything back.
+    up: applyProjectDimensionSchema,
   },
 ];
 
