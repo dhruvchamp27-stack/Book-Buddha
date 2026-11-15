@@ -358,8 +358,8 @@ describe("expenses", () => {
       expect(balance(repository, "PAYABLES")).toBe(-(3 * 1234 + 185 - 1000 + 999));
       expect(balance(repository, "INPUT_IGST")).toBe(185);
       const sheet = repository.getBalanceSheet();
-      // Liability rows carry credit-negative balances, so owed amount = -totalLiabilitiesPaise.
-      expect(sheet.totalAssetsPaise).toBe(-sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
+      // Liability rows are presented credit-normal (positive when owed).
+      expect(sheet.totalAssetsPaise).toBe(sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
       expect(sheet.assets.map((r) => r.account)).toEqual(expect.arrayContaining(["INPUT_CGST", "INPUT_SGST", "INPUT_IGST", "INVENTORY"]));
       expect(sheet.liabilities.map((r) => r.account)).toContain("PAYABLES");
       const pl = repository.getProfitAndLoss();

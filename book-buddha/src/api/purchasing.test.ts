@@ -94,7 +94,7 @@ describe("purchasing & expenses API", () => {
       expect(get("PAYABLES")).toMatchObject({ debitPaise: 3800, creditPaise: 11800 });
       expect(get("EXPENSE")).toMatchObject({ debitPaise: 5000, creditPaise: 5000 });
       const sheet = (await app.inject({ method: "GET", url: "/reports/balance-sheet" })).json<{ totalAssetsPaise: number; totalLiabilitiesPaise: number; totalEquityPaise: number }>();
-      expect(sheet.totalAssetsPaise).toBe(-sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
+      expect(sheet.totalAssetsPaise).toBe(sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
     } finally {
       await app.close();
       repository.close();

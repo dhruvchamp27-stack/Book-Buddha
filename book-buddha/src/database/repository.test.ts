@@ -131,6 +131,41 @@ describe("AccountingRepository", () => {
     }
   });
 
+  it("presents liabilities credit-normal so assets = liabilities + equity with GST and payables", () => {
+    const repository = createRepository();
+    try {
+      const invoice: Invoice = {
+        ...createDraft(repository),
+        paymentAccount: "RECEIVABLES",
+        taxType: "CGST_SGST",
+        taxRateBasisPoints: 1800,
+      };
+      repository.saveDraft(invoice);
+      repository.finalizeInvoice(invoice.id);
+      const business = repository.listBusinesses()[0]!;
+      const supplierId = repository.createSupplier({ companyId: business.companyId, name: "Paper House" });
+      const bill = repository.createPurchaseBill({
+        businessId: business.id,
+        supplierId,
+        number: "PB-BS",
+        billDate: "2026-11-01",
+        paymentAccount: "PAYABLES",
+        lines: [{ description: "Printing", quantity: 1, unitPricePaise: 7000 }],
+      });
+      repository.finalizePurchaseBill(bill.id);
+
+      const sheet = repository.getBalanceSheet();
+      const accounts = sheet.liabilities.map((row) => row.account);
+      expect(accounts).toEqual(expect.arrayContaining(["OUTPUT_CGST", "OUTPUT_SGST", "PAYABLES"]));
+      expect(sheet.liabilities.every((row) => row.balancePaise >= 0)).toBe(true);
+      expect(sheet.liabilities.find((row) => row.account === "PAYABLES")?.balancePaise).toBe(7000);
+      expect(sheet.totalLiabilitiesPaise).toBeGreaterThan(0);
+      expect(sheet.totalAssetsPaise).toBe(sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
+    } finally {
+      repository.close();
+    }
+  });
+
   it("records partial payments and reports the remaining receivable", () => {
     const repository = createRepository();
     try {

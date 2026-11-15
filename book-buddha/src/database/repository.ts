@@ -1626,9 +1626,12 @@ export class AccountingRepository {
     const assets = rows.filter((row) =>
       row.account === "CASH" || row.account === "RECEIVABLES" || row.account === "INVENTORY"
       || row.account === "INPUT_CGST" || row.account === "INPUT_SGST" || row.account === "INPUT_IGST");
-    const liabilities = rows.filter((row) =>
-      row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST"
-      || row.account === "PAYABLES");
+    // Liabilities are credit-normal: present them as credit - debit so owed amounts are positive.
+    const liabilities = rows
+      .filter((row) =>
+        row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST"
+        || row.account === "PAYABLES")
+      .map((row) => ({ ...row, balancePaise: row.creditPaise - row.debitPaise }));
     // Retained earnings = SALES - COGS - EXPENSE (net of debit/credit), so the sheet balances.
     const netProfitPaise = rows
       .filter((row) => row.account === "SALES")
