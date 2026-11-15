@@ -142,6 +142,15 @@ PAYABLES (liability) and the P&L carries EXPENSE.
 
 Slice 6 gates passed: 87/87 vitest tests, tsc exit 0, vite build exit 0.
 
+> **⚠️ SUPERSEDED 2026-11-15 by the accrual-always decision (see `SLICE_7_PLAN.md`).**
+> The owner replaced the per-company cash/accrual model with **accrual-always posting +
+> a Cash/Accrual toggle at report level** (DD §4.5 / QBO). The payment-time deferral
+> described in this section (and the two engine helpers it added) will be **refactored
+> away in Slice 7b** — accrual becomes the only posting path, and cash-basis is a
+> **derived report view** from payment allocations, never a posting restriction. Commit
+> `5576a21` stays in history; its tests get rewritten. The description below is retained
+> as the record of what was built, not as the current design.
+
 **Cash-basis credit purchases (payment-based expense recognition)** is
 **backend-done** (commit `5576a21`, no migration). Cash-basis companies can now
 create/track PAYABLES (credit) bills and expenses; the Slice-6 refusal is reversed.
@@ -170,9 +179,15 @@ source-entry lookup and an empty reversal.
 
 Cash-basis slice gates passed: 93/93 vitest tests, tsc exit 0, vite build exit 0.
 
-The next safe implementation slice is **Slice 7: Projects / subscriptions /
-consolidated and cash-basis reports** (where report-level cash-basis views and the
-liability-sign fix belong).
+The next implementation slice is **Slice 7: Accrual-always books + report foundations**,
+planned in full in `SLICE_7_PLAN.md` and **paused at the plan phase on 2026-11-15**
+(owner resumes the build next session). Order: **7a** Balance-Sheet liability-sign fix ·
+**7b** accrual-always posting refactor (removes the cash-basis branches on both the sales
+and purchase sides, including commit `5576a21`) · **7c** business_id + entry_date on
+`journal_entries` (migration v5 + backfill → per-business/date-filtered and consolidated
+reports) · **7d** Cash/Accrual report toggle, derived from payment allocations (never
+posted). Projects, subscriptions, imports, **banking (bank categorization + bill OCR, its
+own slice)**, cash flow, archive, and audit hardening follow in that order.
 
 Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return
