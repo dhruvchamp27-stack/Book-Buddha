@@ -37,7 +37,7 @@ limits are reached. Update it after every meaningful implementation phase.
 - [ ] PDF report export
 - [ ] Backup and restore
 - [ ] Attachments and document storage
-- [ ] Authentication, password hashing, roles, sessions, and lockout
+- [x] Authentication, password hashing, roles, sessions, and lockout (backend: scrypt app password, single-Admin role, sessions with 1-hr idle expiry, 5-try/15-min lockout, change/recover; login UI + live Google OAuth verification DEFERRED to the UI slice)
 - [ ] Financial-year locking
 - [ ] Strong immutable audit controls
 - [x] Versioned migration system (structured logging: minimal hook only, full wiring deferred)
@@ -76,7 +76,19 @@ PRAGMA foreign_keys, which SQLite ignores inside a transaction. Existing
 databases keep their data. Structured logging is only a minimal optional
 callback; full wiring is deferred.
 
-The next safe implementation slice is **Slice 4: Foundation and authentication**.
+Slice 4 (Foundation and authentication) is **backend-done**. New pure modules
+`src/auth/password.ts` (scrypt hash/verify, ≥8-char letters+numbers policy) and
+`src/auth/session.ts` (token gen + sha256 hash, 1-hr idle expiry, lockout
+constants); migration v2 `auth_foundation` adds `auth_users` (single Admin) and
+`auth_sessions` tables; repository methods `setupAdmin`/`login`/`validateSession`/
+`logout`/`changePassword`/`recoverPassword` (each audited), and `/auth/*` API
+routes (bearer-token). Lockout = 5 wrong tries → 15-min lock; sessions expire
+after 1 hr idle. `recoverPassword` trusts an already-verified Google identity —
+**live Google OAuth verification and all login/session UI are DEFERRED** to the
+later UI slice; until then `/auth/recover` must stay localhost-only. Slice 4 gates
+passed: 58/58 vitest tests, tsc exit 0, vite build exit 0.
+
+The next safe implementation slice is **Slice 5: Customers, items, and inventory**.
 
 Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return

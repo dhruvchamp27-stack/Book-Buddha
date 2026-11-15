@@ -392,6 +392,56 @@ describe("local API", () => {
     }
   });
 
+  it("runs the auth flow: setup, login, session, change-password, logout", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      expect((await app.inject({ method: "GET", url: "/auth/status" })).json()).toEqual({ configured: false, locked: false });
+      expect((await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "weak" } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } })).statusCode).toBe(201);
+      expect((await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } })).statusCode).toBe(400);
+
+      const bad = await app.inject({ method: "POST", url: "/auth/login", payload: { password: "Wrong1234" } });
+      expect(bad.statusCode).toBe(401);
+      const login = await app.inject({ method: "POST", url: "/auth/login", payload: { password: "Secret123" } });
+      expect(login.statusCode).toBe(200);
+      const { token } = login.json<{ token: string }>();
+      const auth = { authorization: `Bearer ${token}` };
+
+      expect((await app.inject({ method: "GET", url: "/auth/session" })).statusCode).toBe(401);
+      expect((await app.inject({ method: "GET", url: "/auth/session", headers: auth })).json()).toMatchObject({ role: "ADMIN" });
+      const changed = await app.inject({
+        method: "POST", url: "/auth/change-password", headers: auth,
+        payload: { currentPassword: "Secret123", newPassword: "NewSecret456" },
+      });
+      expect(changed.statusCode).toBe(200);
+      expect((await app.inject({ method: "POST", url: "/auth/logout", headers: auth })).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/auth/session", headers: auth })).statusCode).toBe(401);
+      expect((await app.inject({ method: "POST", url: "/auth/login", payload: { password: "NewSecret456" } })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("locks the account after repeated wrong passwords (423)", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } });
+      for (let i = 0; i < 5; i++) {
+        await app.inject({ method: "POST", url: "/auth/login", payload: { password: "Wrong1234" } });
+      }
+      const locked = await app.inject({ method: "POST", url: "/auth/login", payload: { password: "Secret123" } });
+      expect(locked.statusCode).toBe(423);
+      expect(locked.json<{ error: string }>().error).toMatch(/locked/i);
+      expect((await app.inject({ method: "GET", url: "/auth/status" })).json()).toMatchObject({ configured: true, locked: true });
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
   it("manages recurring invoice templates and generates drafts", async () => {
     const repository = new AccountingRepository();
     const app = buildApi(repository);

@@ -5,6 +5,7 @@ import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
 import {
   AccountingRepository,
+  AuthenticationError,
   RepositoryValidationError,
 } from "../database/repository.js";
 
@@ -133,6 +134,21 @@ const generateInput = z.object({
   asOfDate: z.string().date().optional(),
 }).default({});
 
+const authSetupInput = z.object({
+  password: z.string().min(1),
+  email: z.string().email().optional(),
+  googleSub: z.string().trim().min(1).optional(),
+});
+const authLoginInput = z.object({ password: z.string().min(1) });
+const authChangePasswordInput = z.object({ currentPassword: z.string().min(1), newPassword: z.string().min(1) });
+const authRecoverInput = z.object({
+  googleSub: z.string().trim().min(1).optional(),
+  email: z.string().email().optional(),
+  newPassword: z.string().min(1),
+}).refine((value) => value.googleSub !== undefined || value.email !== undefined, {
+  message: "Provide googleSub or email.",
+});
+
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (!result.success) {
@@ -164,6 +180,9 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
         })),
       });
     }
+    if (error instanceof AuthenticationError) {
+      return reply.code(error.statusCode).send({ error: error.message });
+    }
     if (error instanceof RepositoryValidationError) {
       return reply.code(400).send({ error: error.message });
     }
@@ -173,6 +192,64 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  // ---- Auth. Token transport: `Authorization: Bearer <token>` header only.
+  // The raw token is returned once by /auth/login; the server stores only its hash.
+  const bearerToken = (header: string | undefined): string => {
+    const match = /^Bearer\s+(\S+)$/i.exec(header ?? "");
+    if (match === null) throw new AuthenticationError("Sign in required.", 401);
+    return match[1] as string;
+  };
+
+  app.get("/auth/status", async () => repository.getAuthStatus());
+
+  app.post("/auth/setup", async (request, reply) => {
+    const input = parseBody(authSetupInput, request.body);
+    const result = repository.setupAdmin({
+      password: input.password,
+      ...(input.email === undefined ? {} : { email: input.email }),
+      ...(input.googleSub === undefined ? {} : { googleSub: input.googleSub }),
+    });
+    return reply.code(201).send({ id: result.userId });
+  });
+
+  app.post("/auth/login", async (request) => {
+    const input = parseBody(authLoginInput, request.body);
+    const { token, expiresAt } = repository.login(input.password);
+    return { token, expiresAt };
+  });
+
+  app.post("/auth/logout", async (request) => {
+    repository.logout(bearerToken(request.headers.authorization));
+    return { ok: true };
+  });
+
+  app.get("/auth/session", async (request) => {
+    const session = repository.validateSession(bearerToken(request.headers.authorization));
+    if (session === null) throw new AuthenticationError("Your session has expired. Please sign in again.", 401);
+    return session;
+  });
+
+  app.post("/auth/change-password", async (request) => {
+    const input = parseBody(authChangePasswordInput, request.body);
+    repository.changePassword({
+      token: bearerToken(request.headers.authorization),
+      currentPassword: input.currentPassword,
+      newPassword: input.newPassword,
+    });
+    return { ok: true };
+  });
+
+  // Caller must have verified the Google identity already (see recoverPassword).
+  app.post("/auth/recover", async (request) => {
+    const input = parseBody(authRecoverInput, request.body);
+    repository.recoverPassword({
+      newPassword: input.newPassword,
+      ...(input.googleSub === undefined ? {} : { googleSub: input.googleSub }),
+      ...(input.email === undefined ? {} : { email: input.email }),
+    });
+    return { ok: true };
+  });
 
   app.get("/companies", async () => repository.listCompanies());
 

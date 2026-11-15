@@ -36,6 +36,34 @@ export const migrations: readonly Migration[] = [
     transactional: false,
     up: applyBaselineSchema,
   },
+  {
+    version: 2,
+    name: "auth_foundation",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS auth_users (
+          id TEXT PRIMARY KEY,
+          role TEXT NOT NULL DEFAULT 'ADMIN' CHECK(role IN ('ADMIN')),
+          email TEXT,
+          google_sub TEXT,
+          password_hash TEXT NOT NULL,
+          failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK(failed_attempts >= 0),
+          locked_until TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES auth_users(id),
+          token_hash TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          expires_at TEXT,
+          revoked_at TEXT
+        );
+      `);
+    },
+  },
 ];
 
 export function runMigrations(

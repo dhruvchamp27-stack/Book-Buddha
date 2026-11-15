@@ -16,9 +16,18 @@ describe("migrations", () => {
 
   it("running twice is a no-op", () => {
     const db = new Database(":memory:");
-    expect(runMigrations(db)).toEqual([1]);
+    expect(runMigrations(db)).toEqual([1, 2]);
     expect(runMigrations(db)).toEqual([]);
-    expect(versions(db)).toEqual([1]);
+    expect(versions(db)).toEqual([1, 2]);
+  });
+
+  it("migration v2 creates the auth tables", () => {
+    const db = new Database(":memory:");
+    runMigrations(db);
+    expect(db.prepare("SELECT name FROM schema_migrations WHERE version = 2").get()).toEqual({ name: "auth_foundation" });
+    for (const table of ["auth_users", "auth_sessions"]) {
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)).toBeDefined();
+    }
   });
 
   it("old-style DB (tables, no migrations row) keeps its data", () => {
@@ -29,7 +38,7 @@ describe("migrations", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'schema_migrations'").get()).toBeUndefined();
     runMigrations(db);
     expect(db.prepare("SELECT name FROM companies WHERE id = 'c1'").get()).toEqual({ name: "Old Co" });
-    expect(versions(db)).toEqual([1]);
+    expect(versions(db)).toEqual([1, 2]);
   });
 
   it("runs migrations in version order, logs them, and rolls back a failing one", () => {

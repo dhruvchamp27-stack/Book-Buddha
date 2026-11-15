@@ -14,6 +14,16 @@ import type {
 import type { AccountingBasis } from "../accounting/types.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
+import { hashPassword, passwordPolicyProblem, verifyPassword } from "../auth/password.js";
+import {
+  generateSessionToken,
+  hashToken,
+  isLocked,
+  isSessionExpired,
+  LOCKOUT_MS,
+  MAX_FAILED_ATTEMPTS,
+  sessionExpiryIso,
+} from "../auth/session.js";
 
 /** Safety cap on catch-up drafts created for one template in a single generate call. */
 const MAX_DRAFTS_PER_TEMPLATE_PER_RUN = 366;
@@ -352,6 +362,26 @@ export class RepositoryValidationError extends Error {
   public constructor(message: string) {
     super(message);
     this.name = "RepositoryValidationError";
+  }
+}
+
+interface AuthUserRow {
+  readonly id: string;
+  readonly email: string | null;
+  readonly google_sub: string | null;
+  readonly password_hash: string;
+  readonly failed_attempts: number;
+  readonly locked_until: string | null;
+}
+
+/** Auth failures that need a specific HTTP status (401 bad credentials/session, 409 not set up, 423 locked). */
+export class AuthenticationError extends RepositoryValidationError {
+  public readonly statusCode: 401 | 409 | 423;
+
+  public constructor(message: string, statusCode: 401 | 409 | 423) {
+    super(message);
+    this.statusCode = statusCode;
+    this.name = "AuthenticationError";
   }
 }
 
@@ -1800,6 +1830,181 @@ export class AccountingRepository {
         );
       }
     }
+  }
+
+  // ---------------------------------------------------------------- auth
+
+  public isAdminConfigured(): boolean {
+    return this.db.prepare("SELECT 1 AS x FROM auth_users LIMIT 1").get() !== undefined;
+  }
+
+  public getAuthStatus(nowIso = new Date().toISOString()): { configured: boolean; locked: boolean; lockedUntil?: string } {
+    const user = this.getAdminRow();
+    if (user === undefined) return { configured: false, locked: false };
+    if (isLocked(user.locked_until, nowIso)) {
+      return { configured: true, locked: true, lockedUntil: user.locked_until as string };
+    }
+    return { configured: true, locked: false };
+  }
+
+  public setupAdmin(input: { password: string; email?: string; googleSub?: string; nowIso?: string }): { userId: string } {
+    if (this.isAdminConfigured()) throw new RepositoryValidationError("An admin account already exists.");
+    this.assertPasswordPolicy(input.password);
+    const now = input.nowIso ?? new Date().toISOString();
+    const userId = randomUUID();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO auth_users (id, role, email, google_sub, password_hash, created_at, updated_at) VALUES (?, 'ADMIN', ?, ?, ?, ?, ?)",
+        )
+        .run(userId, input.email ?? null, input.googleSub ?? null, hashPassword(input.password), now, now);
+      this.insertAuditEvent({ action: "auth.admin_created", entityId: userId, occurredAt: now });
+    })();
+    return { userId };
+  }
+
+  public login(password: string, nowIso = new Date().toISOString()): { token: string; sessionId: string; expiresAt: string } {
+    const user = this.getAdminRow();
+    if (user === undefined) throw new AuthenticationError("No admin account is set up yet.", 409);
+    if (isLocked(user.locked_until, nowIso)) {
+      const minutes = Math.max(1, Math.ceil((Date.parse(user.locked_until as string) - Date.parse(nowIso)) / 60_000));
+      this.insertAuditEvent({ action: "auth.login_blocked_locked", entityId: user.id, occurredAt: nowIso });
+      throw new AuthenticationError(`Account is locked. Try again in ${minutes} minute(s).`, 423);
+    }
+    // A lock that has run out starts a fresh set of attempts.
+    let attempts = user.failed_attempts;
+    if (user.locked_until !== null) attempts = 0;
+
+    if (!verifyPassword(password, user.password_hash)) {
+      attempts += 1;
+      const locks = attempts >= MAX_FAILED_ATTEMPTS;
+      const lockedUntil = locks ? new Date(Date.parse(nowIso) + LOCKOUT_MS).toISOString() : null;
+      this.db.transaction(() => {
+        this.db
+          .prepare("UPDATE auth_users SET failed_attempts = ?, locked_until = ?, updated_at = ? WHERE id = ?")
+          .run(attempts, lockedUntil, nowIso, user.id);
+        if (locks) this.insertAuditEvent({ action: "auth.account_locked", entityId: user.id, occurredAt: nowIso });
+        this.insertAuditEvent({ action: "auth.login_failed", entityId: user.id, occurredAt: nowIso });
+      })();
+      if (locks) {
+        throw new AuthenticationError(
+          `Incorrect password. Account locked for ${LOCKOUT_MS / 60_000} minutes after ${MAX_FAILED_ATTEMPTS} failed attempts.`,
+          423,
+        );
+      }
+      throw new AuthenticationError(
+        `Incorrect password. ${MAX_FAILED_ATTEMPTS - attempts} attempt(s) remaining before the account locks.`,
+        401,
+      );
+    }
+
+    const token = generateSessionToken();
+    const sessionId = randomUUID();
+    const expiresAt = sessionExpiryIso(nowIso);
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE auth_users SET failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?")
+        .run(nowIso, user.id);
+      this.db
+        .prepare(
+          "INSERT INTO auth_sessions (id, user_id, token_hash, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(sessionId, user.id, hashToken(token), nowIso, nowIso, expiresAt);
+      this.insertAuditEvent({ action: "auth.login_succeeded", entityId: user.id, occurredAt: nowIso });
+    })();
+    return { token, sessionId, expiresAt };
+  }
+
+  /** Returns the session owner and rolls the idle window forward, or null if missing/revoked/idle-expired. */
+  public validateSession(token: string, nowIso = new Date().toISOString()): { userId: string; role: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT s.id AS id, s.user_id AS user_id, s.last_seen_at AS last_seen_at, s.revoked_at AS revoked_at, u.role AS role
+         FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id WHERE s.token_hash = ?`,
+      )
+      .get(hashToken(token)) as
+      | { id: string; user_id: string; last_seen_at: string; revoked_at: string | null; role: string }
+      | undefined;
+    if (row === undefined || row.revoked_at !== null) return null;
+    if (isSessionExpired(row.last_seen_at, nowIso)) {
+      this.db.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE id = ?").run(nowIso, row.id);
+      return null;
+    }
+    this.db
+      .prepare("UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?")
+      .run(nowIso, sessionExpiryIso(nowIso), row.id);
+    return { userId: row.user_id, role: row.role };
+  }
+
+  public logout(token: string, nowIso = new Date().toISOString()): void {
+    const row = this.db
+      .prepare("SELECT id, user_id FROM auth_sessions WHERE token_hash = ? AND revoked_at IS NULL")
+      .get(hashToken(token)) as { id: string; user_id: string } | undefined;
+    if (row === undefined) return;
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE id = ?").run(nowIso, row.id);
+      this.insertAuditEvent({ action: "auth.logout", entityId: row.user_id, occurredAt: nowIso });
+    })();
+  }
+
+  public changePassword(input: { token: string; currentPassword: string; newPassword: string; nowIso?: string }): void {
+    const now = input.nowIso ?? new Date().toISOString();
+    const session = this.validateSession(input.token, now);
+    if (session === null) throw new AuthenticationError("Your session has expired. Please sign in again.", 401);
+    const user = this.getAdminRow();
+    if (user === undefined || user.id !== session.userId) {
+      throw new AuthenticationError("Your session has expired. Please sign in again.", 401);
+    }
+    if (!verifyPassword(input.currentPassword, user.password_hash)) {
+      throw new RepositoryValidationError("Current password is incorrect.");
+    }
+    this.assertPasswordPolicy(input.newPassword);
+    const newHash = hashPassword(input.newPassword);
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE auth_users SET password_hash = ?, updated_at = ? WHERE id = ?").run(newHash, now, user.id);
+      this.db
+        .prepare("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND token_hash <> ?")
+        .run(now, user.id, hashToken(input.token));
+      this.insertAuditEvent({ action: "auth.password_changed", entityId: user.id, occurredAt: now });
+    })();
+  }
+
+  /**
+   * TRUST BOUNDARY: this method TRUSTS that the caller has ALREADY verified the
+   * Google identity out-of-band. It only matches the supplied googleSub/email to
+   * the stored identity; it performs no OAuth or network call. Live Google token
+   * verification needs network + the frontend and is DEFERRED to the later UI
+   * slice. Until then the /auth/recover route must not be exposed beyond localhost.
+   */
+  public recoverPassword(input: { googleSub?: string; email?: string; newPassword: string; nowIso?: string }): void {
+    const now = input.nowIso ?? new Date().toISOString();
+    const user = this.getAdminRow();
+    if (user === undefined) throw new AuthenticationError("No admin account is set up yet.", 409);
+    const matches =
+      input.googleSub !== undefined && user.google_sub !== null
+        ? input.googleSub === user.google_sub
+        : input.email !== undefined && user.email !== null && input.email.toLowerCase() === user.email.toLowerCase();
+    if (!matches) throw new AuthenticationError("The identity does not match the admin account.", 401);
+    this.assertPasswordPolicy(input.newPassword);
+    const newHash = hashPassword(input.newPassword);
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE auth_users SET password_hash = ?, failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?")
+        .run(newHash, now, user.id);
+      this.db.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(now, user.id);
+      this.insertAuditEvent({ action: "auth.password_recovered", entityId: user.id, occurredAt: now });
+    })();
+  }
+
+  private getAdminRow(): AuthUserRow | undefined {
+    return this.db
+      .prepare("SELECT id, email, google_sub, password_hash, failed_attempts, locked_until FROM auth_users ORDER BY created_at, rowid LIMIT 1")
+      .get() as AuthUserRow | undefined;
+  }
+
+  private assertPasswordPolicy(password: string): void {
+    const problem = passwordPolicyProblem(password);
+    if (problem !== null) throw new RepositoryValidationError(problem);
   }
 
   private insertAuditEvent(event: AuditEvent): void {
