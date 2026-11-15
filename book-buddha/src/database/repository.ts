@@ -12,7 +12,117 @@ import type {
   Payment,
 } from "../accounting/types.js";
 import type { AccountingBasis } from "../accounting/types.js";
+import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { initializeSchema } from "./schema.js";
+
+/** Safety cap on catch-up drafts created for one template in a single generate call. */
+const MAX_DRAFTS_PER_TEMPLATE_PER_RUN = 366;
+
+export interface RecurringInvoiceTemplateInput {
+  readonly id?: string;
+  readonly businessId: string;
+  readonly customerId: string;
+  readonly fairId?: string;
+  readonly buyerName?: string;
+  readonly buyerContact?: string;
+  readonly paymentAccount: "CASH" | "RECEIVABLES";
+  readonly taxType?: Invoice["taxType"];
+  readonly taxRateBasisPoints?: number;
+  readonly discountPaise?: number;
+  readonly extraChargePaise?: number;
+  readonly notes?: string;
+  readonly paymentTerms?: string;
+  readonly frequency: RecurrenceFrequency;
+  readonly intervalCount?: number;
+  readonly startDate: string;
+  /** Defaults to startDate. */
+  readonly nextRunDate?: string;
+  readonly endDate?: string;
+  readonly lines: readonly InvoiceLine[];
+}
+
+export interface RecurringInvoiceTemplate {
+  readonly id: string;
+  readonly businessId: string;
+  readonly customerId: string;
+  readonly fairId?: string;
+  readonly buyerName?: string;
+  readonly buyerContact?: string;
+  readonly paymentAccount: "CASH" | "RECEIVABLES";
+  readonly taxType: NonNullable<Invoice["taxType"]>;
+  readonly taxRateBasisPoints: number;
+  readonly discountPaise: number;
+  readonly extraChargePaise: number;
+  readonly notes?: string;
+  readonly paymentTerms?: string;
+  readonly frequency: RecurrenceFrequency;
+  readonly intervalCount: number;
+  readonly startDate: string;
+  readonly nextRunDate: string;
+  readonly endDate?: string;
+  readonly active: boolean;
+  readonly createdAt: string;
+  readonly lines: readonly InvoiceLine[];
+}
+
+export interface RecurringInvoiceTemplateUpdate {
+  readonly active?: boolean;
+  readonly nextRunDate?: string;
+}
+
+export interface UpcomingRecurringInvoiceRow {
+  readonly templateId: string;
+  readonly businessId: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly frequency: RecurrenceFrequency;
+  readonly intervalCount: number;
+  readonly nextRunDate: string;
+  readonly endDate: string | null;
+  /** Expected invoice total (incl. tax) for the next run, in paise. */
+  readonly totalPaise: number;
+}
+
+export interface GenerationFailure {
+  readonly templateId: string;
+  readonly error: string;
+}
+
+export interface GenerateDueInvoicesResult {
+  readonly asOfDate: string;
+  readonly invoices: readonly Invoice[];
+  /** Templates that could not generate; they are left untouched and can be retried. */
+  readonly failures: readonly GenerationFailure[];
+}
+
+interface RecurringTemplateRow {
+  id: string;
+  business_id: string;
+  customer_id: string;
+  fair_id: string | null;
+  buyer_name: string | null;
+  buyer_contact: string | null;
+  payment_account: "CASH" | "RECEIVABLES";
+  tax_type: NonNullable<Invoice["taxType"]>;
+  tax_rate_basis_points: number;
+  discount_paise: number;
+  extra_charge_paise: number;
+  notes: string | null;
+  payment_terms: string | null;
+  frequency: RecurrenceFrequency;
+  interval_count: number;
+  start_date: string;
+  next_run_date: string;
+  end_date: string | null;
+  active: number;
+  created_at: string;
+}
+
+function templateTotalPaise(template: RecurringInvoiceTemplate): number {
+  const subtotal = template.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+  const taxable = subtotal - template.discountPaise + template.extraChargePaise;
+  return taxable + Math.round(taxable * template.taxRateBasisPoints / 10000);
+}
 
 interface InvoiceRow {
   id: string;
@@ -1357,6 +1467,276 @@ export class AccountingRepository {
       creditPaise: row.credit_paise,
       balancePaise: row.debit_paise - row.credit_paise,
     }));
+  }
+
+  public createRecurringInvoiceTemplate(input: RecurringInvoiceTemplateInput): RecurringInvoiceTemplate {
+    const id = input.id ?? randomUUID();
+    const intervalCount = input.intervalCount ?? 1;
+    const nextRunDate = input.nextRunDate ?? input.startDate;
+    const taxType = input.taxType ?? "NONE";
+    const taxRateBasisPoints = input.taxRateBasisPoints ?? 0;
+    const discountPaise = input.discountPaise ?? 0;
+    const extraChargePaise = input.extraChargePaise ?? 0;
+
+    if (!["WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"].includes(input.frequency)) {
+      throw new RepositoryValidationError("Frequency must be WEEKLY, MONTHLY, QUARTERLY or YEARLY.");
+    }
+    if (!Number.isInteger(intervalCount) || intervalCount < 1) {
+      throw new RepositoryValidationError("Interval must be a positive whole number.");
+    }
+    for (const [label, value] of [["Start date", input.startDate], ["Next run date", nextRunDate], ["End date", input.endDate]] as const) {
+      if (value !== undefined && !isValidIsoDate(value)) {
+        throw new RepositoryValidationError(`${label} must be a valid YYYY-MM-DD date.`);
+      }
+    }
+    if (nextRunDate < input.startDate) {
+      throw new RepositoryValidationError("Next run date cannot be before the start date.");
+    }
+    if (input.endDate !== undefined && input.endDate < nextRunDate) {
+      throw new RepositoryValidationError("End date cannot be before the first run date.");
+    }
+    if (input.lines.length === 0) {
+      throw new RepositoryValidationError("A recurring template needs at least one line.");
+    }
+    for (const line of input.lines) {
+      if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+        throw new RepositoryValidationError("Line quantities must be positive whole numbers.");
+      }
+      if (!Number.isInteger(line.unitPricePaise) || line.unitPricePaise < 0) {
+        throw new RepositoryValidationError("Unit prices must be non-negative whole paise.");
+      }
+      if (line.description.trim().length === 0) {
+        throw new RepositoryValidationError("Every line needs a description.");
+      }
+    }
+    if (!Number.isInteger(discountPaise) || discountPaise < 0 || !Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
+      throw new RepositoryValidationError("Discount and extra charge must be non-negative whole paise.");
+    }
+    const subtotal = input.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+    if (discountPaise > subtotal) {
+      throw new RepositoryValidationError("Discount cannot exceed the invoice subtotal.");
+    }
+    if (!Number.isInteger(taxRateBasisPoints) || taxRateBasisPoints < 0 || taxRateBasisPoints > 10000) {
+      throw new RepositoryValidationError("Tax rate must be a whole number between 0% and 100%.");
+    }
+    if (taxType === "NONE" && taxRateBasisPoints !== 0) {
+      throw new RepositoryValidationError("A tax rate requires a tax type.");
+    }
+    if (taxType !== "NONE" && taxRateBasisPoints === 0) {
+      throw new RepositoryValidationError("Tax rate must be positive for a taxable invoice.");
+    }
+
+    const createdAt = new Date().toISOString();
+    this.db.transaction(() => {
+      // Reuse the invoice reference checks (business/customer/fair/items belong together).
+      this.validateInvoiceReferences({
+        id,
+        number: "template-check",
+        businessId: input.businessId,
+        customerId: input.customerId,
+        ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+        paymentAccount: input.paymentAccount,
+        status: "DRAFT",
+        lines: input.lines,
+      });
+      this.db.prepare(
+        "INSERT INTO recurring_invoice_templates (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, payment_account, tax_type, tax_rate_basis_points, discount_paise, extra_charge_paise, notes, payment_terms, frequency, interval_count, start_date, next_run_date, end_date, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+      ).run(
+        id, input.businessId, input.customerId, input.fairId ?? null, input.buyerName ?? null,
+        input.buyerContact ?? null, input.paymentAccount, taxType, taxRateBasisPoints,
+        discountPaise, extraChargePaise, input.notes ?? null, input.paymentTerms ?? null,
+        input.frequency, intervalCount, input.startDate, nextRunDate, input.endDate ?? null, createdAt,
+      );
+      const lineStatement = this.db.prepare(
+        "INSERT INTO recurring_invoice_template_lines (template_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const line of input.lines) {
+        lineStatement.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
+      }
+      this.insertAuditEvent({ action: "recurring_template.created", entityId: id, occurredAt: createdAt });
+    })();
+    return this.getRecurringInvoiceTemplate(id);
+  }
+
+  public listRecurringInvoiceTemplates(filter: { businessId?: string; active?: boolean } = {}): readonly RecurringInvoiceTemplate[] {
+    const conditions: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.businessId !== undefined) {
+      conditions.push("business_id = ?");
+      params.push(filter.businessId);
+    }
+    if (filter.active !== undefined) {
+      conditions.push("active = ?");
+      params.push(filter.active ? 1 : 0);
+    }
+    const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db
+      .prepare(`SELECT * FROM recurring_invoice_templates ${where} ORDER BY next_run_date, id`)
+      .all(...params) as RecurringTemplateRow[];
+    return rows.map((row) => this.mapRecurringTemplate(row));
+  }
+
+  public getRecurringInvoiceTemplate(templateId: string): RecurringInvoiceTemplate {
+    const row = this.db
+      .prepare("SELECT * FROM recurring_invoice_templates WHERE id = ?")
+      .get(templateId) as RecurringTemplateRow | undefined;
+    if (row === undefined) {
+      throw new RepositoryValidationError(`Recurring template ${templateId} was not found.`);
+    }
+    return this.mapRecurringTemplate(row);
+  }
+
+  public updateRecurringInvoiceTemplate(templateId: string, update: RecurringInvoiceTemplateUpdate): RecurringInvoiceTemplate {
+    const current = this.getRecurringInvoiceTemplate(templateId);
+    const nextRunDate = update.nextRunDate ?? current.nextRunDate;
+    const active = update.active ?? current.active;
+    if (update.nextRunDate !== undefined) {
+      if (!isValidIsoDate(update.nextRunDate)) {
+        throw new RepositoryValidationError("Next run date must be a valid YYYY-MM-DD date.");
+      }
+      if (update.nextRunDate < current.startDate) {
+        throw new RepositoryValidationError("Next run date cannot be before the start date.");
+      }
+    }
+    if (active && current.endDate !== undefined && nextRunDate > current.endDate) {
+      throw new RepositoryValidationError("The next run date is after the end date, so the template cannot be active.");
+    }
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE recurring_invoice_templates SET next_run_date = ?, active = ? WHERE id = ?")
+        .run(nextRunDate, active ? 1 : 0, templateId);
+      this.insertAuditEvent({ action: "recurring_template.updated", entityId: templateId, occurredAt: new Date().toISOString() });
+    })();
+    return this.getRecurringInvoiceTemplate(templateId);
+  }
+
+  public deactivateRecurringInvoiceTemplate(templateId: string): RecurringInvoiceTemplate {
+    this.getRecurringInvoiceTemplate(templateId);
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE recurring_invoice_templates SET active = 0 WHERE id = ?").run(templateId);
+      this.insertAuditEvent({ action: "recurring_template.deactivated", entityId: templateId, occurredAt: new Date().toISOString() });
+    })();
+    return this.getRecurringInvoiceTemplate(templateId);
+  }
+
+  public getUpcomingRecurringInvoices(): readonly UpcomingRecurringInvoiceRow[] {
+    return this.listRecurringInvoiceTemplates({ active: true }).map((template) => {
+      const customer = this.db
+        .prepare("SELECT name FROM customers WHERE id = ?")
+        .get(template.customerId) as { name: string } | undefined;
+      return {
+        templateId: template.id,
+        businessId: template.businessId,
+        customerId: template.customerId,
+        customerName: customer?.name ?? "",
+        frequency: template.frequency,
+        intervalCount: template.intervalCount,
+        nextRunDate: template.nextRunDate,
+        endDate: template.endDate ?? null,
+        totalPaise: templateTotalPaise(template),
+      };
+    });
+  }
+
+  /**
+   * Creates a DRAFT invoice for every period that is due (nextRunDate <= asOfDate)
+   * on each active template, and advances nextRunDate in the same transaction as
+   * the draft insert so a period can never be generated twice. Drafts are never
+   * finalized here; the user reviews and finalizes them through the normal flow.
+   */
+  public generateDueInvoices(asOfDate: string = new Date().toISOString().slice(0, 10)): GenerateDueInvoicesResult {
+    if (!isValidIsoDate(asOfDate)) {
+      throw new RepositoryValidationError("As-of date must be a valid YYYY-MM-DD date.");
+    }
+    const dueIds = (this.db
+      .prepare("SELECT id FROM recurring_invoice_templates WHERE active = 1 AND next_run_date <= ? ORDER BY next_run_date, id")
+      .all(asOfDate) as Array<{ id: string }>).map((row) => row.id);
+    const invoices: Invoice[] = [];
+    const failures: GenerationFailure[] = [];
+    for (const templateId of dueIds) {
+      try {
+        invoices.push(...this.db.transaction(() => this.generateForTemplate(templateId, asOfDate))());
+      } catch (error) {
+        failures.push({ templateId, error: error instanceof Error ? error.message : "Generation failed." });
+      }
+    }
+    return { asOfDate, invoices, failures };
+  }
+
+  private generateForTemplate(templateId: string, asOfDate: string): Invoice[] {
+    const template = this.getRecurringInvoiceTemplate(templateId);
+    const created: Invoice[] = [];
+    let runDate = template.nextRunDate;
+    let active = template.active;
+    while (active && runDate <= asOfDate && created.length < MAX_DRAFTS_PER_TEMPLATE_PER_RUN) {
+      const invoice: Invoice = {
+        id: randomUUID(),
+        number: `REC-${template.id.slice(0, 8)}-${runDate}`,
+        businessId: template.businessId,
+        customerId: template.customerId,
+        invoiceDate: runDate,
+        discountPaise: template.discountPaise,
+        extraChargePaise: template.extraChargePaise,
+        ...(template.notes === undefined ? {} : { notes: template.notes }),
+        ...(template.paymentTerms === undefined ? {} : { paymentTerms: template.paymentTerms }),
+        taxType: template.taxType,
+        taxRateBasisPoints: template.taxRateBasisPoints,
+        ...(template.fairId === undefined ? {} : { fairId: template.fairId }),
+        ...(template.buyerName === undefined ? {} : { buyerName: template.buyerName }),
+        ...(template.buyerContact === undefined ? {} : { buyerContact: template.buyerContact }),
+        paymentAccount: template.paymentAccount,
+        status: "DRAFT",
+        lines: template.lines,
+      };
+      this.saveDraft(invoice);
+      this.insertAuditEvent({ action: "invoice.generated_from_template", entityId: invoice.id, occurredAt: new Date().toISOString() });
+      created.push(this.getInvoice(invoice.id));
+      runDate = advanceRunDate(runDate, template.frequency, template.intervalCount, template.startDate);
+      if (template.endDate !== undefined && runDate > template.endDate) {
+        active = false;
+      }
+    }
+    this.db
+      .prepare("UPDATE recurring_invoice_templates SET next_run_date = ?, active = ? WHERE id = ?")
+      .run(runDate, active ? 1 : 0, templateId);
+    if (created.length > 0) {
+      this.insertAuditEvent({ action: "recurring_template.generated", entityId: templateId, occurredAt: new Date().toISOString() });
+    }
+    return created;
+  }
+
+  private mapRecurringTemplate(row: RecurringTemplateRow): RecurringInvoiceTemplate {
+    const lines = this.db
+      .prepare("SELECT item_id, description, quantity, unit_price_paise FROM recurring_invoice_template_lines WHERE template_id = ? ORDER BY id")
+      .all(row.id) as InvoiceLineRow[];
+    return {
+      id: row.id,
+      businessId: row.business_id,
+      customerId: row.customer_id,
+      ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
+      ...(row.buyer_name === null ? {} : { buyerName: row.buyer_name }),
+      ...(row.buyer_contact === null ? {} : { buyerContact: row.buyer_contact }),
+      paymentAccount: row.payment_account,
+      taxType: row.tax_type,
+      taxRateBasisPoints: row.tax_rate_basis_points,
+      discountPaise: row.discount_paise,
+      extraChargePaise: row.extra_charge_paise,
+      ...(row.notes === null ? {} : { notes: row.notes }),
+      ...(row.payment_terms === null ? {} : { paymentTerms: row.payment_terms }),
+      frequency: row.frequency,
+      intervalCount: row.interval_count,
+      startDate: row.start_date,
+      nextRunDate: row.next_run_date,
+      ...(row.end_date === null ? {} : { endDate: row.end_date }),
+      active: row.active === 1,
+      createdAt: row.created_at,
+      lines: lines.map((line): InvoiceLine => ({
+        ...(line.item_id === null ? {} : { itemId: line.item_id }),
+        description: line.description,
+        quantity: line.quantity,
+        unitPricePaise: line.unit_price_paise,
+      })),
+    };
   }
 
   private requireCompany(companyId: string): void {

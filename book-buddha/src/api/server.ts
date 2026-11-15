@@ -102,6 +102,37 @@ const creditNoteInput = z.object({
   lines: z.array(invoiceLine).min(1),
 });
 
+const recurringTemplateInput = z.object({
+  id: id.optional(),
+  businessId: id,
+  customerId: id,
+  paymentAccount: z.enum(["CASH", "RECEIVABLES"]),
+  fairId: id.optional(),
+  buyerName: name.optional(),
+  buyerContact: z.string().trim().min(1).optional(),
+  discountPaise: z.number().int().nonnegative().default(0),
+  extraChargePaise: z.number().int().nonnegative().default(0),
+  notes: z.string().trim().optional(),
+  paymentTerms: z.string().trim().optional(),
+  taxType: z.enum(["NONE", "CGST_SGST", "IGST"]).default("NONE"),
+  taxRateBasisPoints: z.number().int().min(0).max(10000).default(0),
+  frequency: z.enum(["WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"]),
+  intervalCount: z.number().int().positive().default(1),
+  startDate: z.string().date(),
+  nextRunDate: z.string().date().optional(),
+  endDate: z.string().date().optional(),
+  lines: z.array(invoiceLine).min(1),
+});
+const recurringTemplateUpdate = z.object({
+  active: z.boolean().optional(),
+  nextRunDate: z.string().date().optional(),
+}).refine((value) => value.active !== undefined || value.nextRunDate !== undefined, {
+  message: "Provide active and/or nextRunDate.",
+});
+const generateInput = z.object({
+  asOfDate: z.string().date().optional(),
+}).default({});
+
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (!result.success) {
@@ -398,6 +429,67 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     }),
   );
 
+  app.post("/recurring-invoices", async (request, reply) => {
+    const input = parseBody(recurringTemplateInput, request.body);
+    const template = repository.createRecurringInvoiceTemplate({
+      ...(input.id === undefined ? {} : { id: input.id }),
+      businessId: input.businessId,
+      customerId: input.customerId,
+      paymentAccount: input.paymentAccount,
+      ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+      ...(input.buyerName === undefined ? {} : { buyerName: input.buyerName }),
+      ...(input.buyerContact === undefined ? {} : { buyerContact: input.buyerContact }),
+      discountPaise: input.discountPaise,
+      extraChargePaise: input.extraChargePaise,
+      ...(input.notes === undefined ? {} : { notes: input.notes }),
+      ...(input.paymentTerms === undefined ? {} : { paymentTerms: input.paymentTerms }),
+      taxType: input.taxType,
+      taxRateBasisPoints: input.taxRateBasisPoints,
+      frequency: input.frequency,
+      intervalCount: input.intervalCount,
+      startDate: input.startDate,
+      ...(input.nextRunDate === undefined ? {} : { nextRunDate: input.nextRunDate }),
+      ...(input.endDate === undefined ? {} : { endDate: input.endDate }),
+      lines: input.lines.map((line) => ({
+        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+        description: line.description,
+        quantity: line.quantity,
+        unitPricePaise: line.unitPricePaise,
+      })),
+    });
+    return reply.code(201).send(template);
+  });
+
+  app.get<{ Querystring: { businessId?: string; active?: string } }>("/recurring-invoices", async (request) => {
+    const { businessId, active } = request.query;
+    if (active !== undefined && active !== "true" && active !== "false") {
+      throw new RepositoryValidationError("active must be true or false.");
+    }
+    return repository.listRecurringInvoiceTemplates({
+      ...(businessId === undefined ? {} : { businessId }),
+      ...(active === undefined ? {} : { active: active === "true" }),
+    });
+  });
+
+  app.post("/recurring-invoices/generate", async (request) => {
+    const input = parseBody(generateInput, request.body);
+    return repository.generateDueInvoices(input.asOfDate);
+  });
+
+  app.get<{ Params: { templateId: string } }>("/recurring-invoices/:templateId", async (request) =>
+    repository.getRecurringInvoiceTemplate(request.params.templateId));
+
+  app.patch<{ Params: { templateId: string } }>("/recurring-invoices/:templateId", async (request) => {
+    const input = parseBody(recurringTemplateUpdate, request.body);
+    return repository.updateRecurringInvoiceTemplate(request.params.templateId, {
+      ...(input.active === undefined ? {} : { active: input.active }),
+      ...(input.nextRunDate === undefined ? {} : { nextRunDate: input.nextRunDate }),
+    });
+  });
+
+  app.post<{ Params: { templateId: string } }>("/recurring-invoices/:templateId/deactivate", async (request) =>
+    repository.deactivateRecurringInvoiceTemplate(request.params.templateId));
+
   app.get<{ Querystring: { entityId?: string } }>(
     "/audit-events",
     async (request) => repository.listAuditEvents(request.query.entityId),
@@ -410,6 +502,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   app.get("/reports/balance-sheet", async () => repository.getBalanceSheet());
   app.get("/reports/general-ledger", async () => repository.getGeneralLedger());
   app.get("/reports/receivables", async () => repository.getReceivables());
+  app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
   app.get<{ Querystring: { fairId?: string } }>(
     "/reports/fair-sales",
     async (request) => repository.getFairSales(request.query.fairId),

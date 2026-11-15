@@ -139,6 +139,39 @@ export function initializeSchema(db: Database.Database): void {
       occurred_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS recurring_invoice_templates (
+      id TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL REFERENCES businesses(id),
+      customer_id TEXT NOT NULL REFERENCES customers(id),
+      fair_id TEXT REFERENCES fairs(id),
+      buyer_name TEXT,
+      buyer_contact TEXT,
+      payment_account TEXT NOT NULL CHECK(payment_account IN ('CASH', 'RECEIVABLES')),
+      tax_type TEXT NOT NULL DEFAULT 'NONE' CHECK(tax_type IN ('NONE', 'CGST_SGST', 'IGST')),
+      tax_rate_basis_points INTEGER NOT NULL DEFAULT 0 CHECK(tax_rate_basis_points >= 0 AND tax_rate_basis_points <= 10000),
+      discount_paise INTEGER NOT NULL DEFAULT 0 CHECK(discount_paise >= 0),
+      extra_charge_paise INTEGER NOT NULL DEFAULT 0 CHECK(extra_charge_paise >= 0),
+      notes TEXT,
+      payment_terms TEXT,
+      frequency TEXT NOT NULL CHECK(frequency IN ('WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY')),
+      interval_count INTEGER NOT NULL DEFAULT 1 CHECK(interval_count >= 1),
+      start_date TEXT NOT NULL,
+      next_run_date TEXT NOT NULL,
+      end_date TEXT,
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS recurring_invoice_template_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      template_id TEXT NOT NULL REFERENCES recurring_invoice_templates(id) ON DELETE CASCADE,
+      item_id TEXT REFERENCES items(id),
+      description TEXT NOT NULL,
+      quantity INTEGER NOT NULL CHECK(quantity > 0),
+      unit_price_paise INTEGER NOT NULL CHECK(unit_price_paise >= 0)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_recurring_templates_due ON recurring_invoice_templates(active, next_run_date);
     CREATE INDEX IF NOT EXISTS idx_invoices_business ON invoices(business_id);
     CREATE INDEX IF NOT EXISTS idx_journal_entries_source ON journal_entries(source_id);
     CREATE INDEX IF NOT EXISTS idx_audit_events_entity ON audit_events(entity_id);

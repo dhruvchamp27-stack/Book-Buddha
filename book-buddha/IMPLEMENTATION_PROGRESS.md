@@ -23,7 +23,7 @@ limits are reached. Update it after every meaningful implementation phase.
 ## Not yet implemented
 
 - [x] Credit notes and item-linked sales returns (API/repository, GST and inventory reversal, frontend UI, and sales-returns report)
-- [ ] Recurring invoice templates and generation
+- [x] Recurring invoice templates and generation (API, repository, and due-invoice generation are done; frontend UI is DEFERRED to the later UI phase)
 - [ ] Print/PDF invoices
 - [ ] Suppliers and supplier statements
 - [ ] Purchase bills, purchase taxes, and purchase returns
@@ -60,8 +60,14 @@ lines with quantities capped at returnable, create draft, finalize) and a
 `GET /credit-notes?invoiceId=&status=`. Slice 1 gates passed: 21/21 vitest
 tests, tsc exit 0, and vite build exit 0.
 
-The next safe implementation slice is **Slice 2: recurring invoice templates
-and generation**. Credit notes already support
+Recurring invoice templates are **backend-done** (Slice 2 of the finish plan):
+new template tables, `src/accounting/recurrence.ts` date cadence helpers,
+repository create/list/update/deactivate and `generateDueInvoices` (draft
+invoices, atomic and idempotent), and the `/recurring-invoices` API routes.
+The frontend UI is **DEFERRED** to the later UI phase. Slice 2 gates passed:
+32/32 vitest tests, tsc exit 0, and vite build exit 0.
+
+The next safe implementation slice is **Slice 3: formal/versioned migrations**. Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return
 prevention, GST reversal, receivable/cash reduction, FIFO inventory
 restoration, COGS reversal, and audit events through the API.

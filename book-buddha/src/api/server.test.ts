@@ -391,6 +391,58 @@ describe("local API", () => {
       repository.close();
     }
   });
+
+  it("manages recurring invoice templates and generates drafts", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Rec Co" } })).json<{ id: string }>().id;
+      const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Rec Biz" } })).json<{ id: string }>().id;
+      const customerId = (await app.inject({ method: "POST", url: "/customers", payload: { companyId, name: "Rec Cust" } })).json<{ id: string }>().id;
+
+      const bad = await app.inject({
+        method: "POST", url: "/recurring-invoices",
+        payload: { businessId, customerId, paymentAccount: "CASH", frequency: "DAILY", startDate: "2026-01-01", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }] },
+      });
+      expect(bad.statusCode).toBe(400);
+
+      const created = await app.inject({
+        method: "POST", url: "/recurring-invoices",
+        payload: { businessId, customerId, paymentAccount: "CASH", frequency: "MONTHLY", startDate: "2026-01-10", lines: [{ description: "Subscription", quantity: 1, unitPricePaise: 50000 }] },
+      });
+      expect(created.statusCode).toBe(201);
+      const templateId = created.json<{ id: string }>().id;
+
+      expect((await app.inject({ method: "GET", url: `/recurring-invoices?businessId=${businessId}&active=true` })).json()).toHaveLength(1);
+      expect((await app.inject({ method: "GET", url: `/recurring-invoices/${templateId}` })).json()).toMatchObject({ nextRunDate: "2026-01-10", active: true });
+      expect((await app.inject({ method: "GET", url: "/reports/upcoming-recurring-invoices" })).json()).toEqual([
+        expect.objectContaining({ templateId, totalPaise: 50000 }),
+      ]);
+
+      const generated = await app.inject({ method: "POST", url: "/recurring-invoices/generate", payload: { asOfDate: "2026-02-10" } });
+      expect(generated.statusCode).toBe(200);
+      const body = generated.json<{ invoices: Array<{ id: string; status: string; invoiceDate: string }>; failures: unknown[] }>();
+      expect(body.invoices.map((invoice) => [invoice.status, invoice.invoiceDate])).toEqual([["DRAFT", "2026-01-10"], ["DRAFT", "2026-02-10"]]);
+      expect(body.failures).toEqual([]);
+      expect((await app.inject({ method: "GET", url: `/recurring-invoices/${templateId}` })).json()).toMatchObject({ nextRunDate: "2026-03-10" });
+      expect((await app.inject({ method: "GET", url: "/invoices" })).json()).toHaveLength(2);
+
+      expect((await app.inject({ method: "POST", url: `/invoices/${body.invoices[0]!.id}/finalize` })).statusCode).toBe(200);
+
+      expect((await app.inject({ method: "PATCH", url: `/recurring-invoices/${templateId}`, payload: {} })).statusCode).toBe(400);
+      const patched = await app.inject({ method: "PATCH", url: `/recurring-invoices/${templateId}`, payload: { nextRunDate: "2026-06-10" } });
+      expect(patched.json()).toMatchObject({ nextRunDate: "2026-06-10" });
+      const deactivated = await app.inject({ method: "POST", url: `/recurring-invoices/${templateId}/deactivate` });
+      expect(deactivated.json()).toMatchObject({ active: false });
+      const noBody = await app.inject({ method: "POST", url: "/recurring-invoices/generate" });
+      expect(noBody.statusCode).toBe(200);
+      expect(noBody.json<{ invoices: unknown[] }>().invoices).toEqual([]);
+      expect((await app.inject({ method: "GET", url: "/recurring-invoices/nope" })).statusCode).toBe(400);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
 });
 
 interface InvoiceResponse {
