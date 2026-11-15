@@ -493,8 +493,8 @@ export class AccountingRepository {
 
   public listStockMovements(itemId?: string): readonly StockMovement[] {
     const statement = itemId === undefined
-      ? this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at FROM stock_movements ORDER BY occurred_at, id")
-      : this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, id");
+      ? this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at FROM stock_movements ORDER BY occurred_at, rowid")
+      : this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid");
     const rows = (itemId === undefined ? statement.all() : statement.all(itemId)) as Array<{
       id: string; item_id: string; source_id: string | null; movement_type: StockMovement["movementType"];
       quantity_delta: number; unit_cost_paise: number; occurred_at: string;
@@ -1304,7 +1304,7 @@ export class AccountingRepository {
     for (const line of note.lines) {
       if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
       const soldRows = this.db.prepare(
-        "SELECT quantity_delta, unit_cost_paise FROM stock_movements WHERE source_id = ? AND item_id = ? AND movement_type = 'SALE' ORDER BY occurred_at, id",
+        "SELECT quantity_delta, unit_cost_paise FROM stock_movements WHERE source_id = ? AND item_id = ? AND movement_type = 'SALE' ORDER BY occurred_at, rowid",
       ).all(note.invoiceId, line.itemId) as Array<{ quantity_delta: number; unit_cost_paise: number }>;
       let remaining = line.quantity;
       for (const row of soldRows) {
@@ -1410,7 +1410,7 @@ export class AccountingRepository {
 
   private getStockLayers(itemId: string): Array<{ quantity: number; unitCostPaise: number }> {
     const rows = this.db.prepare(
-      "SELECT quantity_delta, unit_cost_paise FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, id",
+      "SELECT quantity_delta, unit_cost_paise FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid",
     ).all(itemId) as Array<{ quantity_delta: number; unit_cost_paise: number }>;
     const layers: Array<{ quantity: number; unitCostPaise: number }> = [];
     for (const row of rows) {
