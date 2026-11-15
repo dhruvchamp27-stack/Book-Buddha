@@ -192,25 +192,74 @@ describe("AccountingRepository", () => {
     }
   });
 
-  it("recognizes cash-basis receivable sales when payment is received", () => {
+  it("recognizes receivable sales in full at finalize for a cash-basis company; payments only move CASH/RECEIVABLES", () => {
     const repository = createRepository();
     try {
       const invoice = { ...createDraft(repository, "CASH"), paymentAccount: "RECEIVABLES" as const };
       repository.saveDraft(invoice);
-      const pending = repository.finalizeInvoice(invoice.id);
+      const posted = repository.finalizeInvoice(invoice.id);
 
-      expect(pending.lines).toHaveLength(0);
-      expect(repository.getProfitAndLoss().totalIncomePaise).toBe(0);
+      expect(posted.lines).toEqual([
+        { account: "RECEIVABLES", debitPaise: 25000, creditPaise: 0 },
+        { account: "SALES", debitPaise: 0, creditPaise: 25000 },
+      ]);
+      expect(repository.getProfitAndLoss().totalIncomePaise).toBe(25000);
 
       repository.recordPayment(invoice.id, 10000);
-      expect(repository.getProfitAndLoss().totalIncomePaise).toBe(10000);
+      expect(repository.getProfitAndLoss().totalIncomePaise).toBe(25000);
       expect(repository.getGeneralLedger()).toEqual(expect.arrayContaining([
         expect.objectContaining({ account: "CASH", debitPaise: 10000 }),
-        expect.objectContaining({ account: "SALES", creditPaise: 10000 }),
+        expect.objectContaining({ account: "RECEIVABLES", creditPaise: 10000 }),
       ]));
+      const payment = repository.listJournalEntries().find((entry) => entry.id.startsWith("je-payment-"));
+      expect(payment?.lines).toEqual([
+        { account: "CASH", debitPaise: 10000, creditPaise: 0 },
+        { account: "RECEIVABLES", debitPaise: 0, creditPaise: 10000 },
+      ]);
+
+      // A part-paid cash-basis invoice follows the ordinary accrual cancellation rules.
+      const cancelled = repository.cancelInvoice(invoice.id);
+      expect(cancelled.isReversal).toBe(true);
+      expect(cancelled.lines).toEqual([
+        { account: "RECEIVABLES", debitPaise: 0, creditPaise: 25000 },
+        { account: "SALES", debitPaise: 25000, creditPaise: 0 },
+      ]);
     } finally {
       repository.close();
     }
+  });
+
+  it("posts identical journal lines for a part-paid GST receivable invoice on a CASH-basis and an ACCRUAL-basis company", () => {
+    const run = (basis: "CASH" | "ACCRUAL"): string[] => {
+      const repository = createRepository();
+      try {
+        const invoice = {
+          ...createDraft(repository, basis),
+          paymentAccount: "RECEIVABLES" as const,
+          taxType: "CGST_SGST" as const,
+          taxRateBasisPoints: 1800,
+        };
+        repository.saveDraft(invoice);
+        repository.finalizeInvoice(invoice.id);
+        repository.recordPayment(invoice.id, 10000);
+        repository.recordPayment(invoice.id, 1);
+        return repository.listJournalEntries()
+          .map((entry) => JSON.stringify({
+            description: entry.description,
+            sourceType: entry.sourceType ?? null,
+            isReversal: entry.isReversal,
+            lines: entry.lines.map((line) => [line.account, line.debitPaise, line.creditPaise]),
+          }))
+          .sort();
+      } finally {
+        repository.close();
+      }
+    };
+    const cash = run("CASH");
+    const accrual = run("ACCRUAL");
+    // 1 finalize entry + 2 payment entries
+    expect(cash).toHaveLength(3);
+    expect(cash).toEqual(accrual);
   });
 
   it("links fairs to their host customer and invoice", () => {

@@ -3,6 +3,10 @@ export type AccountCode =
   | "OUTPUT_CGST" | "OUTPUT_SGST" | "OUTPUT_IGST"
   | "PAYABLES" | "INPUT_CGST" | "INPUT_SGST" | "INPUT_IGST" | "EXPENSE";
 export type InvoiceTaxType = "NONE" | "CGST_SGST" | "IGST";
+/**
+ * A company's stored reporting preference ONLY. Posting is ALWAYS accrual regardless of this
+ * value; it is the default for the (sub-slice 7d) report-level Cash/Accrual toggle. Do not remove.
+ */
 export type AccountingBasis = "CASH" | "ACCRUAL";
 
 export type InvoiceStatus = "DRAFT" | "QUOTATION" | "FINALIZED" | "CANCELLED";

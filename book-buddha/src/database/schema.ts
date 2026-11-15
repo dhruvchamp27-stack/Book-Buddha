@@ -7,6 +7,7 @@ export function applyBaselineSchema(db: Database.Database): void {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       currency TEXT NOT NULL DEFAULT 'INR',
+      -- Report-level default only (never affects posting, which is always accrual). Do not remove.
       accounting_basis TEXT NOT NULL DEFAULT 'ACCRUAL' CHECK(accounting_basis IN ('CASH', 'ACCRUAL')),
       financial_year_start_month INTEGER NOT NULL DEFAULT 4,
       created_at TEXT NOT NULL
