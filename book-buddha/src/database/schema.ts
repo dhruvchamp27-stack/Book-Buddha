@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export function initializeSchema(db: Database.Database): void {
+export function applyBaselineSchema(db: Database.Database): void {
   db.pragma("foreign_keys = ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS companies (

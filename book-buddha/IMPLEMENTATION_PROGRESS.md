@@ -40,7 +40,7 @@ limits are reached. Update it after every meaningful implementation phase.
 - [ ] Authentication, password hashing, roles, sessions, and lockout
 - [ ] Financial-year locking
 - [ ] Strong immutable audit controls
-- [ ] Versioned migration system and structured logging
+- [x] Versioned migration system (structured logging: minimal hook only, full wiring deferred)
 - [ ] Automated backups and integrity checks
 - [ ] Tauri/Electron desktop packaging
 - [ ] Safe review and remediation of `npm audit` advisories
@@ -67,7 +67,18 @@ invoices, atomic and idempotent), and the `/recurring-invoices` API routes.
 The frontend UI is **DEFERRED** to the later UI phase. Slice 2 gates passed:
 32/32 vitest tests, tsc exit 0, and vite build exit 0.
 
-The next safe implementation slice is **Slice 3: formal/versioned migrations**. Credit notes already support
+Slice 3 (formal/versioned migrations) is **done**. `src/database/migrations.ts`
+adds an ordered migration list and a `schema_migrations` table that records
+applied versions; pending migrations run in ascending order, transactionally
+by default, and the run is a no-op when up to date. Migration 1
+(`baseline_schema`) is non-transactional because the legacy baseline toggles
+PRAGMA foreign_keys, which SQLite ignores inside a transaction. Existing
+databases keep their data. Structured logging is only a minimal optional
+callback; full wiring is deferred.
+
+The next safe implementation slice is **Slice 4: Foundation and authentication**.
+
+Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return
 prevention, GST reversal, receivable/cash reduction, FIFO inventory
 restoration, COGS reversal, and audit events through the API.

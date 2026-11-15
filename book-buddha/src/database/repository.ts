@@ -13,7 +13,7 @@ import type {
 } from "../accounting/types.js";
 import type { AccountingBasis } from "../accounting/types.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
-import { initializeSchema } from "./schema.js";
+import { runMigrations } from "./migrations.js";
 
 /** Safety cap on catch-up drafts created for one template in a single generate call. */
 const MAX_DRAFTS_PER_TEMPLATE_PER_RUN = 366;
@@ -360,7 +360,7 @@ export class AccountingRepository {
 
   public constructor(databasePath = ":memory:") {
     this.db = new Database(databasePath);
-    initializeSchema(this.db);
+    runMigrations(this.db);
   }
 
   public close(): void {
