@@ -5,6 +5,21 @@ DEC = plan/Decisions — the 15 questions, FD = Feature Design V1, H13 = 13 Nov 
 These pre-date this harness, so they keep their original IDs. **Future** decisions made
 in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at the top.*
 
+## Session decisions (harness convention, newest first)
+- **S1-1 (2026-11-15) — Cash vs accrual = ACCRUAL-ALWAYS posting + a Cash/Accrual toggle
+  at the report level.** Resolves conflict **#10** (`todos.md`) toward DD §4.5 / QBO. The
+  engine **always** posts accrual (AR/AP kept accurate) regardless of a company's preferred
+  method; the company's preference is only the **default report setting**, never a posting
+  restriction. Cash-basis reports are **derived from actual payment allocations** (partial
+  payments supported); no duplicate journals. This **supersedes** the per-company
+  posting-time deferral built in Slices 1–6 and in commit `5576a21`, which is refactored
+  away in **Slice 7b** (see `book-buddha/SLICE_7_PLAN.md`); existing data preserved,
+  regression tests added. Owner paused Slice 7 at the **plan phase** — build next session.
+- **S1-2 (2026-11-15) — Banking is its own slice; bank categorization + bill OCR live
+  there.** Confirms conflict **#4** toward V1 scope, but the Feature Design (FD) is still
+  **UNAPPROVED** with 3 open items (FD §H, below) — recorded as blocked on the owner, not
+  scheduled, until those are settled.
+
 ## Foundational / scope (DD)
 - **One company per install**, one DB file. Phase 1 = single-user **Admin**; Phase 2 =
   invoicing-only users (create & cancel, never delete, scoped data). (DD §1.4, §2.3–2.4)

@@ -1,0 +1,35 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+    "ENABLE_TOOL_SEARCH": "true"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/<YOUR-WINDOWS-USER>/.local/bin/headroom.EXE\" init hook ensure --profile init-ac_automation-9fcab3f2 --marker headroom-init-claude",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/<YOUR-WINDOWS-USER>/.local/bin/headroom.EXE\" init hook ensure --profile init-ac_automation-9fcab3f2 --marker headroom-init-claude",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "headroom@headroom-marketplace": true
+  }
+}

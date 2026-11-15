@@ -27,9 +27,17 @@ the docs disagree it is listed as an open question, not resolved.*
 - `testing/testing.md` is a **stale draft** — revise before using as a checklist.
 
 ## Open questions awaiting the owner
-- **FD §H:** (1) archive scope — masters only, or documents too (with hide-from-default
-  filter)? (2) auto-record payment when a bank line matches a vendor bill, or require
-  an extra confirm? (3) Uncategorized account — auto-created or owner-named?
+- **Slice 7 build gate (needed before 7b/7d — see `book-buddha/SLICE_7_PLAN.md`):**
+  (1) Does any **real (non-test) cash-basis data** exist in a live DB? Decides whether 7b
+  needs a legacy conversion (reversal-repost or true-up) or is a clean refactor.
+  (2) **Hand-worked acceptance figures:** cash + accrual numbers for one **part-paid
+  invoice** and one **part-paid bill**, incl. **how COGS appears in the cash view**.
+  (3) OK the **chart-of-accounts** add (Unearned Revenue / Bank / Uncategorized) in one
+  migration against the fixed 13-code CHECK.
+- **FD §H (bank categorization / OCR / archive — still unapproved):** (1) archive scope —
+  masters only, or documents too (with hide-from-default filter)? (2) auto-record payment
+  when a bank line matches a vendor bill, or require an extra confirm? (3) Uncategorized
+  account — auto-created or owner-named?
 - **APP_FLOW gaps (AF Part E):** dashboard content; customer financial-summary panel;
   which records get custom fields; "Save & add another" for customers; subscription
   settlement build details; keyboard shortcut keys; fair buyer personal data (DPDP);
@@ -55,14 +63,16 @@ Three sequences disagree, and the latest prompt starts somewhere else again:
 1. **Rounding** — whole rupee (DD §7.4, PRD) vs exact paise (ANTI §4, TEST §5.3).
 2. **Build status** — "nothing built" (README/H12) vs a working prototype.
 3. **Archive** — v1-skip (DEC Q7) vs v2 (DD §1.5/§17) vs V1 (FD/H13).
-4. **Bank & OCR** — v2 (DD §1.5/§17) vs V1 (FD 13 Nov).
+4. **Bank & OCR** — ~~v2 (DD §1.5/§17) vs V1 (FD 13 Nov)~~ **RESOLVED 2026-11-15
+   (decisions.md S1-2): V1, its own Banking slice — but FD still unapproved (§H below).**
 5. **M4 challan↔invoice** — pending (DEC) vs decided (DD §11.4).
 6. **Reports count** — 8 (BP) vs ~17 (DD §12).
 7. **TEST stale** — says DD §5 unwritten (it exists); calls a fair a tag (it's a Project).
 8. **Build order** — three sequences + ANTI starting elsewhere (above).
 9. **Canonical repo path** — docs say `D:\dhruv-book-accounting-app\Book-Buddha-github`;
    this checkout is `C:\Users\Admin\Desktop\Book Buddha`. Confirm which is canonical.
-10. **Cash vs accrual** — per company (prototype) vs per report (DD §4.5).
+10. **Cash vs accrual** — ~~per company (prototype) vs per report (DD §4.5)~~ **RESOLVED
+    2026-11-15 (decisions.md S1-1): accrual-always posting + report-level toggle.**
 11. **Prototype roles** — admin/accountant/viewer vs Phase-1-Admin-only (DD §15.1).
 12. **Tax model** — invoice-level GST (prototype) vs user-named per-line (DD §13.1).
 13. **Prototype cancel/behaviour** — claimed as reversal, **unverified** (tests not run).

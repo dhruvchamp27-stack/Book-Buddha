@@ -1,0 +1,150 @@
+{
+  "model": "claude-opus-5",
+  "skillOverrides": {
+    "sales:account-context": "off",
+    "sales:account-plan": "off",
+    "sales:account-research": "off",
+    "sales:account-tiering": "off",
+    "sales:call-prep": "off",
+    "sales:call-summary": "off",
+    "sales:close-plan": "off",
+    "sales:competitive-intelligence": "off",
+    "sales:create-an-asset": "off",
+    "sales:crm-hygiene-check": "off",
+    "sales:customer-health": "off",
+    "sales:customer-voice": "off",
+    "sales:daily-briefing": "off",
+    "sales:deal-advance-gap": "off",
+    "sales:deal-review": "off",
+    "sales:deal-signals": "off",
+    "sales:deal-slip-scenario": "off",
+    "sales:draft-outreach": "off",
+    "sales:end-of-day": "off",
+    "sales:expansion-whitespace": "off",
+    "sales:forecast": "off",
+    "sales:handle-objection": "off",
+    "sales:inbox-sweep": "off",
+    "sales:lead-triage": "off",
+    "sales:log-activity": "off",
+    "sales:pipeline-review": "off",
+    "sales:renewal-radar": "off",
+    "sales:rep-context": "off",
+    "sales:route-lead": "off",
+    "sales:schedule-meeting": "off",
+    "sales:setup": "off",
+    "sales:stakeholder-map": "off",
+    "sales:team-pipeline": "off",
+    "sales:update-opportunity": "off",
+    "sales:weekly-wrap": "off",
+    "sales:win-loss-review": "off",
+    "data:analyze": "off",
+    "data:build-dashboard": "off",
+    "data:create-viz": "off",
+    "data:data-context-extractor": "off",
+    "data:data-visualization": "off",
+    "data:explore-data": "off",
+    "data:sql-queries": "off",
+    "data:statistical-analysis": "off",
+    "data:validate-data": "off",
+    "data:write-query": "off",
+    "design:accessibility-review": "off",
+    "design:design-critique": "off",
+    "design:design-handoff": "off",
+    "design:design-system": "off",
+    "design:research-synthesis": "off",
+    "design:user-research": "off",
+    "design:ux-copy": "off",
+    "enterprise-search:digest": "off",
+    "enterprise-search:knowledge-synthesis": "off",
+    "enterprise-search:search": "off",
+    "enterprise-search:search-strategy": "off",
+    "enterprise-search:source-management": "off",
+    "pdf-viewer:annotate": "off",
+    "pdf-viewer:fill-form": "off",
+    "pdf-viewer:open": "off",
+    "pdf-viewer:sign": "off",
+    "pdf-viewer:view-pdf": "off",
+    "productivity:memory-management": "off",
+    "productivity:start": "off",
+    "productivity:task-management": "off",
+    "productivity:update": "off",
+    "cowork-plugin-management:cowork-plugin-customizer": "off",
+    "cowork-plugin-management:create-cowork-plugin": "off",
+    "anthropic-skills:built-in-browser": "off",
+    "anthropic-skills:canvas-design": "off",
+    "anthropic-skills:chrome-browser": "off",
+    "anthropic-skills:computer-use": "off",
+    "anthropic-skills:deep-research": "off",
+    "anthropic-skills:docs": "off",
+    "anthropic-skills:import-memory": "off",
+    "anthropic-skills:learn": "off",
+    "anthropic-skills:morning": "off",
+    "anthropic-skills:onboarding-scope-extractor": "off",
+    "anthropic-skills:training-ppt-generator": "off"
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/anthropics/claude-plugins-official.git"
+      }
+    },
+    "headroom-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "headroomlabs-ai/headroom"
+      }
+    }
+  },
+  "effortLevel": "medium",
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "medium"
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -ExecutionPolicy Bypass -NoProfile -File \"C:/Users/Dhruv Champaneria/.claude/hooks/approval-hook.ps1\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -ExecutionPolicy Bypass -NoProfile -File \"C:/Users/Dhruv Champaneria/.claude/hooks/protected-folders-hook.ps1\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -ExecutionPolicy Bypass -NoProfile -File \"C:/Users/Dhruv Champaneria/.claude/hooks/logging-hook.ps1\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "autoUpdatesChannel": "latest",
+  "tui": "fullscreen",
+  "theme": "dark",
+  "switchModelsOnFlag": false,
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true
+}

@@ -1,0 +1,24 @@
+{
+    "logging": {
+        "enabled": true,
+        "path": "logs/",
+        "includeOutput": false
+    },
+    "protectedFolders": [
+        "config/",
+        "logs/"
+    ],
+    "approvalRequiredPatterns": [
+        "Remove-Item",
+        "rm ",
+        "del ",
+        "git push --force",
+        "git reset --hard"
+    ],
+    "contextFiles": {
+        "contextFile": "context/context.md",
+        "decisionFile": "context/decisions.md",
+        "architectureFile": "context/architecture.md",
+        "todosFile": "context/todos.md"
+    }
+}

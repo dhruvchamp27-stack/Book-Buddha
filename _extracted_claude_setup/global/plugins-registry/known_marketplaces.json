@@ -1,0 +1,18 @@
+{
+  "claude-plugins-official": {
+    "source": {
+      "source": "git",
+      "url": "https://github.com/anthropics/claude-plugins-official.git"
+    },
+    "installLocation": "C:\\Users\\Dhruv Champaneria\\.claude\\plugins\\marketplaces\\claude-plugins-official",
+    "lastUpdated": "2026-11-13T09:03:07.481Z"
+  },
+  "headroom-marketplace": {
+    "source": {
+      "source": "github",
+      "repo": "headroomlabs-ai/headroom"
+    },
+    "installLocation": "C:\\Users\\Dhruv Champaneria\\.claude\\plugins\\marketplaces\\headroom-marketplace",
+    "lastUpdated": "2026-10-29T10:16:53.917Z"
+  }
+}

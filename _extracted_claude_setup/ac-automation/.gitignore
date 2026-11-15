@@ -1,0 +1,124 @@
+# Credentials & session state — NEVER commit
+auth.json
+auth_state.json
+asana_auth_state.json
+
+# Secrets — real credential values live in .env. NEVER commit it.
+# The .env.template (no values, safe) IS tracked so teammates know the keys.
+.env
+.env.*
+*.env
+!.env.template
+
+# Client data — invoices, queue, run logs
+*.xlsx
+invoices/
+
+# Debug & test screenshots (may contain client data)
+debug_*.png
+test_row_*.png
+
+# Page-structure dumps from diagnose_section_structure.py.
+# These capture whatever was on screen in Asana -- real vendor names,
+# LLCs, invoice numbers and amounts. The script writes them to THIS
+# folder (see diagnose_section_structure.py, OUT_FILE); we file them
+# under debug-logs/ afterwards, so both locations are blocked.
+*_section-structure-dump.txt
+
+# Output of diagnose_vendor_dropdown.py -- the text and screenshot hold what
+# Rent Manager's vendor suggestion list showed (real vendor names).
+*_vendor-dropdown-dump.txt
+*_vendor-dropdown-dump.png
+
+# The WHOLE debug-logs folder. Everything in here is a record of a real run,
+# so any file type in it can hold real vendor names, LLCs, invoice numbers
+# and amounts -- not just the .txt and .png we used to block. Blocking the
+# folder means a new kind of log file can never leak by being an extension
+# nobody thought of.
+debug-logs/
+
+# Per-machine settings (shared drive path, Mac IP) -- never commit
+config.json
+
+# Per-PC reader settings (holds the Mac's address). The .template is tracked.
+reader_settings.bat
+
+# Virtual environment (created by Setup.bat, machine-specific)
+venv/
+
+# Throwaway staging folder for copying files to the Mac. It holds COPIES of
+# tracked scripts -- committing it would put the same code in the repo twice.
+mac-bundle/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Office temp/lock files
+~$*
+
+# OCR output & logs (contain client invoice text)
+Tesseract_Testing/*.txt
+Tesseract_Testing/*.log
+
+# Cloned third-party repo
+Tesseract_Testing/poppler-windows/
+
+# Claude Code tool-call transcripts -- record every command run, with
+# machine paths, and can end up describing real client data indirectly.
+.claude/logs/*.log
+
+# Run logs written inside the project folder (diagnose_scroll_loading.py
+# writes its screen output here when the Z: drive is not used). They hold
+# real vendor and task names.
+run-logs/
+
+# Output of diagnose_scroll_loading.py. Older runs wrote it to the project
+# root. It holds real task names.
+*_scroll-loading-dump.txt
+
+# Output of diagnose_asana_fields.py. It normally writes into debug-logs/
+# (already blocked above), but older runs wrote to the project root. It
+# holds real property names, unit numbers and invoice amounts.
+*_asana-fields.txt
+*_asana-fields.png
+
+# Cross-tool agent config (Codex / Antigravity / Gemini CLI). Kept out of
+# git on purpose -- it is per-machine scaffolding and may reference local
+# MCP endpoints, paths and connectors. Mirror of .claude/ for other tools.
+.agents/
+
+# ---------------------------------------------------------------------------
+# Added 2026-11-13 during the setup audit. Each of these was verified with
+# `git check-ignore -v` beforehand and was NOT being ignored.
+# ---------------------------------------------------------------------------
+
+# The SQLite database. It holds real vendor names, property names, invoice
+# numbers and amounts -- the single most sensitive file in the project. It is
+# also large and changes every run, so committing it would bloat history and
+# leak client data at the same time. Keep it OUTSIDE the repo entirely.
+*.sqlite
+*.sqlite3
+*.db
+
+# Superpowers working folder -- brainstorm output, draft plans and UI mockups
+# land here automatically. Scratch material, not a deliverable. Anything worth
+# keeping gets written to docs/ by hand.
+.superpowers/
+
+# The retired handoff system (replaced 2026-11-13 by context/HOTcontext.md,
+# written by /session-end). The old notes quote real run output, so they stay
+# out of git even while the folder is still sitting on disk.
+handoffs/
+
+# Backup copies made before an edit. Git is the backup now; these are clutter
+# and they duplicate whatever secret the original held.
+*.bak
+*.bak-*
+
+# Per-project Claude settings: Headroom routing and local hook paths.
+# NOTE: this was previously ignored ONLY by the machine-global ignore file
+# (C:\Users\<you>\.config\git\ignore), so a fresh clone on another PC would
+# have started tracking it. Pinning the rule here makes it travel with the repo.
+.claude/settings.local.json

@@ -1,35 +1,48 @@
 # HOT — Book Buddha
 
 ## Last session
-Harness installed on new PC (2026-11-14). Project context files seeded from repo docs.
+2026-11-15: Owner **replaced** the cash/accrual model — now **accrual-always posting +
+a Cash/Accrual toggle at report level** (DD §4.5 / QBO). This supersedes the per-company
+deferral in Slices 1–6 and commit `5576a21`. **Slice 7 PLANNED and PAUSED at plan phase**
+(`book-buddha/SLICE_7_PLAN.md`) — build resumes next session. Nothing built this session.
 
 ## The project in one line
-Local, offline-first, double-entry accounting app for one PC, organised fair-wise,
-built for a non-accountant. Spec stage — spec approved, nothing built yet.
+Local, offline-first, double-entry accounting app for one PC, organised fair-wise, built
+for a non-accountant. A working prototype exists and is being completed slice by slice.
 
-## Active now
-**Next slice is unconfirmed** — the spec order says **Foundation** (engine + company /
-businesses / chart of accounts + login); the newest prompt (14 Nov) + the prototype
-say **Credit notes & sales returns**. Owner must pick. Source of truth:
-`spec/Design Document - Book Buddha (9 Nov 2026).md`.
+## Active now — autonomous 9-slice finish (branch `autonomous/book-buddha-finish`)
+BACKEND-ONLY for now (owner deferred all frontend/UI-UX until the push issue is fixed).
+Done & committed locally: 1 Credit notes (d7f6102) · 2 Recurring invoices (0c36b3f) ·
+3 Versioned migrations (bcffcb7) · FIFO fix (9970d61) · 4 Auth backend (c00bae0) ·
+5 Customers/items/inventory (434a403) · 6 Purchasing/expenses (c10b96e — migration v4;
+INVENTORY now ties to the ledger via FIFO lots) · cash-basis credit purchases (5576a21 —
+expense/ITC recognized on payment, no migration). Deferred: Slice 4 login UI +
+live Google OAuth (`/auth/recover` localhost-only); purchase returns, bill discount,
+receipts/attachments, supplier refunds, opening-balance GL offset, all UI. **Next: BUILD
+Slice 7** per `book-buddha/SLICE_7_PLAN.md` → 7a Balance-Sheet sign fix · 7b accrual-always
+refactor (removes cash-basis branches both sides) · 7c business+date on journals (migration
+v5 + backfill → filtered/consolidated reports) · 7d Cash/Accrual report toggle (derived).
+Then Projects(fairs) · Subscriptions · Imports+attachments · **Banking (own slice: bank
+categorization + bill OCR)** · Cash Flow · Archive · Audit/FY-lock/packaging.
 
-## Broken / blocked
-- 4 technology decisions still officially pending (stack, who-builds, install/launch,
-  test basis) — see `context/todos.md`.
-- Two realities to reconcile: spec-stage target vs the working prototype in
-  `book-buddha/` (self-reports passing tests; unverified).
-- ~16 doc conflicts catalogued in `context/todos.md` (rounding, archive, build order…).
+## Workflow (owner-set)
+Sonnet builds each slice (backend only), Haiku updates docs, Opus verifies gates+diff then
+commits locally. Agents pause-and-ask on anything dangerous/ambiguous; no installs/deletes.
+Gates (npm NOT on PATH): run via `.\node_modules\.bin\` → `vitest.cmd run --root .`, `tsc.cmd`, `vite.cmd build`.
+Stage by explicit path; one commit = one idea; never `git add -A`; never push to main.
 
-## Standing rules
-- spec → plan → build. No code before a confirmed plan. Acceptance = hand-worked
-  figures, not a passing technical test.
-- Fixed parts (never bend): double-entry (automatic), tamper-evident audit log,
-  cancel-with-reversal.
-- Work one small step at a time; WHY / WHAT / RISK / HOW TO VERIFY before risky actions.
-- Never work on `main`; use the working branch. Keep this file under 50 lines.
+## Blocker — pushes
+`git push` can't auth (Git Credential Manager, non-interactive; gh absent). Owner to run
+`git push origin autonomous/book-buddha-finish` once to cache token, then pushes resume.
+Owner also wants a plain-English brief of work done, on request.
 
-## Open items
-- Confirm the outstanding technology decisions (see `plan/` Decisions doc and
-  `context/decisions.md`).
-- Phase-2 / V1-feature design items (bank categorization, bill OCR, archive) are
-  being designed, not built — see `context/todos.md`.
+## Preserve / open
+Never bend: cash & accrual · balanced journals · integer paise · immutable posted records ·
+reversal corrections · safe inventory. Never edit `spec/` or `plan/`.
+Owner input needed before 7b/7d BUILD: (1) does any real (non-test) cash-basis data
+exist? (decides if 7b needs legacy conversion); (2) hand-worked cash+accrual figures for
+one part-paid invoice & one part-paid bill, incl. COGS in the cash view; (3) OK the
+chart-of-accounts add (Unearned Revenue/Bank/Uncategorized, one migration). Carried: 7a
+fixes the NEGATIVE-liability presentation; opening/adjustment stock still posts no GL
+(offset TBD). Bank categorization = designed only, UNAPPROVED (FD 3 open items, todos.md).
+Keep <50 lines.

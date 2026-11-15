@@ -1,0 +1,28 @@
+# protected-files.txt
+# One pattern per line. Blank lines and lines starting with # are ignored.
+# Shell-glob syntax, matched against the absolute path (forward slashes)
+# AND against the bare filename, so a plain name blocks that file anywhere.
+#
+# Read by protect-files.py (same folder). Blocks Read/Edit/Write/NotebookEdit.
+# It does NOT block Bash -- `cat config.json` still works. See the note in
+# protect-files.py.
+#
+# To let Claude into one of these for a single task, comment the line out
+# with a #, do the work, then put it back.
+
+# --- Secrets. Nothing matching these exists in the repo today; they are a
+# --- tripwire so a future .env cannot be read by accident. CLAUDE.md rule 3.
+.env
+.env.*
+*.env
+
+# --- Live logged-in sessions. Whoever holds a copy is signed in as you,
+# --- with your access, no password needed. Never read, never copied,
+# --- never committed. Each person's PC creates its own. SETUP.md Step 3.
+auth_state.json
+asana_auth_state.json
+
+# --- Settings that differ per PC and name the shared drive / local paths.
+# --- Standing rule: per-task permission only.
+config.json
+reader_settings.bat

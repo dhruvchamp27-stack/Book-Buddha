@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "plugins": {
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "C:\\Users\\Dhruv Champaneria\\.claude\\plugins\\cache\\claude-plugins-official\\superpowers\\7.0.2",
+        "version": "7.0.2",
+        "installedAt": "2026-07-11T06:20:52.191Z",
+        "lastUpdated": "2026-11-13T07:40:50.137Z",
+        "gitCommitSha": "22f0b463e7a5e579904dd6211a520321035526f7"
+      }
+    ],
+    "headroom@headroom-marketplace": [
+      {
+        "scope": "local",
+        "projectPath": "C:\\Users\\Dhruv Champaneria\\Desktop\\TeamD-Git\\AC_Automation",
+        "installPath": "C:\\Users\\Dhruv Champaneria\\.claude\\plugins\\cache\\headroom-marketplace\\headroom\\0.42.0",
+        "version": "0.42.0",
+        "installedAt": "2026-10-29T10:16:55.721Z",
+        "lastUpdated": "2026-10-29T10:16:55.721Z",
+        "gitCommitSha": "a2d4fe72381e186651466ee94e92ce9d8d1396cc"
+      }
+    ]
+  }
+}

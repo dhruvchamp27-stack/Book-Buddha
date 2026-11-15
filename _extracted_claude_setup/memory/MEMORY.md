@@ -1,0 +1,2 @@
+- [Protected-file placeholder workflow](protected-file-placeholder-workflow.md) — how to get values from config.json/.env/xlsx without opening them
+- [Deferred: investigate commit auto-deny](deferred-investigate-commit-autodeny.md) — AFTER the build, find why Claude's `git commit` is blocked by the safety classifier
