@@ -560,6 +560,8 @@ interface StockLayer {
 /** Optional filter for period reports (P&L, General Ledger). Omit everything for consolidated, all dates. */
 export interface PeriodReportFilter {
   readonly businessId?: string;
+  /** Only entries tagged with this project (fair). Omitted = consolidated: every fair AND untagged entries. */
+  readonly fairId?: string;
   readonly fromDate?: string;
   readonly toDate?: string;
   /**
@@ -573,6 +575,8 @@ export interface PeriodReportFilter {
 /** Optional filter for as-at reports (Trial Balance, Balance Sheet): everything with entry_date <= asAtDate. */
 export interface AsAtReportFilter {
   readonly businessId?: string;
+  /** Trial Balance only. The Balance Sheet refuses it: there is no per-fair balance sheet (Design Doc 12.1). */
+  readonly fairId?: string;
   readonly asAtDate?: string;
 }
 
@@ -1744,7 +1748,7 @@ export class AccountingRepository {
    * for paid-at-once documents), with the same inclusive semantics as the accrual reports.
    * The business filter is the document's business.
    */
-  public deriveCashView(filter: { businessId?: string; fromDate?: string; toDate?: string } = {}): CashViewDerivation {
+  public deriveCashView(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string } = {}): CashViewDerivation {
     // Validates dates and ordering exactly as the accrual reports do.
     this.reportConditions(filter);
     const inPeriod = (date: string): boolean =>
@@ -1790,8 +1794,9 @@ export class AccountingRepository {
       addPayment(p.bill_id !== null ? `PURCHASE_BILL|${p.bill_id}` : `EXPENSE|${p.expense_id}`, p.amount_paise, p.paid_at);
     }
 
-    const businessClause = filter.businessId === undefined ? "" : " AND business_id = ?";
-    const businessParams = filter.businessId === undefined ? [] : [filter.businessId];
+    // The document's own business and fair (documents carry fair_id, as the entries do).
+    const businessClause = (filter.businessId === undefined ? "" : " AND business_id = ?") + (filter.fairId === undefined ? "" : " AND fair_id = ?");
+    const businessParams = [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.fairId === undefined ? [] : [filter.fairId])];
     const documents: Array<{ type: "INVOICE" | "PURCHASE_BILL" | "EXPENSE"; id: string; paidAtOnce: boolean; totalPaise: () => number }> = [];
     for (const row of this.db.prepare(`SELECT id, payment_account FROM invoices WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
       documents.push({ type: "INVOICE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.invoiceTotal(this.getInvoice(row.id)) });
@@ -1866,6 +1871,11 @@ export class AccountingRepository {
   }
 
   public getBalanceSheet(filter: AsAtReportFilter = {}): BalanceSheetReport {
+    if (filter.fairId !== undefined) {
+      throw new RepositoryValidationError(
+        "The Balance Sheet cannot be filtered by project (fair): there is no per-fair Balance Sheet. Use the Profit and Loss, Trial Balance or General Ledger for a fair.",
+      );
+    }
     const rows = this.getReportAccountRows(filter);
     const assets = rows.filter((row) =>
       row.account === "CASH" || row.account === "RECEIVABLES" || row.account === "INVENTORY"
@@ -2183,10 +2193,11 @@ export class AccountingRepository {
    * WHERE clause (alias `je` = journal_entries) for a report filter, with bound parameters.
    * No filter at all yields an empty clause, i.e. consolidated and all dates.
    */
-  private reportConditions(filter: { businessId?: string; fromDate?: string; toDate?: string; asAtDate?: string }): { where: string; params: string[] } {
+  private reportConditions(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string }): { where: string; params: string[] } {
     const conditions: string[] = [];
     const params: string[] = [];
     if (filter.businessId !== undefined) { conditions.push("je.business_id = ?"); params.push(filter.businessId); }
+    if (filter.fairId !== undefined) { conditions.push("je.fair_id = ?"); params.push(filter.fairId); }
     if (filter.fromDate !== undefined) { this.assertIsoDate("From date", filter.fromDate); conditions.push("je.entry_date >= ?"); params.push(filter.fromDate); }
     if (filter.toDate !== undefined) { this.assertIsoDate("To date", filter.toDate); conditions.push("je.entry_date <= ?"); params.push(filter.toDate); }
     if (filter.asAtDate !== undefined) { this.assertIsoDate("As-at date", filter.asAtDate); conditions.push("je.entry_date <= ?"); params.push(filter.asAtDate); }
@@ -2196,7 +2207,7 @@ export class AccountingRepository {
     return { where: conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`, params };
   }
 
-  private getReportAccountRows(filter: { businessId?: string; fromDate?: string; toDate?: string; asAtDate?: string } = {}): readonly ReportAccountRow[] {
+  private getReportAccountRows(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string } = {}): readonly ReportAccountRow[] {
     const { where, params } = this.reportConditions(filter);
     const rows = this.db
       .prepare(

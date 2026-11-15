@@ -263,6 +263,7 @@ const reportDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date written a
 /** Period reports (P&L, General Ledger): optional business and date range. */
 const periodReportQuery = z.object({
   businessId: id.optional(),
+  fairId: id.optional(),
   fromDate: reportDate.optional(),
   toDate: reportDate.optional(),
 }).strict().transform((value) => definedOnly(value));
@@ -272,13 +273,20 @@ const periodReportQuery = z.object({
  */
 const profitAndLossQuery = z.object({
   businessId: id.optional(),
+  fairId: id.optional(),
   fromDate: reportDate.optional(),
   toDate: reportDate.optional(),
   basis: z.enum(["CASH", "ACCRUAL"]).optional(),
 }).strict().transform((value) => definedOnly(value));
-/** As-at reports (Trial Balance, Balance Sheet): optional business and a single as-at date. */
+/** Balance Sheet: optional business and a single as-at date. No fairId (strict): there is no per-fair Balance Sheet. */
 const asAtReportQuery = z.object({
   businessId: id.optional(),
+  asAtDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+/** Trial Balance: the as-at filters plus an optional project (fair). */
+const trialBalanceQuery = z.object({
+  businessId: id.optional(),
+  fairId: id.optional(),
   asAtDate: reportDate.optional(),
 }).strict().transform((value) => definedOnly(value));
 
@@ -912,7 +920,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   app.get("/reports/sales-by-item", async () => repository.getSalesByItem());
   // Optional report filters. No query string = consolidated, all dates (unchanged behaviour).
   app.get("/reports/trial-balance", async (request) =>
-    repository.getTrialBalance(parseBody(asAtReportQuery, request.query)));
+    repository.getTrialBalance(parseBody(trialBalanceQuery, request.query)));
   app.get("/reports/profit-and-loss", async (request) =>
     repository.getProfitAndLoss(parseBody(profitAndLossQuery, request.query)));
   app.get("/reports/balance-sheet", async (request) =>
