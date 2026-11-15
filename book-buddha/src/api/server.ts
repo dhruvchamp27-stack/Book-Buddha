@@ -275,6 +275,17 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     return reply.code(201).send(note);
   });
 
+  app.get<{ Querystring: { invoiceId?: string; status?: string } }>("/credit-notes", async (request) => {
+    const { invoiceId, status } = request.query;
+    if (status !== undefined && status !== "DRAFT" && status !== "FINALIZED" && status !== "CANCELLED") {
+      throw new RepositoryValidationError("status must be DRAFT, FINALIZED or CANCELLED.");
+    }
+    return repository.listCreditNotes({
+      ...(invoiceId === undefined ? {} : { invoiceId }),
+      ...(status === undefined ? {} : { status }),
+    });
+  });
+
   app.get<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId", async (request) =>
     repository.getCreditNote(request.params.creditNoteId));
 

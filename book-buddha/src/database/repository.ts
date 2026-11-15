@@ -103,6 +103,22 @@ export interface FairRecord {
   readonly endsAt: string | null;
 }
 
+export interface CreditNoteSummary {
+  readonly id: string;
+  readonly invoiceId: string;
+  readonly invoiceNumber: string;
+  readonly number: string;
+  readonly reason: string;
+  readonly status: CreditNote["status"];
+  readonly createdAt: string;
+  /** Taxable value of the returned lines, in paise. */
+  readonly subtotalPaise: number;
+  /** Tax reversed on the returned lines (invoice tax rate), in paise. */
+  readonly taxPaise: number;
+  /** subtotalPaise + taxPaise: the amount credited back on finalize. */
+  readonly totalPaise: number;
+}
+
 export interface TrialBalanceRow {
   readonly account: AccountCode;
   readonly debitPaise: number;
@@ -673,6 +689,40 @@ export class AccountingRepository {
       this.insertAuditEvent({ action: "credit_note.finalized", entityId: note.id, occurredAt: new Date().toISOString() });
       return entry;
     })();
+  }
+
+  public listCreditNotes(filter: { invoiceId?: string; status?: CreditNote["status"] } = {}): readonly CreditNoteSummary[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.invoiceId !== undefined) { conditions.push("cn.invoice_id = ?"); params.push(filter.invoiceId); }
+    if (filter.status !== undefined) { conditions.push("cn.status = ?"); params.push(filter.status); }
+    const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db.prepare(
+      `SELECT cn.id, cn.invoice_id, i.number AS invoice_number, cn.number, cn.reason, cn.status, cn.created_at,
+              i.tax_rate_basis_points,
+              COALESCE((SELECT SUM(cnl.quantity * cnl.unit_price_paise) FROM credit_note_lines cnl WHERE cnl.credit_note_id = cn.id), 0) AS subtotal_paise
+         FROM credit_notes cn JOIN invoices i ON i.id = cn.invoice_id
+         ${where}
+         ORDER BY cn.created_at DESC, cn.id DESC`,
+    ).all(...params) as Array<{
+      id: string; invoice_id: string; invoice_number: string; number: string; reason: string;
+      status: CreditNote["status"]; created_at: string; tax_rate_basis_points: number | null; subtotal_paise: number;
+    }>;
+    return rows.map((row) => {
+      const taxPaise = Math.round(row.subtotal_paise * (row.tax_rate_basis_points ?? 0) / 10000);
+      return {
+        id: row.id,
+        invoiceId: row.invoice_id,
+        invoiceNumber: row.invoice_number,
+        number: row.number,
+        reason: row.reason,
+        status: row.status,
+        createdAt: row.created_at,
+        subtotalPaise: row.subtotal_paise,
+        taxPaise,
+        totalPaise: row.subtotal_paise + taxPaise,
+      };
+    });
   }
 
   public getCreditNote(creditNoteId: string): CreditNote {

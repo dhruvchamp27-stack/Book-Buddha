@@ -31,6 +31,15 @@ interface Payment { id: string; invoiceId: string; amountPaise: number; paymentA
 interface ReceivableRow { invoiceId: string; invoiceNumber: string; customerId: string; invoiceDate: string; totalPaise: number; paidPaise: number; outstandingPaise: number; ageDays: number; }
 interface FairSalesRow { fairId: string; fairName: string; invoiceCount: number; totalPaise: number; }
 interface StockBalance { itemId: string; itemName: string; unit: string; quantity: number; valuePaise: number; }
+interface CreditNoteSummary {
+  id: string; invoiceId: string; invoiceNumber: string; number: string; reason: string;
+  status: "DRAFT" | "FINALIZED" | "CANCELLED"; createdAt: string;
+  subtotalPaise: number; taxPaise: number; totalPaise: number;
+}
+interface CreditNote {
+  id: string; invoiceId: string; number: string; reason: string;
+  status: "DRAFT" | "FINALIZED" | "CANCELLED"; lines: InvoiceLine[];
+}
 interface JournalEntry {
   id: string; sourceId: string; description: string; isReversal: boolean;
   lines: Array<{ account: string; debitPaise: number; creditPaise: number }>;
@@ -78,16 +87,16 @@ export function App() {
   const [taxType, setTaxType] = useState<"NONE" | "CGST_SGST" | "IGST">("NONE");
   const [taxRateBasisPoints, setTaxRateBasisPoints] = useState(0);
   const [saveAsQuotation, setSaveAsQuotation] = useState(false);
-  const invoiceSubtotalPaise = invoiceLines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
-  const invoiceTaxablePaise = invoiceSubtotalPaise - discountPaise + extraChargePaise;
-  const invoiceTaxPaise = Math.round(invoiceTaxablePaise * taxRateBasisPoints / 10000);
-  const invoiceTotalPaise = invoiceTaxablePaise + invoiceTaxPaise;
   const [paymentAccount, setPaymentAccount] = useState<Account>("CASH");
   const [invoiceLines, setInvoiceLines] = useState<InvoiceLine[]>([{
     description: "Sample Book",
     quantity: 1,
     unitPricePaise: 25000,
   }]);
+  const invoiceSubtotalPaise = invoiceLines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+  const invoiceTaxablePaise = invoiceSubtotalPaise - discountPaise + extraChargePaise;
+  const invoiceTaxPaise = Math.round(invoiceTaxablePaise * taxRateBasisPoints / 10000);
+  const invoiceTotalPaise = invoiceTaxablePaise + invoiceTaxPaise;
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
   const [trialBalance, setTrialBalance] = useState<TrialBalanceRow[]>([]);
@@ -102,6 +111,11 @@ export function App() {
   const [stockQuantity, setStockQuantity] = useState("");
   const [stockCost, setStockCost] = useState("");
   const [paymentAmount, setPaymentAmount] = useState("");
+  const [creditNotes, setCreditNotes] = useState<CreditNoteSummary[]>([]);
+  const [returnedByItem, setReturnedByItem] = useState<Record<string, number>>({});
+  const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({});
+  const [creditNoteNumber, setCreditNoteNumber] = useState("");
+  const [creditNoteReason, setCreditNoteReason] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -158,6 +172,7 @@ export function App() {
       setBuyerName(selected.buyerName ?? "");
       setBuyerContact(selected.buyerContact ?? "");
       setInvoiceLines(selected.lines.map((line) => ({ ...line })));
+      setReturnQuantities({});
       setPayments(await api<Payment[]>(`/invoices/${encodeURIComponent(id)}/payments`));
       await refreshAccounting(selected.id);
     });
@@ -165,6 +180,7 @@ export function App() {
 
   useEffect(() => {
     void loadCompanies().catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Could not load saved records."));
+    void loadCreditNotes().catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Could not load credit notes."));
   }, []);
 
   useEffect(() => {
@@ -322,6 +338,61 @@ export function App() {
     setReceivables(await api<ReceivableRow[]>("/reports/receivables"));
     setFairSales(await api<FairSalesRow[]>("/reports/fair-sales"));
     setStockBalances(await api<StockBalance[]>("/inventory/stock"));
+    await loadCreditNotes(invoiceId);
+  }
+
+  async function loadCreditNotes(forInvoiceId?: string) {
+    const all = await api<CreditNoteSummary[]>("/credit-notes");
+    setCreditNotes(all);
+    const targetInvoiceId = forInvoiceId ?? invoice?.id;
+    if (!targetInvoiceId) { setReturnedByItem({}); return; }
+    const finalizedForInvoice = all.filter((note) => note.invoiceId === targetInvoiceId && note.status === "FINALIZED");
+    const details = await Promise.all(finalizedForInvoice.map((note) => api<CreditNote>(`/credit-notes/${encodeURIComponent(note.id)}`)));
+    const returned: Record<string, number> = {};
+    for (const detail of details) {
+      for (const line of detail.lines) {
+        if (line.itemId) returned[line.itemId] = (returned[line.itemId] ?? 0) + line.quantity;
+      }
+    }
+    setReturnedByItem(returned);
+  }
+
+  function returnableQuantity(line: InvoiceLine): number {
+    if (!line.itemId) return line.quantity;
+    const invoicedForItem = (invoice?.lines ?? []).filter((candidate) => candidate.itemId === line.itemId).reduce((total, candidate) => total + candidate.quantity, 0);
+    return Math.max(0, Math.min(line.quantity, invoicedForItem - (returnedByItem[line.itemId] ?? 0)));
+  }
+
+  async function submitCreditNote(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await run(async () => {
+      if (!invoice || invoice.status !== "FINALIZED") throw new Error("Select a finalized invoice first.");
+      const lines = invoice.lines.flatMap((line, index) => {
+        const quantity = Number(returnQuantities[index] ?? "0");
+        if (!quantity) return [];
+        if (!Number.isInteger(quantity) || quantity < 0) throw new Error("Return quantities must be whole numbers.");
+        if (quantity > returnableQuantity(line)) throw new Error(`You can return at most ${returnableQuantity(line)} of "${line.description}".`);
+        return [{ ...(line.itemId ? { itemId: line.itemId } : {}), description: line.description, quantity, unitPricePaise: line.unitPricePaise }];
+      });
+      if (lines.length === 0) throw new Error("Enter a return quantity for at least one line.");
+      if (!creditNoteReason.trim()) throw new Error("Enter a reason for the return.");
+      await api<CreditNote>("/credit-notes", {
+        method: "POST",
+        body: JSON.stringify({ invoiceId: invoice.id, number: creditNoteNumber.trim() || `CN-${Date.now()}`, reason: creditNoteReason.trim(), lines }),
+      });
+      setReturnQuantities({}); setCreditNoteNumber(""); setCreditNoteReason("");
+      await loadCreditNotes(invoice.id);
+      setMessage("Draft credit note saved. Finalize it to post the return.");
+    });
+  }
+
+  async function finalizeCreditNote(creditNoteId: string) {
+    await run(async () => {
+      if (!invoice) throw new Error("Select an invoice first.");
+      await api(`/credit-notes/${encodeURIComponent(creditNoteId)}/finalize`, { method: "POST" });
+      await refreshAccounting(invoice.id);
+      setMessage("Credit note finalized. The return has been posted to the books.");
+    });
   }
 
   async function submitStockMovement(event: FormEvent<HTMLFormElement>) {
@@ -403,6 +474,24 @@ export function App() {
           <label>Payment account<select value={paymentAccount} onChange={(event) => setPaymentAccount(event.target.value as Account)}><option value="CASH">Cash</option><option value="RECEIVABLES">Accounts receivable</option></select></label><label className="check"><input type="checkbox" checked={saveAsQuotation} onChange={(event) => setSaveAsQuotation(event.target.checked)} disabled={invoice?.status === "FINALIZED" || invoice?.status === "CANCELLED"} /> Save as quotation</label><button disabled={busy || !businessId}>{saveAsQuotation ? (invoice?.status === "QUOTATION" ? "Update quotation" : "Save quotation") : invoice?.status === "DRAFT" ? "Update draft invoice" : "Save draft invoice"}</button>
         </form>{invoice && <div className="invoice"><div className="row"><strong>{invoice.number}</strong><span className={`badge ${invoice.status.toLowerCase()}`}>{invoice.status}</span></div><p>{invoice.lines.length} line{invoice.lines.length === 1 ? "" : "s"} · Total {money(invoice.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0) - (invoice.discountPaise ?? 0) + (invoice.extraChargePaise ?? 0) + Math.round((invoice.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0) - (invoice.discountPaise ?? 0) + (invoice.extraChargePaise ?? 0)) * (invoice.taxRateBasisPoints ?? 0) / 10000))}</p>{invoice.status === "QUOTATION" && <button className="primary" onClick={() => void convertQuotation()} disabled={busy || invoice.convertedInvoiceId !== undefined}>Convert to draft invoice</button>}{invoice.status === "DRAFT" && <button className="primary" onClick={() => updateInvoice("finalize")} disabled={busy}>Finalize invoice</button>}{invoice.status === "FINALIZED" && <button className="danger" onClick={() => updateInvoice("cancel")} disabled={busy}>Cancel with reversal</button>}</div>}</article>
       </section>
+      {invoice?.status === "FINALIZED" && <section className="card"><p className="eyebrow">Sales returns</p><h3>Credit note for {invoice.number}</h3>
+        <form onSubmit={submitCreditNote} className="form">
+          <div className="form-row"><label>Credit note number<input value={creditNoteNumber} placeholder="CN-…" onChange={(event) => setCreditNoteNumber(event.target.value)} /></label><label>Reason<input value={creditNoteReason} onChange={(event) => setCreditNoteReason(event.target.value)} placeholder="e.g. Damaged copies returned" required /></label></div>
+          <div className="line-editor">
+            {invoice.lines.map((line, index) => (
+              <div className="line-row" key={index}>
+                <label>Description<input value={line.description} disabled readOnly /></label>
+                <label>Price (₹)<input value={(line.unitPricePaise / 100).toFixed(2)} disabled readOnly /></label>
+                <label>Returnable<input value={returnableQuantity(line)} disabled readOnly /></label>
+                <label>Return qty<input type="number" min="0" max={returnableQuantity(line)} step="1" value={returnQuantities[index] ?? ""} onChange={(event) => setReturnQuantities((current) => ({ ...current, [index]: event.target.value }))} disabled={busy || returnableQuantity(line) === 0} /></label>
+              </div>
+            ))}
+          </div>
+          <div className="invoice-total"><strong>Return value (before GST): {money(invoice.lines.reduce((total, line, index) => total + (Number(returnQuantities[index] ?? "0") || 0) * line.unitPricePaise, 0))}</strong></div>
+          <button className="primary" disabled={busy}>Save draft credit note</button>
+        </form>
+        {creditNotes.filter((note) => note.invoiceId === invoice.id).length > 0 && <table><thead><tr><th>Credit note</th><th>Reason</th><th>Status</th><th>Total</th><th /></tr></thead><tbody>{creditNotes.filter((note) => note.invoiceId === invoice.id).map((note) => <tr key={note.id}><td>{note.number}</td><td>{note.reason}</td><td><span className={`badge ${note.status.toLowerCase()}`}>{note.status}</span></td><td>{money(note.totalPaise)}</td><td>{note.status === "DRAFT" && <button className="primary" onClick={() => void finalizeCreditNote(note.id)} disabled={busy}>Finalize</button>}</td></tr>)}</tbody></table>}
+      </section>}
       <section className="card">
         <p className="eyebrow">Saved work</p><h3>Invoices</h3>
         {invoices.length === 0 ? <p className="muted">No invoices have been saved for this business.</p> : (
@@ -419,6 +508,7 @@ export function App() {
       <section className="card"><p className="eyebrow">Report detail</p><h3>General Ledger</h3>{generalLedger.length === 0 ? <p className="muted">No journal lines yet.</p> : <div className="ledger"><table><thead><tr><th>Date</th><th>Account</th><th>Description</th><th>Debit</th><th>Credit</th></tr></thead><tbody>{generalLedger.map((row) => <tr key={`${row.journalEntryId}-${row.account}`}><td>{new Date(row.date).toLocaleDateString()}</td><td>{row.account}</td><td>{row.description}{row.isReversal ? " (Reversal)" : ""}</td><td>{money(row.debitPaise)}</td><td>{money(row.creditPaise)}</td></tr>)}</tbody></table></div>}</section>
       <section className="card"><p className="eyebrow">Receivables</p><h3>Outstanding invoices</h3>{receivables.length === 0 ? <p className="muted">No outstanding receivables.</p> : <table><thead><tr><th>Invoice</th><th>Invoice date</th><th>Outstanding</th><th>Age</th></tr></thead><tbody>{receivables.map((row) => <tr key={row.invoiceId}><td>{row.invoiceNumber}</td><td>{new Date(row.invoiceDate).toLocaleDateString()}</td><td>{money(row.outstandingPaise)}</td><td>{row.ageDays} days</td></tr>)}</tbody></table>}</section>
       <section className="card"><p className="eyebrow">Fair reporting</p><h3>Sales by fair</h3>{fairSales.length === 0 ? <p className="muted">No fairs have finalized sales yet.</p> : <table><thead><tr><th>Fair</th><th>Invoices</th><th>Sales</th></tr></thead><tbody>{fairSales.map((row) => <tr key={row.fairId}><td>{row.fairName}</td><td>{row.invoiceCount}</td><td>{money(row.totalPaise)}</td></tr>)}</tbody></table>}</section>
+      <section className="card"><p className="eyebrow">Returns reporting</p><h3>Sales returns</h3>{creditNotes.filter((note) => note.status === "FINALIZED").length === 0 ? <p className="muted">No finalized credit notes yet.</p> : <><table><thead><tr><th>Credit note</th><th>Invoice</th><th>Reason</th><th>Total</th></tr></thead><tbody>{creditNotes.filter((note) => note.status === "FINALIZED").map((note) => <tr key={note.id}><td>{note.number}</td><td>{note.invoiceNumber}</td><td>{note.reason}</td><td>{money(note.totalPaise)}</td></tr>)}</tbody></table><p>Total returned: <strong>{money(creditNotes.filter((note) => note.status === "FINALIZED").reduce((total, note) => total + note.totalPaise, 0))}</strong></p></>}</section>
     </main>
   );
 }

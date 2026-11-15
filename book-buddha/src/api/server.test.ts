@@ -346,6 +346,51 @@ describe("local API", () => {
       repository.close();
     }
   });
+
+  it("lists credit notes, rejects over-returns and keeps ledger balanced", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "CN Company" } })).json<{ id: string }>().id;
+      const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "CN Business" } })).json<{ id: string }>().id;
+      const customerId = (await app.inject({ method: "POST", url: "/customers", payload: { companyId, name: "CN Customer" } })).json<{ id: string }>().id;
+      const itemId = (await app.inject({ method: "POST", url: "/items", payload: { companyId, name: "CN Book", unit: "each", trackStock: false } })).json<{ id: string }>().id;
+      const invoiceId = (await app.inject({
+        method: "POST", url: "/invoices",
+        payload: { number: "INV-CN-1", businessId, customerId, paymentAccount: "CASH", lines: [{ itemId, description: "Book", quantity: 3, unitPricePaise: 10000 }] },
+      })).json<{ id: string }>().id;
+      await app.inject({ method: "POST", url: `/invoices/${invoiceId}/finalize` });
+
+      const tooMany = await app.inject({
+        method: "POST", url: "/credit-notes",
+        payload: { invoiceId, number: "CN-0", reason: "Too many", lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }] },
+      });
+      expect(tooMany.statusCode).toBe(400);
+
+      const created = await app.inject({
+        method: "POST", url: "/credit-notes",
+        payload: { invoiceId, number: "CN-1", reason: "Damaged", lines: [{ itemId, description: "Book", quantity: 2, unitPricePaise: 10000 }] },
+      });
+      expect(created.statusCode).toBe(201);
+      const creditNoteId = created.json<{ id: string }>().id;
+
+      const drafts = await app.inject({ method: "GET", url: `/credit-notes?invoiceId=${invoiceId}` });
+      expect(drafts.json<Array<{ status: string; totalPaise: number; invoiceNumber: string }>>())
+        .toEqual([expect.objectContaining({ status: "DRAFT", totalPaise: 20000, invoiceNumber: "INV-CN-1" })]);
+      expect((await app.inject({ method: "GET", url: "/credit-notes?status=FINALIZED" })).json()).toEqual([]);
+      expect((await app.inject({ method: "GET", url: "/credit-notes?status=BOGUS" })).statusCode).toBe(400);
+
+      expect((await app.inject({ method: "POST", url: `/credit-notes/${creditNoteId}/finalize` })).statusCode).toBe(200);
+      const finalized = (await app.inject({ method: "GET", url: "/credit-notes?status=FINALIZED" })).json<Array<{ number: string; totalPaise: number }>>();
+      expect(finalized).toEqual([expect.objectContaining({ number: "CN-1", totalPaise: 20000 })]);
+
+      const pl = (await app.inject({ method: "GET", url: "/reports/profit-and-loss" })).json<{ totalIncomePaise: number }>();
+      expect(pl.totalIncomePaise).toBe(10000);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
 });
 
 interface InvoiceResponse {

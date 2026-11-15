@@ -22,7 +22,7 @@ limits are reached. Update it after every meaningful implementation phase.
 
 ## Not yet implemented
 
-- [x] Credit notes and item-linked sales returns (API/repository, GST and inventory reversal)
+- [x] Credit notes and item-linked sales returns (API/repository, GST and inventory reversal, frontend UI, and sales-returns report)
 - [ ] Recurring invoice templates and generation
 - [ ] Print/PDF invoices
 - [ ] Suppliers and supplier statements
@@ -53,8 +53,15 @@ approved target specification in the repository root and defines the full
 vertical-slice roadmap, migration rules, acceptance gates, and definition of
 fully fledged readiness.
 
-The next safe implementation slice is **credit-note frontend and report
-support**, followed by recurring invoices. Credit notes already support
+Credit-note frontend and reports are **done** (Slice 1 of the finish plan).
+The web app has a credit-note card (select a finalized invoice, choose return
+lines with quantities capped at returnable, create draft, finalize) and a
+"Sales returns" report with the total returned; the API adds
+`GET /credit-notes?invoiceId=&status=`. Slice 1 gates passed: 21/21 vitest
+tests, tsc exit 0, and vite build exit 0.
+
+The next safe implementation slice is **Slice 2: recurring invoice templates
+and generation**. Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return
 prevention, GST reversal, receivable/cash reduction, FIFO inventory
 restoration, COGS reversal, and audit events through the API.
