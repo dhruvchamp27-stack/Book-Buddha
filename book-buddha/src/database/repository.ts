@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import {
   AccountingError,
+  allocateProportionally,
   cancelInvoice,
   finalizeInvoice,
   inputTaxPaise,
@@ -364,6 +365,35 @@ export interface ProfitAndLossReport {
   readonly totalIncomePaise: number;
   readonly totalExpensesPaise: number;
   readonly netProfitPaise: number;
+  /** Which view this report is: the books as posted (ACCRUAL) or the derived cash view (CASH). */
+  readonly basis: AccountingBasis;
+  /**
+   * Gross sales including GST. Accrual: net sales + GST straight from the ledger.
+   * Cash: the cash actually collected on invoices in the period (it can differ from
+   * net + GST by a paise or two part-way through an invoice; exact once fully collected).
+   */
+  readonly grossSalesPaise: number;
+  /** Output GST (CGST + SGST + IGST) on those sales, net of any credit-note reversal. */
+  readonly gstOnSalesPaise: number;
+}
+
+/**
+ * One slice of the derived cash view: a document's accrual line, recognised on the date the
+ * cash moved. amountPaise is in the account's natural direction (credit - debit for SALES and
+ * OUTPUT_* GST; debit - credit for COGS, EXPENSE, INVENTORY and INPUT_* GST).
+ */
+export interface CashRecognitionRow {
+  readonly date: string;
+  readonly account: AccountCode;
+  readonly amountPaise: number;
+  readonly documentType: "INVOICE" | "PURCHASE_BILL" | "EXPENSE";
+  readonly documentId: string;
+}
+
+export interface CashViewDerivation {
+  readonly recognitions: readonly CashRecognitionRow[];
+  /** Cash received on invoices, by date: the "gross sales" of the cash view. */
+  readonly invoiceCollections: ReadonlyArray<{ readonly date: string; readonly amountPaise: number }>;
 }
 
 export interface BalanceSheetReport {
@@ -525,6 +555,12 @@ export interface PeriodReportFilter {
   readonly businessId?: string;
   readonly fromDate?: string;
   readonly toDate?: string;
+  /**
+   * Profit and Loss only: the view to show. Omitted means the stored accounting_basis of the
+   * given business's company, or ACCRUAL when there is no businessId (a consolidated report has
+   * no single company preference). Posting is always accrual; CASH is derived, never posted.
+   */
+  readonly basis?: AccountingBasis;
 }
 
 /** Optional filter for as-at reports (Trial Balance, Balance Sheet): everything with entry_date <= asAtDate. */
@@ -1589,18 +1625,222 @@ export class AccountingRepository {
   }
 
   public getProfitAndLoss(filter: PeriodReportFilter = {}): ProfitAndLossReport {
-    const rows = this.getReportAccountRows(filter);
+    const { basis: requestedBasis, ...rangeFilter } = filter;
+    const basis = requestedBasis ?? this.defaultReportBasis(rangeFilter.businessId);
+    if (basis !== "CASH" && basis !== "ACCRUAL") {
+      throw new RepositoryValidationError("Basis must be CASH or ACCRUAL.");
+    }
+    // Derive the cash view ONCE: both the account rows and gross sales come out of it.
+    const derivation = basis === "CASH" ? this.deriveCashView(rangeFilter) : undefined;
+    const rows = derivation === undefined ? this.getReportAccountRows(rangeFilter) : this.cashViewAccountRows(derivation);
     const income = rows.filter((row) => row.account === "SALES");
     const expenses = rows.filter((row) => row.account === "COGS" || row.account === "EXPENSE");
     const totalIncomePaise = income.reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
     const totalExpensesPaise = expenses.reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
+    const gstOnSalesPaise = rows
+      .filter((row) => row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST")
+      .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
+    const grossSalesPaise = derivation === undefined
+      ? totalIncomePaise + gstOnSalesPaise
+      : derivation.invoiceCollections.reduce((total, row) => total + row.amountPaise, 0);
     return {
       income,
       expenses,
       totalIncomePaise,
       totalExpensesPaise,
       netProfitPaise: totalIncomePaise - totalExpensesPaise,
+      basis,
+      grossSalesPaise,
+      gstOnSalesPaise,
     };
+  }
+
+  /** Company preference for a business (its stored accounting_basis); ACCRUAL for consolidated or an unknown business. */
+  private defaultReportBasis(businessId: string | undefined): AccountingBasis {
+    if (businessId === undefined) return "ACCRUAL";
+    const row = this.db
+      .prepare("SELECT c.accounting_basis AS basis FROM businesses b JOIN companies c ON c.id = b.company_id WHERE b.id = ?")
+      .get(businessId) as { basis: AccountingBasis } | undefined;
+    return row?.basis ?? "ACCRUAL";
+  }
+
+  /**
+   * An already-computed cash view, shaped like the ledger rows the accrual P&L uses
+   * (net per account). Takes the derivation rather than a filter so a cash P&L derives once.
+   */
+  private cashViewAccountRows(derivation: CashViewDerivation): readonly ReportAccountRow[] {
+    const totals = new Map<AccountCode, number>();
+    for (const row of derivation.recognitions) {
+      totals.set(row.account, (totals.get(row.account) ?? 0) + row.amountPaise);
+    }
+    const rows: ReportAccountRow[] = [];
+    for (const [account, natural] of [...totals.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      if (natural === 0) continue;
+      const creditNormal = account === "SALES" || account.startsWith("OUTPUT_");
+      const debitPaise = creditNormal ? (natural < 0 ? -natural : 0) : (natural > 0 ? natural : 0);
+      const creditPaise = creditNormal ? (natural > 0 ? natural : 0) : (natural < 0 ? -natural : 0);
+      rows.push({ account, debitPaise, creditPaise, balancePaise: debitPaise - creditPaise });
+    }
+    return rows;
+  }
+
+  /**
+   * The cash view of the books, DERIVED and READ-ONLY: it inserts, updates and deletes nothing
+   * (no journal entry or line is ever written for it). Public so the figures behind the cash
+   * Profit and Loss (inventory, input GST/ITC) can be inspected.
+   *
+   * One uniform rule for every document (invoice, purchase bill, expense). With T the document
+   * total and sum-p the cash allocated to it so far, each posted accrual line of the document is
+   * recognised in proportion sum-p / T, each increment dated to the payment that caused it
+   * (its IST date), using the cumulative-target allocator so a fully paid document lands on its
+   * accrual amounts exactly.
+   *
+   * Which lines: every journal entry with the document's source_type + source_id, so the
+   * invoice entry, its separate COGS/inventory entry, any reversal and any credit note are all
+   * gathered together (payment entries share the invoice's source_id, but carry only CASH and
+   * RECEIVABLES/PAYABLES lines, which are balance-sheet accounts and are ignored here). Lines of the
+   * same account are netted. Only SALES, COGS, EXPENSE, INVENTORY and the GST accounts are kept.
+   *
+   * Documents paid at once (payment_account CASH) have no payment rows: the cash moved when
+   * each entry was posted, so every entry is recognised in full (ratio 1) on its own entry_date.
+   * That includes a reversal (it fully negates) and a credit note. Credit documents (RECEIVABLES /
+   * PAYABLES) can only be cancelled while unpaid, so a reversal there carries ratio 0 and nets to
+   * nothing; this falls out of the same rule rather than being special-cased.
+   *
+   * CREDIT NOTES on a credit invoice (outcome of the uniform rule, pinned by a test, NOT a design
+   * choice): the note's lines are part of the invoice's lines, so they are recognised pro rata
+   * with the collections, measured against the ORIGINAL invoice total, and dated to the PAYMENT
+   * dates, not the note's own date. Consequences: (1) a note reduces cash-view sales/GST/COGS only
+   * as collections arrive; (2) a note raised AFTER the invoice was fully collected restates the
+   * earlier collection periods retroactively (the cash view then converges on the net-of-note
+   * accrual figure but a closed period changes); (3) because the receivable falls by the note but
+   * the payment cap and ratio still use the original total, cash-view gross (cash received) no
+   * longer equals net + GST. No refund is modelled. Whether a refund should instead be recognised
+   * on the refund date is an owner decision.
+   *
+   * Period: from/to filter on the recognition date (the payment's IST date, or the entry date
+   * for paid-at-once documents), with the same inclusive semantics as the accrual reports.
+   * The business filter is the document's business.
+   */
+  public deriveCashView(filter: { businessId?: string; fromDate?: string; toDate?: string } = {}): CashViewDerivation {
+    // Validates dates and ordering exactly as the accrual reports do.
+    this.reportConditions(filter);
+    const inPeriod = (date: string): boolean =>
+      (filter.fromDate === undefined || date >= filter.fromDate) && (filter.toDate === undefined || date <= filter.toDate);
+
+    type Natural = { account: AccountCode; amountPaise: number };
+    const accounts = ["SALES", "COGS", "EXPENSE", "INVENTORY", "OUTPUT_CGST", "OUTPUT_SGST", "OUTPUT_IGST", "INPUT_CGST", "INPUT_SGST", "INPUT_IGST"] as const;
+    const creditNormal = (account: string): boolean => account === "SALES" || account.startsWith("OUTPUT_");
+
+    // Posted lines of the P&L-side accounts, grouped by document and by entry.
+    const lineRows = this.db
+      .prepare(
+        `SELECT je.id AS entry_id, je.source_type, je.source_id,
+                COALESCE(je.entry_date, date(je.created_at, '+330 minutes')) AS entry_date,
+                jl.account, jl.debit_paise, jl.credit_paise
+           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE jl.account IN (${accounts.map(() => "?").join(",")})
+          ORDER BY je.rowid, jl.id`,
+      )
+      .all(...accounts) as Array<{
+      entry_id: string; source_type: string; source_id: string; entry_date: string;
+      account: AccountCode; debit_paise: number; credit_paise: number;
+    }>;
+    const byDocument = new Map<string, Array<(typeof lineRows)[number]>>();
+    for (const row of lineRows) {
+      const key = `${row.source_type}|${row.source_id}`;
+      const list = byDocument.get(key);
+      if (list === undefined) byDocument.set(key, [row]); else list.push(row);
+    }
+    const natural = (row: (typeof lineRows)[number]): number =>
+      creditNormal(row.account) ? row.credit_paise - row.debit_paise : row.debit_paise - row.credit_paise;
+
+    // Cash allocated to credit documents, in payment order.
+    const paymentsOf = new Map<string, Array<{ amountPaise: number; paidAt: string }>>();
+    const addPayment = (key: string, amountPaise: number, paidAt: string): void => {
+      const list = paymentsOf.get(key);
+      if (list === undefined) paymentsOf.set(key, [{ amountPaise, paidAt }]); else list.push({ amountPaise, paidAt });
+    };
+    for (const p of this.db.prepare("SELECT invoice_id, amount_paise, paid_at FROM payments ORDER BY paid_at, rowid").all() as Array<{ invoice_id: string; amount_paise: number; paid_at: string }>) {
+      addPayment(`INVOICE|${p.invoice_id}`, p.amount_paise, p.paid_at);
+    }
+    for (const p of this.db.prepare("SELECT bill_id, expense_id, amount_paise, paid_at FROM supplier_payments ORDER BY paid_at, rowid").all() as Array<{ bill_id: string | null; expense_id: string | null; amount_paise: number; paid_at: string }>) {
+      addPayment(p.bill_id !== null ? `PURCHASE_BILL|${p.bill_id}` : `EXPENSE|${p.expense_id}`, p.amount_paise, p.paid_at);
+    }
+
+    const businessClause = filter.businessId === undefined ? "" : " AND business_id = ?";
+    const businessParams = filter.businessId === undefined ? [] : [filter.businessId];
+    const documents: Array<{ type: "INVOICE" | "PURCHASE_BILL" | "EXPENSE"; id: string; paidAtOnce: boolean; totalPaise: () => number }> = [];
+    for (const row of this.db.prepare(`SELECT id, payment_account FROM invoices WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
+      documents.push({ type: "INVOICE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.invoiceTotal(this.getInvoice(row.id)) });
+    }
+    for (const row of this.db.prepare(`SELECT id, payment_account FROM purchase_bills WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
+      documents.push({ type: "PURCHASE_BILL", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.getPurchaseBill(row.id).totalPaise });
+    }
+    for (const row of this.db.prepare(`SELECT id, payment_account FROM expenses WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
+      documents.push({ type: "EXPENSE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.getExpense(row.id).totalPaise });
+    }
+
+    const recognitions: CashRecognitionRow[] = [];
+    const invoiceCollections: Array<{ date: string; amountPaise: number }> = [];
+    const sumByAccount = (rows: ReadonlyArray<(typeof lineRows)[number]>): Natural[] => {
+      const sums = new Map<AccountCode, number>();
+      for (const row of rows) sums.set(row.account, (sums.get(row.account) ?? 0) + natural(row));
+      return [...sums.entries()].map(([account, amountPaise]) => ({ account, amountPaise }));
+    };
+
+    for (const doc of documents) {
+      const key = `${doc.type}|${doc.id}`;
+      const docLines = byDocument.get(key) ?? [];
+      if (docLines.length === 0) continue;
+
+      if (doc.paidAtOnce) {
+        // Cash moved when each entry was posted: ratio 1 at that entry's own date.
+        const entries = new Map<string, Array<(typeof lineRows)[number]>>();
+        for (const row of docLines) {
+          const list = entries.get(row.entry_id);
+          if (list === undefined) entries.set(row.entry_id, [row]); else list.push(row);
+        }
+        for (const entryLines of entries.values()) {
+          const date = (entryLines[0] as (typeof lineRows)[number]).entry_date;
+          if (!inPeriod(date)) continue;
+          for (const line of sumByAccount(entryLines)) {
+            if (line.amountPaise !== 0) recognitions.push({ date, account: line.account, amountPaise: line.amountPaise, documentType: doc.type, documentId: doc.id });
+          }
+          if (doc.type === "INVOICE") {
+            const gross = entryLines
+              .filter((row) => row.account === "SALES" || row.account.startsWith("OUTPUT_"))
+              .reduce((total, row) => total + natural(row), 0);
+            if (gross !== 0) invoiceCollections.push({ date, amountPaise: gross });
+          }
+        }
+        continue;
+      }
+
+      // Credit document: scale the netted lines by cumulative cash / total, per payment.
+      const totalPaise = doc.totalPaise();
+      if (totalPaise <= 0) continue;
+      const lines = sumByAccount(docLines);
+      let paidBefore = 0;
+      for (const payment of paymentsOf.get(key) ?? []) {
+        const paidAfter = Math.min(paidBefore + payment.amountPaise, totalPaise);
+        const date = istDateOf(payment.paidAt);
+        if (paidAfter > paidBefore) {
+          if (inPeriod(date)) {
+            const shares = allocateProportionally({
+              lineAmountsPaise: lines.map((line) => line.amountPaise), totalPaise, paidBeforePaise: paidBefore, paidAfterPaise: paidAfter,
+            });
+            lines.forEach((line, index) => {
+              const share = shares[index] as number;
+              if (share !== 0) recognitions.push({ date, account: line.account, amountPaise: share, documentType: doc.type, documentId: doc.id });
+            });
+            if (doc.type === "INVOICE") invoiceCollections.push({ date, amountPaise: payment.amountPaise });
+          }
+        }
+        paidBefore = paidAfter;
+      }
+    }
+    return { recognitions, invoiceCollections };
   }
 
   public getBalanceSheet(filter: AsAtReportFilter = {}): BalanceSheetReport {

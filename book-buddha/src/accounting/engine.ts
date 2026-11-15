@@ -289,3 +289,51 @@ export function supplierPaymentEntry(input: {
     isReversal: false,
   };
 }
+
+export interface ProportionalAllocationInput {
+  /** Whole-paise amounts of the lines to recognise. May be negative (a net credit-side balance); zero is fine. */
+  readonly lineAmountsPaise: readonly number[];
+  /** T: the document total the payments are measured against. Must be above zero. */
+  readonly totalPaise: number;
+  /** Cumulative cash allocated to the document BEFORE this payment. */
+  readonly paidBeforePaise: number;
+  /** Cumulative cash allocated to the document AFTER this payment (never above the total). */
+  readonly paidAfterPaise: number;
+}
+
+/**
+ * Cash-basis recognition of one payment against one document, using a CUMULATIVE TARGET.
+ *
+ * A line of amount L is recognised to date as round(L x paid / T) (half rounds away from zero,
+ * and at full payment exactly L). This payment's share of the line is
+ * target(paidAfter) - target(paidBefore), clamped to [0, L - target(paidBefore)] in magnitude,
+ * and carries the line's sign. Because every payment is the difference of two points on one
+ * monotonic curve, the shares of any sequence of payments telescope: when the document is fully
+ * paid each line has recognised EXACTLY its full amount, however many odd-sized payments came
+ * first. Rounding each payment separately would drift; this cannot.
+ *
+ * Pure and read-only. Uses BigInt for the product so large amounts cannot lose paise.
+ */
+export function allocateProportionally(input: ProportionalAllocationInput): readonly number[] {
+  const { lineAmountsPaise, totalPaise, paidBeforePaise, paidAfterPaise } = input;
+  const whole = [totalPaise, paidBeforePaise, paidAfterPaise, ...lineAmountsPaise];
+  if (whole.some((value) => !Number.isSafeInteger(value))) {
+    throw new AccountingError("Cash-basis amounts must be whole paise.");
+  }
+  if (totalPaise <= 0) {
+    throw new AccountingError("The document total must be above zero.");
+  }
+  if (paidBeforePaise < 0 || paidAfterPaise < paidBeforePaise || paidAfterPaise > totalPaise) {
+    throw new AccountingError("Payments must be in order and cannot exceed the document total.");
+  }
+  const total = BigInt(totalPaise);
+  const target = (magnitude: number, paid: number): number =>
+    paid >= totalPaise ? magnitude : Number((2n * BigInt(magnitude) * BigInt(paid) + total) / (2n * total));
+  return lineAmountsPaise.map((amount) => {
+    const magnitude = Math.abs(amount);
+    const before = target(magnitude, paidBeforePaise);
+    const after = target(magnitude, paidAfterPaise);
+    const share = Math.min(Math.max(after - before, 0), magnitude - before);
+    return amount < 0 ? -share : share;
+  });
+}

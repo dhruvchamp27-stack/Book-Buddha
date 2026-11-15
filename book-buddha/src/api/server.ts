@@ -263,6 +263,16 @@ const periodReportQuery = z.object({
   fromDate: reportDate.optional(),
   toDate: reportDate.optional(),
 }).strict().transform((value) => definedOnly(value));
+/**
+ * Profit and Loss: the period filters plus an optional basis. Omitted means the business's
+ * company default (its stored accounting_basis), or ACCRUAL when no business is given.
+ */
+const profitAndLossQuery = z.object({
+  businessId: id.optional(),
+  fromDate: reportDate.optional(),
+  toDate: reportDate.optional(),
+  basis: z.enum(["CASH", "ACCRUAL"]).optional(),
+}).strict().transform((value) => definedOnly(value));
 /** As-at reports (Trial Balance, Balance Sheet): optional business and a single as-at date. */
 const asAtReportQuery = z.object({
   businessId: id.optional(),
@@ -895,7 +905,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   app.get("/reports/trial-balance", async (request) =>
     repository.getTrialBalance(parseBody(asAtReportQuery, request.query)));
   app.get("/reports/profit-and-loss", async (request) =>
-    repository.getProfitAndLoss(parseBody(periodReportQuery, request.query)));
+    repository.getProfitAndLoss(parseBody(profitAndLossQuery, request.query)));
   app.get("/reports/balance-sheet", async (request) =>
     repository.getBalanceSheet(parseBody(asAtReportQuery, request.query)));
   app.get("/reports/general-ledger", async (request) =>
