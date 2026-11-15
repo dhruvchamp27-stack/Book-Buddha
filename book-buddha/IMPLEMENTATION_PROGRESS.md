@@ -25,10 +25,10 @@ limits are reached. Update it after every meaningful implementation phase.
 - [x] Credit notes and item-linked sales returns (API/repository, GST and inventory reversal, frontend UI, and sales-returns report)
 - [x] Recurring invoice templates and generation (API, repository, and due-invoice generation are done; frontend UI is DEFERRED to the later UI phase)
 - [ ] Print/PDF invoices
-- [ ] Suppliers and supplier statements
-- [ ] Purchase bills, purchase taxes, and purchase returns
-- [ ] Expenses and receipts
-- [ ] Supplier payments, refunds, and payables ageing
+- [x] Suppliers and supplier statements (backend; supplier delete/deactivate and `GET /suppliers/:id` DEFERRED)
+- [x] Purchase bills and purchase taxes (backend; **purchase returns** and header-level bill discount/extra-charge DEFERRED)
+- [x] Expenses (backend; **receipts/attachments** DEFERRED)
+- [x] Supplier payments and payables ageing (backend; supplier **refunds** and cancelling a supplier payment DEFERRED)
 - [ ] Bank accounts, transfers, and reconciliation
 - [ ] Cash Flow Statement
 - [ ] Date/business/fair/item/customer filters and consolidated reports
@@ -105,7 +105,46 @@ GL entry; tying the stock sub-ledger to the INVENTORY ledger is a deferred
 accounting decision for Slice 6 (purchasing) / opening balances. Slice 5 gates
 passed: 73/73 vitest tests, tsc exit 0, vite build exit 0.
 
-The next safe implementation slice is **Slice 6: Sales, payments, purchasing, expenses**.
+Slice 6 (Purchasing and expenses) is **backend-done**. Migration v4
+`purchasing_expenses` (transactional:false) drops the `journal_entries -> invoices`
+FK and adds `source_type`, widens the `journal_lines` account CHECK with
+`PAYABLES / INPUT_CGST / INPUT_SGST / INPUT_IGST / EXPENSE`, adds
+`PURCHASE_REVERSAL` to `stock_movements`, and creates `suppliers`,
+`purchase_bills(+lines)`, `expense_categories`, `expenses` and
+`supplier_payments`; the rebuilds preserve every index and replay any trigger,
+and a `foreign_key_check` gates success. New pure engine helpers
+(`purchaseEntry`, `inputTaxLines`, `reverseEntry`, `supplierPaymentEntry`) post
+through `balancedLines`. Purchase bills **tie inventory to the INVENTORY ledger**:
+a tracked line debits INVENTORY and adds a FIFO PURCHASE lot (source = bill id);
+non-tracked lines debit EXPENSE; input GST debits INPUT_*; the payment account
+(CASH or PAYABLES) is credited the full total. Expenses post the same way on a
+single amount. Supplier payments debit PAYABLES, credit CASH, capped at the
+document's outstanding. Cancels are exact reversals, immutable otherwise;
+a bill cancel is **refused per-lot** if any of the bill's own purchased stock was
+already sold, and **refused** if supplier payments exist. `getPayables` and
+`getSupplierStatement` added; Balance Sheet now carries INPUT_* (asset) and
+PAYABLES (liability) and the P&L carries EXPENSE.
+
+**Deliberate decisions in Slice 6 (surface to the owner):**
+- **Recognition is accrual-at-finalize for all companies, BUT cash-basis
+  companies are refused PAYABLES (credit) bills/expenses** (CASH only). This keeps
+  the cash/accrual invariant intact without guessing; full cash-basis deferral of
+  credit purchases (symmetric with sales) is a later design decision.
+- **Retained earnings on the Balance Sheet was corrected** from `SALES` only to
+  `SALES - COGS - EXPENSE`. This changes sales-side Balance Sheet output whenever
+  COGS exists (no prior test asserted it; the sheet could not balance without it).
+- **Known pre-existing presentation quirk (not changed):** liability rows report
+  as `debit - credit`, so liabilities (incl. PAYABLES) show as **negative**
+  numbers and `totalLiabilitiesPaise` is negative. A reporting/UI-slice fix.
+- Inventory ties to the ledger for **bill-sourced** stock only; stock added via
+  `addStockMovement` (OPENING/ADJUSTMENT) still posts no GL entry (opening-balance
+  offset account is a later decision).
+
+Slice 6 gates passed: 87/87 vitest tests, tsc exit 0, vite build exit 0.
+
+The next safe implementation slice is **Slice 7: Projects / subscriptions /
+consolidated and cash-basis reports** (where report-level cash-basis views and the
+liability-sign fix belong).
 
 Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return

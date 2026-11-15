@@ -1,6 +1,15 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { cancelInvoice, finalizeInvoice } from "../accounting/engine.js";
+import {
+  AccountingError,
+  cancelInvoice,
+  finalizeInvoice,
+  inputTaxPaise,
+  purchaseEntry,
+  reverseEntry,
+  supplierPaymentEntry,
+  validatePurchaseTax,
+} from "../accounting/engine.js";
 import type {
   AccountCode,
   AuditEvent,
@@ -8,12 +17,33 @@ import type {
   CreditNoteLine,
   Invoice,
   InvoiceLine,
+  InvoiceTaxType,
   JournalEntry,
+  JournalSourceType,
   Payment,
+  PurchaseBillLine,
+  PurchaseDocumentStatus,
+  PurchasePaymentAccount,
+  SupplierPayment,
 } from "../accounting/types.js";
 import type { AccountingBasis } from "../accounting/types.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
+import type {
+  ExpenseCategoryRecord,
+  ExpenseInput,
+  ExpenseRecord,
+  PayableRow,
+  PurchaseBillInput,
+  PurchaseBillRecord,
+  SupplierInput,
+  SupplierPatch,
+  SupplierPaymentInput,
+  SupplierRecord,
+  SupplierStatement,
+  SupplierStatementRow,
+} from "./purchasing-types.js";
+export type * from "./purchasing-types.js";
 import { hashPassword, passwordPolicyProblem, verifyPassword } from "../auth/password.js";
 import {
   generateSessionToken,
@@ -348,6 +378,7 @@ export interface BalanceSheetReport {
 export interface GeneralLedgerRow {
   readonly journalEntryId: string;
   readonly sourceId: string;
+  readonly sourceType: JournalSourceType;
   readonly date: string;
   readonly description: string;
   readonly isReversal: boolean;
@@ -380,7 +411,7 @@ export interface StockMovement {
   readonly id: string;
   readonly itemId: string;
   readonly sourceId: string | null;
-  readonly movementType: StockMovementType | "SALE" | "SALE_REVERSAL";
+  readonly movementType: StockMovementType | "SALE" | "SALE_REVERSAL" | "PURCHASE_REVERSAL";
   readonly quantityDelta: number;
   readonly unitCostPaise: number;
   readonly occurredAt: string;
@@ -478,6 +509,12 @@ function mapCustomerRow(row: CustomerRow): CustomerRecord {
     numberingCategory: row.numbering_category,
     active: row.active === 1,
   };
+}
+
+interface StockLayer {
+  quantity: number;
+  unitCostPaise: number;
+  sourceId: string | null;
 }
 
 export class RepositoryValidationError extends Error {
@@ -1570,7 +1607,7 @@ export class AccountingRepository {
   public getProfitAndLoss(): ProfitAndLossReport {
     const rows = this.getReportAccountRows();
     const income = rows.filter((row) => row.account === "SALES");
-    const expenses = rows.filter((row) => row.account === "COGS");
+    const expenses = rows.filter((row) => row.account === "COGS" || row.account === "EXPENSE");
     const totalIncomePaise = income.reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
     const totalExpensesPaise = expenses.reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
     return {
@@ -1584,12 +1621,19 @@ export class AccountingRepository {
 
   public getBalanceSheet(): BalanceSheetReport {
     const rows = this.getReportAccountRows();
-    const assets = rows.filter((row) => row.account === "CASH" || row.account === "RECEIVABLES" || row.account === "INVENTORY");
+    const assets = rows.filter((row) =>
+      row.account === "CASH" || row.account === "RECEIVABLES" || row.account === "INVENTORY"
+      || row.account === "INPUT_CGST" || row.account === "INPUT_SGST" || row.account === "INPUT_IGST");
     const liabilities = rows.filter((row) =>
-      row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST");
+      row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST"
+      || row.account === "PAYABLES");
+    // Retained earnings = SALES - COGS - EXPENSE (net of debit/credit), so the sheet balances.
     const netProfitPaise = rows
       .filter((row) => row.account === "SALES")
-      .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
+      .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0)
+      - rows
+        .filter((row) => row.account === "COGS" || row.account === "EXPENSE")
+        .reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
     const equity: readonly ReportAccountRow[] = [{
       account: "RETAINED_EARNINGS",
       debitPaise: netProfitPaise < 0 ? Math.abs(netProfitPaise) : 0,
@@ -1609,7 +1653,7 @@ export class AccountingRepository {
   public getGeneralLedger(): readonly GeneralLedgerRow[] {
     const rows = this.db
       .prepare(
-        `SELECT je.id AS journal_entry_id, je.source_id, je.created_at, je.description,
+        `SELECT je.id AS journal_entry_id, je.source_id, je.source_type, je.created_at, je.description,
                 je.is_reversal, jl.account, jl.debit_paise, jl.credit_paise
          FROM journal_entries je
          JOIN journal_lines jl ON jl.journal_entry_id = je.id
@@ -1618,6 +1662,7 @@ export class AccountingRepository {
       .all() as Array<{
       journal_entry_id: string;
       source_id: string;
+      source_type: JournalSourceType;
       created_at: string;
       description: string;
       is_reversal: number;
@@ -1628,6 +1673,7 @@ export class AccountingRepository {
     return rows.map((row) => ({
       journalEntryId: row.journal_entry_id,
       sourceId: row.source_id,
+      sourceType: row.source_type,
       date: row.created_at,
       description: row.description,
       isReversal: row.is_reversal === 1,
@@ -1641,9 +1687,9 @@ export class AccountingRepository {
     const now = new Date().toISOString();
     this.db
       .prepare(
-        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now);
+      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now, entry.sourceType ?? "INVOICE");
     const statement = this.db.prepare(
       "INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES (?, ?, ?, ?)",
     );
@@ -1832,17 +1878,31 @@ export class AccountingRepository {
     return row?.track_stock === 1;
   }
 
-  private getStockLayers(itemId: string): Array<{ quantity: number; unitCostPaise: number }> {
+  private getStockLayers(itemId: string): StockLayer[] {
     const rows = this.db.prepare(
-      "SELECT quantity_delta, unit_cost_paise FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid",
-    ).all(itemId) as Array<{ quantity_delta: number; unit_cost_paise: number }>;
-    const layers: Array<{ quantity: number; unitCostPaise: number }> = [];
+      "SELECT source_id, movement_type, quantity_delta, unit_cost_paise FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid",
+    ).all(itemId) as Array<{ source_id: string | null; movement_type: string; quantity_delta: number; unit_cost_paise: number }>;
+    const layers: StockLayer[] = [];
     for (const row of rows) {
       if (row.quantity_delta > 0) {
-        layers.push({ quantity: row.quantity_delta, unitCostPaise: row.unit_cost_paise });
+        layers.push({ quantity: row.quantity_delta, unitCostPaise: row.unit_cost_paise, sourceId: row.source_id });
         continue;
       }
       let remaining = Math.abs(row.quantity_delta);
+      if (row.movement_type === "PURCHASE_REVERSAL") {
+        // Removes this purchase's own lot (same source and cost), never the oldest lot.
+        for (const layer of layers) {
+          if (remaining === 0) break;
+          if (layer.sourceId !== row.source_id || layer.unitCostPaise !== row.unit_cost_paise) continue;
+          const removed = Math.min(remaining, layer.quantity);
+          layer.quantity -= removed;
+          remaining -= removed;
+        }
+        for (let index = layers.length - 1; index >= 0; index -= 1) {
+          if (layers[index]?.quantity === 0) layers.splice(index, 1);
+        }
+        continue;
+      }
       while (remaining > 0 && layers.length > 0) {
         const layer = layers[0];
         if (layer === undefined) break;
@@ -1858,7 +1918,7 @@ export class AccountingRepository {
   private insertStockMovement(input: {
     itemId: string;
     sourceId: string;
-    movementType: "SALE" | "SALE_REVERSAL";
+    movementType: "SALE" | "SALE_REVERSAL" | "PURCHASE" | "PURCHASE_REVERSAL";
     quantityDelta: number;
     unitCostPaise: number;
   }): void {
@@ -2224,6 +2284,595 @@ export class AccountingRepository {
         );
       }
     }
+  }
+
+  // ---------------------------------------------------------------- purchasing & expenses (Slice 6)
+  //
+  // Purchase bills and expenses are recognised on an ACCRUAL basis at finalize. Cash-basis
+  // companies may only use payment_account = CASH (credit purchases are refused until the
+  // cash-basis deferral is designed). Inventory ties to the GL for BILL-SOURCED stock only:
+  // stock added through addStockMovement (OPENING/ADJUSTMENT) posts no GL.
+
+  /** Runs pure accounting code and surfaces its errors as validation errors (HTTP 400). */
+  private guard<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (error) {
+      if (error instanceof AccountingError) throw new RepositoryValidationError(error.message);
+      throw error;
+    }
+  }
+
+  private requireBusinessCompany(businessId: string): { companyId: string; basis: AccountingBasis } {
+    const row = this.db
+      .prepare("SELECT b.company_id, c.accounting_basis FROM businesses b JOIN companies c ON c.id = b.company_id WHERE b.id = ?")
+      .get(businessId) as { company_id: string; accounting_basis: AccountingBasis } | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`Business ${businessId} was not found.`);
+    return { companyId: row.company_id, basis: row.accounting_basis };
+  }
+
+  private requireSupplier(supplierId: string): { companyId: string; name: string } {
+    const row = this.db.prepare("SELECT company_id, name FROM suppliers WHERE id = ?").get(supplierId) as
+      { company_id: string; name: string } | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`Supplier ${supplierId} was not found.`);
+    return { companyId: row.company_id, name: row.name };
+  }
+
+  private assertCashBasisAllows(basis: AccountingBasis, paymentAccount: PurchasePaymentAccount): void {
+    if (basis === "CASH" && paymentAccount === "PAYABLES") {
+      throw new RepositoryValidationError(
+        "Credit purchases (payable later) are not supported for cash-basis companies yet. Use payment account CASH.",
+      );
+    }
+  }
+
+  private assertIsoDate(label: string, value: string): void {
+    if (!isValidIsoDate(value)) throw new RepositoryValidationError(`${label} must be a real date written as YYYY-MM-DD.`);
+  }
+
+  // ---- suppliers
+
+  public createSupplier(input: SupplierInput): string {
+    this.requireCompany(input.companyId);
+    this.validateClassification(input.classification);
+    if (input.name.trim() === "") throw new RepositoryValidationError("Supplier name cannot be empty.");
+    const id = input.id ?? randomUUID();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO suppliers (id, company_id, name, email, phone, phone2, classification, gstin, website,
+             billing_address, shipping_address, internal_notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id, input.companyId, input.name, input.email ?? null, input.phone ?? null, input.phone2 ?? null,
+          input.classification ?? null, input.gstin ?? null, input.website ?? null, input.billingAddress ?? null,
+          input.shippingAddress ?? null, input.internalNotes ?? null, new Date().toISOString(),
+        );
+      this.insertAuditEvent({ action: "supplier.created", entityId: id, occurredAt: new Date().toISOString() });
+    })();
+    return id;
+  }
+
+  public updateSupplier(supplierId: string, patch: SupplierPatch): void {
+    this.requireSupplier(supplierId);
+    this.validateClassification(patch.classification);
+    if (patch.name !== undefined && patch.name.trim() === "") {
+      throw new RepositoryValidationError("Supplier name cannot be empty.");
+    }
+    const columns: Array<[string, string | null | undefined]> = [
+      ["name", patch.name], ["email", patch.email], ["phone", patch.phone], ["phone2", patch.phone2],
+      ["classification", patch.classification], ["gstin", patch.gstin], ["website", patch.website],
+      ["billing_address", patch.billingAddress], ["shipping_address", patch.shippingAddress],
+      ["internal_notes", patch.internalNotes],
+    ];
+    const changed = columns.filter(([, value]) => value !== undefined);
+    if (changed.length === 0) return;
+    this.db.transaction(() => {
+      this.db
+        .prepare(`UPDATE suppliers SET ${changed.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`)
+        .run(...changed.map(([, value]) => value as string | null), supplierId);
+      this.insertAuditEvent({ action: "supplier.updated", entityId: supplierId, occurredAt: new Date().toISOString() });
+    })();
+  }
+
+  public setSupplierActive(supplierId: string, active: boolean): void {
+    this.requireSupplier(supplierId);
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE suppliers SET active = ? WHERE id = ?").run(active ? 1 : 0, supplierId);
+      this.insertAuditEvent({
+        action: active ? "supplier.activated" : "supplier.deactivated",
+        entityId: supplierId,
+        occurredAt: new Date().toISOString(),
+      });
+    })();
+  }
+
+  public listSuppliers(companyId?: string, options: { activeOnly?: boolean } = {}): readonly SupplierRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (companyId !== undefined) { conditions.push("company_id = ?"); params.push(companyId); }
+    if (options.activeOnly === true) conditions.push("active = 1");
+    const rows = this.db
+      .prepare(
+        `SELECT id, company_id, name, email, phone, phone2, classification, gstin, website, billing_address,
+                shipping_address, internal_notes, active FROM suppliers
+         ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY name, rowid`,
+      )
+      .all(...params) as Array<{
+      id: string; company_id: string; name: string; email: string | null; phone: string | null; phone2: string | null;
+      classification: string | null; gstin: string | null; website: string | null; billing_address: string | null;
+      shipping_address: string | null; internal_notes: string | null; active: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id, companyId: row.company_id, name: row.name, email: row.email, phone: row.phone, phone2: row.phone2,
+      classification: row.classification, gstin: row.gstin, website: row.website, billingAddress: row.billing_address,
+      shippingAddress: row.shipping_address, internalNotes: row.internal_notes, active: row.active === 1,
+    }));
+  }
+
+  // ---- expense categories
+
+  public createExpenseCategory(input: { id?: string; companyId: string; name: string }): string {
+    this.requireCompany(input.companyId);
+    const name = input.name.trim();
+    if (name === "") throw new RepositoryValidationError("Expense category name cannot be empty.");
+    const duplicate = this.db
+      .prepare("SELECT 1 FROM expense_categories WHERE company_id = ? AND LOWER(name) = LOWER(?)")
+      .get(input.companyId, name);
+    if (duplicate !== undefined) throw new RepositoryValidationError(`Expense category "${name}" already exists.`);
+    const id = input.id ?? randomUUID();
+    this.db.transaction(() => {
+      this.db
+        .prepare("INSERT INTO expense_categories (id, company_id, name, created_at) VALUES (?, ?, ?, ?)")
+        .run(id, input.companyId, name, new Date().toISOString());
+      this.insertAuditEvent({ action: "expense_category.created", entityId: id, occurredAt: new Date().toISOString() });
+    })();
+    return id;
+  }
+
+  public listExpenseCategories(companyId?: string): readonly ExpenseCategoryRecord[] {
+    const statement = companyId === undefined
+      ? this.db.prepare("SELECT id, company_id, name, active FROM expense_categories ORDER BY name, rowid")
+      : this.db.prepare("SELECT id, company_id, name, active FROM expense_categories WHERE company_id = ? ORDER BY name, rowid");
+    const rows = (companyId === undefined ? statement.all() : statement.all(companyId)) as Array<{
+      id: string; company_id: string; name: string; active: number;
+    }>;
+    return rows.map((row) => ({ id: row.id, companyId: row.company_id, name: row.name, active: row.active === 1 }));
+  }
+
+  // ---- purchase bills
+
+  public createPurchaseBill(input: PurchaseBillInput): PurchaseBillRecord {
+    const id = input.id ?? randomUUID();
+    const taxType = input.taxType ?? "NONE";
+    const rate = input.taxRateBasisPoints ?? 0;
+    this.db.transaction(() => {
+      const business = this.requireBusinessCompany(input.businessId);
+      const supplier = this.requireSupplier(input.supplierId);
+      if (supplier.companyId !== business.companyId) {
+        throw new RepositoryValidationError("The supplier must belong to the same company as the business.");
+      }
+      if (input.number.trim() === "") throw new RepositoryValidationError("Bill number cannot be empty.");
+      this.assertIsoDate("Bill date", input.billDate);
+      if (input.dueDate !== undefined) {
+        this.assertIsoDate("Due date", input.dueDate);
+        if (input.dueDate < input.billDate) throw new RepositoryValidationError("Due date cannot be before the bill date.");
+      }
+      this.assertCashBasisAllows(business.basis, input.paymentAccount);
+      this.guard(() => validatePurchaseTax(taxType, rate));
+      if (input.lines.length === 0) throw new RepositoryValidationError("A purchase bill must contain at least one line.");
+      let subtotal = 0;
+      for (const line of input.lines) {
+        if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+          throw new RepositoryValidationError("Bill quantities must be positive whole numbers.");
+        }
+        if (!Number.isInteger(line.unitPricePaise) || line.unitPricePaise < 0) {
+          throw new RepositoryValidationError("Bill unit prices must be non-negative whole paise.");
+        }
+        if (line.description.trim() === "") throw new RepositoryValidationError("Bill line description cannot be empty.");
+        subtotal += line.quantity * line.unitPricePaise;
+        if (line.itemId !== undefined) {
+          const item = this.db.prepare("SELECT company_id FROM items WHERE id = ?").get(line.itemId) as
+            { company_id: string } | undefined;
+          if (item === undefined) throw new RepositoryValidationError(`Item ${line.itemId} was not found.`);
+          if (item.company_id !== business.companyId) {
+            throw new RepositoryValidationError("Bill items must belong to the same company as the business.");
+          }
+        }
+      }
+      if (subtotal <= 0) throw new RepositoryValidationError("A purchase bill must have a total above zero.");
+      this.db
+        .prepare(
+          `INSERT INTO purchase_bills (id, business_id, supplier_id, number, supplier_invoice_number, bill_date, due_date,
+             notes, tax_type, tax_rate_basis_points, payment_account, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`,
+        )
+        .run(
+          id, input.businessId, input.supplierId, input.number, input.supplierInvoiceNumber ?? null, input.billDate,
+          input.dueDate ?? null, input.notes ?? null, taxType, rate, input.paymentAccount, new Date().toISOString(),
+        );
+      const lineStatement = this.db.prepare(
+        "INSERT INTO purchase_bill_lines (bill_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const line of input.lines) {
+        lineStatement.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
+      }
+      this.insertAuditEvent({ action: "purchase_bill.created", entityId: id, occurredAt: new Date().toISOString() });
+    })();
+    return this.getPurchaseBill(id);
+  }
+
+  public getPurchaseBill(billId: string): PurchaseBillRecord {
+    const row = this.db.prepare("SELECT * FROM purchase_bills WHERE id = ?").get(billId) as {
+      id: string; business_id: string; supplier_id: string; number: string; supplier_invoice_number: string | null;
+      bill_date: string; due_date: string | null; notes: string | null; tax_type: InvoiceTaxType;
+      tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
+    } | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`Purchase bill ${billId} was not found.`);
+    const lineRows = this.db
+      .prepare("SELECT item_id, description, quantity, unit_price_paise FROM purchase_bill_lines WHERE bill_id = ? ORDER BY id")
+      .all(billId) as InvoiceLineRow[];
+    const lines = lineRows.map((line): PurchaseBillLine => ({
+      ...(line.item_id === null ? {} : { itemId: line.item_id }),
+      description: line.description,
+      quantity: line.quantity,
+      unitPricePaise: line.unit_price_paise,
+    }));
+    const subtotalPaise = lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+    const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(subtotalPaise * row.tax_rate_basis_points / 10000);
+    const paid = this.db
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE bill_id = ?")
+      .get(billId) as { paid: number };
+    return {
+      id: row.id, businessId: row.business_id, supplierId: row.supplier_id, number: row.number,
+      supplierInvoiceNumber: row.supplier_invoice_number, billDate: row.bill_date, dueDate: row.due_date,
+      notes: row.notes, taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points,
+      paymentAccount: row.payment_account, status: row.status, lines,
+      subtotalPaise, taxPaise, totalPaise: subtotalPaise + taxPaise, paidPaise: paid.paid,
+    };
+  }
+
+  public listPurchaseBills(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): readonly PurchaseBillRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.businessId !== undefined) { conditions.push("business_id = ?"); params.push(filter.businessId); }
+    if (filter.supplierId !== undefined) { conditions.push("supplier_id = ?"); params.push(filter.supplierId); }
+    if (filter.status !== undefined) { conditions.push("status = ?"); params.push(filter.status); }
+    const ids = this.db
+      .prepare(`SELECT id FROM purchase_bills ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY created_at, rowid`)
+      .all(...params) as Array<{ id: string }>;
+    return ids.map((row) => this.getPurchaseBill(row.id));
+  }
+
+  public finalizePurchaseBill(billId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const bill = this.getPurchaseBill(billId);
+      if (bill.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase bills can be finalized.");
+      const business = this.requireBusinessCompany(bill.businessId);
+      this.assertCashBasisAllows(business.basis, bill.paymentAccount);
+      let inventoryPaise = 0;
+      let expensePaise = 0;
+      for (const line of bill.lines) {
+        const amount = line.quantity * line.unitPricePaise;
+        if (line.itemId !== undefined && this.isTrackedItem(line.itemId)) {
+          inventoryPaise += amount;
+          this.insertStockMovement({
+            itemId: line.itemId, sourceId: bill.id, movementType: "PURCHASE",
+            quantityDelta: line.quantity, unitCostPaise: line.unitPricePaise,
+          });
+        } else {
+          expensePaise += amount;
+        }
+      }
+      const result = this.guard(() => purchaseEntry({
+        entryId: `je-bill-${bill.id}`,
+        sourceId: bill.id,
+        sourceType: "PURCHASE_BILL",
+        description: `Purchase bill ${bill.number}`,
+        inventoryPaise,
+        expensePaise,
+        taxType: bill.taxType,
+        taxRateBasisPoints: bill.taxRateBasisPoints,
+        paymentAccount: bill.paymentAccount,
+      }));
+      this.insertJournalEntry(result.entry);
+      this.db.prepare("UPDATE purchase_bills SET status = 'FINALIZED' WHERE id = ?").run(bill.id);
+      this.insertAuditEvent({ action: "purchase_bill.finalized", entityId: bill.id, occurredAt: new Date().toISOString() });
+      return result.entry;
+    })();
+  }
+
+  public cancelPurchaseBill(billId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const bill = this.getPurchaseBill(billId);
+      if (bill.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized purchase bills can be cancelled.");
+      if (bill.paidPaise > 0) {
+        throw new RepositoryValidationError("A purchase bill with recorded supplier payments cannot be cancelled.");
+      }
+      const original = this.getSourceJournalEntry(bill.id, "PURCHASE_BILL");
+      // Per-lot check: this bill's OWN remaining layers (by source) must still cover what it bought.
+      const purchased = this.db
+        .prepare(
+          "SELECT item_id, quantity_delta, unit_cost_paise FROM stock_movements WHERE source_id = ? AND movement_type = 'PURCHASE' ORDER BY rowid",
+        )
+        .all(bill.id) as Array<{ item_id: string; quantity_delta: number; unit_cost_paise: number }>;
+      const needed = new Map<string, { itemId: string; unitCostPaise: number; quantity: number }>();
+      for (const row of purchased) {
+        const key = `${row.item_id}|${row.unit_cost_paise}`;
+        const entry = needed.get(key) ?? { itemId: row.item_id, unitCostPaise: row.unit_cost_paise, quantity: 0 };
+        entry.quantity += row.quantity_delta;
+        needed.set(key, entry);
+      }
+      for (const entry of needed.values()) {
+        const remaining = this.getStockLayers(entry.itemId)
+          .filter((layer) => layer.sourceId === bill.id && layer.unitCostPaise === entry.unitCostPaise)
+          .reduce((total, layer) => total + layer.quantity, 0);
+        if (remaining < entry.quantity) {
+          throw new RepositoryValidationError(
+            "Part of the stock from this bill has already been sold, so the bill cannot be cancelled.",
+          );
+        }
+      }
+      for (const row of purchased) {
+        this.insertStockMovement({
+          itemId: row.item_id, sourceId: bill.id, movementType: "PURCHASE_REVERSAL",
+          quantityDelta: -row.quantity_delta, unitCostPaise: row.unit_cost_paise,
+        });
+      }
+      const reversal = this.guard(() => reverseEntry(original, `je-bill-${bill.id}-reversal`, `Cancellation of purchase bill ${bill.number}`));
+      this.insertJournalEntry(reversal);
+      this.db.prepare("UPDATE purchase_bills SET status = 'CANCELLED' WHERE id = ?").run(bill.id);
+      this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
+      return reversal;
+    })();
+  }
+
+  private getSourceJournalEntry(sourceId: string, sourceType: JournalSourceType): JournalEntry {
+    const row = this.db
+      .prepare(
+        "SELECT id, source_id, description, is_reversal FROM journal_entries WHERE source_id = ? AND source_type = ? AND is_reversal = 0",
+      )
+      .get(sourceId, sourceType) as JournalEntryRow | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`Original journal entry for ${sourceId} was not found.`);
+    return { ...this.getJournalEntry(row), sourceType };
+  }
+
+  // ---- expenses
+
+  public createExpense(input: ExpenseInput): ExpenseRecord {
+    const id = input.id ?? randomUUID();
+    const taxType = input.taxType ?? "NONE";
+    const rate = input.taxRateBasisPoints ?? 0;
+    this.db.transaction(() => {
+      const business = this.requireBusinessCompany(input.businessId);
+      if (input.number.trim() === "") throw new RepositoryValidationError("Expense number cannot be empty.");
+      if (input.description.trim() === "") throw new RepositoryValidationError("Expense description cannot be empty.");
+      this.assertIsoDate("Expense date", input.expenseDate);
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("Expense amount must be a positive whole number of paise.");
+      }
+      this.assertCashBasisAllows(business.basis, input.paymentAccount);
+      this.guard(() => validatePurchaseTax(taxType, rate));
+      if (input.supplierId !== undefined) {
+        if (this.requireSupplier(input.supplierId).companyId !== business.companyId) {
+          throw new RepositoryValidationError("The supplier must belong to the same company as the business.");
+        }
+      } else if (input.paymentAccount === "PAYABLES") {
+        throw new RepositoryValidationError("An expense payable later must name a supplier.");
+      }
+      if (input.categoryId !== undefined) {
+        const category = this.db.prepare("SELECT company_id FROM expense_categories WHERE id = ?").get(input.categoryId) as
+          { company_id: string } | undefined;
+        if (category === undefined) throw new RepositoryValidationError(`Expense category ${input.categoryId} was not found.`);
+        if (category.company_id !== business.companyId) {
+          throw new RepositoryValidationError("The expense category must belong to the same company as the business.");
+        }
+      }
+      this.db
+        .prepare(
+          `INSERT INTO expenses (id, business_id, supplier_id, category_id, number, expense_date, description, amount_paise,
+             tax_type, tax_rate_basis_points, payment_account, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`,
+        )
+        .run(
+          id, input.businessId, input.supplierId ?? null, input.categoryId ?? null, input.number, input.expenseDate,
+          input.description, input.amountPaise, taxType, rate, input.paymentAccount, new Date().toISOString(),
+        );
+      this.insertAuditEvent({ action: "expense.created", entityId: id, occurredAt: new Date().toISOString() });
+    })();
+    return this.getExpense(id);
+  }
+
+  public getExpense(expenseId: string): ExpenseRecord {
+    const row = this.db.prepare("SELECT * FROM expenses WHERE id = ?").get(expenseId) as {
+      id: string; business_id: string; supplier_id: string | null; category_id: string | null; number: string;
+      expense_date: string; description: string; amount_paise: number; tax_type: InvoiceTaxType;
+      tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
+    } | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`Expense ${expenseId} was not found.`);
+    const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(row.amount_paise * row.tax_rate_basis_points / 10000);
+    const paid = this.db
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE expense_id = ?")
+      .get(expenseId) as { paid: number };
+    return {
+      id: row.id, businessId: row.business_id, supplierId: row.supplier_id, categoryId: row.category_id,
+      number: row.number, expenseDate: row.expense_date, description: row.description, amountPaise: row.amount_paise,
+      taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points, paymentAccount: row.payment_account,
+      status: row.status, taxPaise, totalPaise: row.amount_paise + taxPaise, paidPaise: paid.paid,
+    };
+  }
+
+  public listExpenses(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): readonly ExpenseRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.businessId !== undefined) { conditions.push("business_id = ?"); params.push(filter.businessId); }
+    if (filter.supplierId !== undefined) { conditions.push("supplier_id = ?"); params.push(filter.supplierId); }
+    if (filter.status !== undefined) { conditions.push("status = ?"); params.push(filter.status); }
+    const ids = this.db
+      .prepare(`SELECT id FROM expenses ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY created_at, rowid`)
+      .all(...params) as Array<{ id: string }>;
+    return ids.map((row) => this.getExpense(row.id));
+  }
+
+  public finalizeExpense(expenseId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const expense = this.getExpense(expenseId);
+      if (expense.status !== "DRAFT") throw new RepositoryValidationError("Only draft expenses can be finalized.");
+      this.assertCashBasisAllows(this.requireBusinessCompany(expense.businessId).basis, expense.paymentAccount);
+      const result = this.guard(() => purchaseEntry({
+        entryId: `je-expense-${expense.id}`,
+        sourceId: expense.id,
+        sourceType: "EXPENSE",
+        description: `Expense ${expense.number}`,
+        inventoryPaise: 0,
+        expensePaise: expense.amountPaise,
+        taxType: expense.taxType,
+        taxRateBasisPoints: expense.taxRateBasisPoints,
+        paymentAccount: expense.paymentAccount,
+      }));
+      this.insertJournalEntry(result.entry);
+      this.db.prepare("UPDATE expenses SET status = 'FINALIZED' WHERE id = ?").run(expense.id);
+      this.insertAuditEvent({ action: "expense.finalized", entityId: expense.id, occurredAt: new Date().toISOString() });
+      return result.entry;
+    })();
+  }
+
+  public cancelExpense(expenseId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const expense = this.getExpense(expenseId);
+      if (expense.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized expenses can be cancelled.");
+      if (expense.paidPaise > 0) {
+        throw new RepositoryValidationError("An expense with recorded supplier payments cannot be cancelled.");
+      }
+      const original = this.getSourceJournalEntry(expense.id, "EXPENSE");
+      const reversal = this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
+      this.insertJournalEntry(reversal);
+      this.db.prepare("UPDATE expenses SET status = 'CANCELLED' WHERE id = ?").run(expense.id);
+      this.insertAuditEvent({ action: "expense.cancelled", entityId: expense.id, occurredAt: new Date().toISOString() });
+      return reversal;
+    })();
+  }
+
+  // ---- supplier payments
+
+  public recordSupplierPayment(input: SupplierPaymentInput): SupplierPayment {
+    return this.db.transaction(() => {
+      if ((input.billId === undefined) === (input.expenseId === undefined)) {
+        throw new RepositoryValidationError("Provide exactly one of billId or expenseId.");
+      }
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("Payment amount must be a positive whole number of paise.");
+      }
+      const doc = input.billId !== undefined
+        ? (() => {
+            const bill = this.getPurchaseBill(input.billId);
+            return { number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise };
+          })()
+        : (() => {
+            const expense = this.getExpense(input.expenseId as string);
+            return { number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise };
+          })();
+      if (doc.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized documents can receive supplier payments.");
+      if (doc.paymentAccount !== "PAYABLES") throw new RepositoryValidationError("Only documents payable later can receive supplier payments.");
+      if (doc.supplierId === null) throw new RepositoryValidationError("The document has no supplier to pay.");
+      if (input.amountPaise > doc.totalPaise - doc.paidPaise) {
+        throw new RepositoryValidationError("Payment cannot exceed the outstanding balance.");
+      }
+      const sourceId = (input.billId ?? input.expenseId) as string;
+      const payment: SupplierPayment = {
+        id: randomUUID(),
+        supplierId: doc.supplierId,
+        billId: input.billId ?? null,
+        expenseId: input.expenseId ?? null,
+        amountPaise: input.amountPaise,
+        paymentAccount: "CASH",
+        paidAt: new Date().toISOString(),
+      };
+      this.db
+        .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(payment.id, payment.supplierId, payment.billId, payment.expenseId, payment.amountPaise, payment.paymentAccount, payment.paidAt);
+      this.insertJournalEntry(this.guard(() => supplierPaymentEntry({
+        entryId: `je-supplier-payment-${payment.id}`,
+        sourceId,
+        description: `Supplier payment for ${doc.number}`,
+        amountPaise: payment.amountPaise,
+      })));
+      this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: payment.paidAt });
+      return payment;
+    })();
+  }
+
+  public listSupplierPayments(filter: { billId?: string; expenseId?: string; supplierId?: string } = {}): readonly SupplierPayment[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.billId !== undefined) { conditions.push("bill_id = ?"); params.push(filter.billId); }
+    if (filter.expenseId !== undefined) { conditions.push("expense_id = ?"); params.push(filter.expenseId); }
+    if (filter.supplierId !== undefined) { conditions.push("supplier_id = ?"); params.push(filter.supplierId); }
+    const rows = this.db
+      .prepare(
+        `SELECT id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at FROM supplier_payments
+         ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY paid_at, rowid`,
+      )
+      .all(...params) as Array<{
+      id: string; supplier_id: string; bill_id: string | null; expense_id: string | null; amount_paise: number;
+      payment_account: "CASH"; paid_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id, supplierId: row.supplier_id, billId: row.bill_id, expenseId: row.expense_id,
+      amountPaise: row.amount_paise, paymentAccount: row.payment_account, paidAt: row.paid_at,
+    }));
+  }
+
+  // ---- purchasing reports
+
+  public getPayables(): readonly PayableRow[] {
+    const now = Date.now();
+    const rows: PayableRow[] = [];
+    for (const bill of this.listPurchaseBills({ status: "FINALIZED" })) {
+      if (bill.paymentAccount !== "PAYABLES") continue;
+      rows.push({
+        documentType: "BILL", documentId: bill.id, documentNumber: bill.number, supplierId: bill.supplierId,
+        documentDate: bill.billDate, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise,
+        outstandingPaise: bill.totalPaise - bill.paidPaise,
+        ageDays: Math.max(0, Math.floor((now - Date.parse(bill.billDate)) / 86400000)),
+      });
+    }
+    for (const expense of this.listExpenses({ status: "FINALIZED" })) {
+      if (expense.paymentAccount !== "PAYABLES" || expense.supplierId === null) continue;
+      rows.push({
+        documentType: "EXPENSE", documentId: expense.id, documentNumber: expense.number, supplierId: expense.supplierId,
+        documentDate: expense.expenseDate, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise,
+        outstandingPaise: expense.totalPaise - expense.paidPaise,
+        ageDays: Math.max(0, Math.floor((now - Date.parse(expense.expenseDate)) / 86400000)),
+      });
+    }
+    return rows.filter((row) => row.outstandingPaise > 0);
+  }
+
+  public getSupplierStatement(supplierId: string): SupplierStatement {
+    const supplier = this.requireSupplier(supplierId);
+    const items: Array<Omit<SupplierStatementRow, "balancePaise"> & { order: number }> = [];
+    for (const bill of this.listPurchaseBills({ supplierId, status: "FINALIZED" })) {
+      if (bill.paymentAccount !== "PAYABLES") continue;
+      items.push({ date: bill.billDate, type: "BILL", documentId: bill.id, reference: bill.number, amountPaise: bill.totalPaise, order: 0 });
+    }
+    for (const expense of this.listExpenses({ supplierId, status: "FINALIZED" })) {
+      if (expense.paymentAccount !== "PAYABLES") continue;
+      items.push({ date: expense.expenseDate, type: "EXPENSE", documentId: expense.id, reference: expense.number, amountPaise: expense.totalPaise, order: 0 });
+    }
+    for (const payment of this.listSupplierPayments({ supplierId })) {
+      const documentId = (payment.billId ?? payment.expenseId) as string;
+      const reference = payment.billId !== null ? this.getPurchaseBill(payment.billId).number : this.getExpense(documentId).number;
+      items.push({ date: payment.paidAt, type: "PAYMENT", documentId, reference, amountPaise: -payment.amountPaise, order: 1 });
+    }
+    items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.order - b.order));
+    let balance = 0;
+    const rows = items.map(({ order: _order, ...item }) => {
+      balance += item.amountPaise;
+      return { ...item, balancePaise: balance };
+    });
+    return { supplierId, supplierName: supplier.name, rows, closingBalancePaise: balance };
   }
 
   // ---------------------------------------------------------------- auth

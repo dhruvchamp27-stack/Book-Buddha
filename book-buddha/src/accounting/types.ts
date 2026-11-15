@@ -1,6 +1,7 @@
 export type AccountCode =
   | "CASH" | "RECEIVABLES" | "SALES" | "INVENTORY" | "COGS"
-  | "OUTPUT_CGST" | "OUTPUT_SGST" | "OUTPUT_IGST";
+  | "OUTPUT_CGST" | "OUTPUT_SGST" | "OUTPUT_IGST"
+  | "PAYABLES" | "INPUT_CGST" | "INPUT_SGST" | "INPUT_IGST" | "EXPENSE";
 export type InvoiceTaxType = "NONE" | "CGST_SGST" | "IGST";
 export type AccountingBasis = "CASH" | "ACCRUAL";
 
@@ -59,9 +60,13 @@ export interface JournalLine {
   readonly creditPaise: number;
 }
 
+export type JournalSourceType = "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "SUPPLIER_PAYMENT";
+
 export interface JournalEntry {
   readonly id: string;
   readonly sourceId: string;
+  /** Defaults to "INVOICE" (sales side) when omitted. */
+  readonly sourceType?: JournalSourceType;
   readonly description: string;
   readonly lines: readonly JournalLine[];
   readonly isReversal: boolean;
@@ -91,4 +96,24 @@ export interface CancelledInvoice {
   readonly invoice: Invoice;
   readonly reversalEntry: JournalEntry;
   readonly auditEvent: AuditEvent;
+}
+
+export type PurchaseDocumentStatus = "DRAFT" | "FINALIZED" | "CANCELLED";
+export type PurchasePaymentAccount = "CASH" | "PAYABLES";
+
+export interface PurchaseBillLine {
+  readonly itemId?: string;
+  readonly description: string;
+  readonly quantity: number;
+  readonly unitPricePaise: number;
+}
+
+export interface SupplierPayment {
+  readonly id: string;
+  readonly supplierId: string;
+  readonly billId: string | null;
+  readonly expenseId: string | null;
+  readonly amountPaise: number;
+  readonly paymentAccount: "CASH";
+  readonly paidAt: string;
 }

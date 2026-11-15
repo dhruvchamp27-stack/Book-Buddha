@@ -4,8 +4,11 @@ import type {
   CancelledInvoice,
   FinalizedInvoice,
   Invoice,
+  InvoiceTaxType,
   JournalEntry,
   JournalLine,
+  JournalSourceType,
+  PurchasePaymentAccount,
 } from "./types.js";
 
 export class AccountingError extends Error {
@@ -149,5 +152,140 @@ export function cancelInvoice(invoice: Invoice, originalEntry: JournalEntry): Ca
     invoice: { ...invoice, status: "CANCELLED" },
     reversalEntry,
     auditEvent: audit("invoice.cancelled", invoice.id),
+  };
+}
+
+// ---------------------------------------------------------------- purchasing / expenses
+
+/** Same tax-type/rate rules as sales invoices. */
+export function validatePurchaseTax(taxType: InvoiceTaxType, taxRateBasisPoints: number): void {
+  if (!Number.isInteger(taxRateBasisPoints) || taxRateBasisPoints < 0 || taxRateBasisPoints > 10000) {
+    throw new AccountingError("Tax rate must be a whole number between 0% and 100%.");
+  }
+  if (taxType === "NONE" && taxRateBasisPoints !== 0) {
+    throw new AccountingError("A tax rate requires a tax type.");
+  }
+  if (taxType !== "NONE" && taxRateBasisPoints === 0) {
+    throw new AccountingError("A taxable purchase requires a positive tax rate.");
+  }
+}
+
+/** Input tax (ITC) in whole paise on a taxable amount. Integer paise only. */
+export function inputTaxPaise(taxType: InvoiceTaxType, taxRateBasisPoints: number, taxablePaise: number): number {
+  validatePurchaseTax(taxType, taxRateBasisPoints);
+  if (taxType === "NONE") return 0;
+  return Math.round(taxablePaise * taxRateBasisPoints / 10000);
+}
+
+/** Debit lines for recoverable input tax. CGST gets floor(tax/2); SGST takes the remainder. */
+export function inputTaxLines(taxType: InvoiceTaxType, taxPaise: number): readonly JournalLine[] {
+  if (taxType === "NONE" || taxPaise === 0) return [];
+  if (taxType === "IGST") {
+    return [{ account: "INPUT_IGST", debitPaise: taxPaise, creditPaise: 0 }];
+  }
+  const cgst = Math.floor(taxPaise / 2);
+  return [
+    ...(cgst > 0 ? [{ account: "INPUT_CGST" as const, debitPaise: cgst, creditPaise: 0 }] : []),
+    { account: "INPUT_SGST", debitPaise: taxPaise - cgst, creditPaise: 0 },
+  ];
+}
+
+export interface PurchaseEntryInput {
+  readonly entryId: string;
+  readonly sourceId: string;
+  readonly sourceType: Extract<JournalSourceType, "PURCHASE_BILL" | "EXPENSE">;
+  readonly description: string;
+  /** Total cost of stock-tracked lines (debits INVENTORY). */
+  readonly inventoryPaise: number;
+  /** Total of non-stock lines / expense amount (debits EXPENSE). */
+  readonly expensePaise: number;
+  readonly taxType: InvoiceTaxType;
+  readonly taxRateBasisPoints: number;
+  readonly paymentAccount: PurchasePaymentAccount;
+}
+
+export interface PurchaseEntryResult {
+  readonly entry: JournalEntry;
+  readonly subtotalPaise: number;
+  readonly taxPaise: number;
+  readonly totalPaise: number;
+}
+
+/**
+ * Accrual posting for a finalized purchase bill or expense:
+ * Dr INVENTORY / Dr EXPENSE / Dr INPUT tax; Cr CASH or PAYABLES for the full total.
+ */
+export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
+  if (!Number.isInteger(input.inventoryPaise) || input.inventoryPaise < 0
+    || !Number.isInteger(input.expensePaise) || input.expensePaise < 0) {
+    throw new AccountingError("Purchase amounts must be non-negative whole paise.");
+  }
+  const subtotalPaise = input.inventoryPaise + input.expensePaise;
+  if (subtotalPaise <= 0) {
+    throw new AccountingError("A purchase must have a total above zero.");
+  }
+  const taxPaise = inputTaxPaise(input.taxType, input.taxRateBasisPoints, subtotalPaise);
+  const totalPaise = subtotalPaise + taxPaise;
+  const lines: readonly JournalLine[] = [
+    ...(input.inventoryPaise > 0 ? [{ account: "INVENTORY" as const, debitPaise: input.inventoryPaise, creditPaise: 0 }] : []),
+    ...(input.expensePaise > 0 ? [{ account: "EXPENSE" as const, debitPaise: input.expensePaise, creditPaise: 0 }] : []),
+    ...inputTaxLines(input.taxType, taxPaise),
+    { account: input.paymentAccount, debitPaise: 0, creditPaise: totalPaise },
+  ];
+  return {
+    entry: {
+      id: input.entryId,
+      sourceId: input.sourceId,
+      sourceType: input.sourceType,
+      description: input.description,
+      lines: balancedLines(lines),
+      isReversal: false,
+    },
+    subtotalPaise,
+    taxPaise,
+    totalPaise,
+  };
+}
+
+/** Exact reversal of an entry: every debit becomes a credit and vice versa. */
+export function reverseEntry(original: JournalEntry, entryId: string, description: string): JournalEntry {
+  if (original.isReversal) {
+    throw new AccountingError("A reversal entry cannot be reversed.");
+  }
+  const lines: readonly JournalLine[] = original.lines.map((line) => ({
+    account: line.account,
+    debitPaise: line.creditPaise,
+    creditPaise: line.debitPaise,
+  }));
+  return {
+    id: entryId,
+    sourceId: original.sourceId,
+    ...(original.sourceType === undefined ? {} : { sourceType: original.sourceType }),
+    description,
+    lines: balancedLines(lines),
+    isReversal: true,
+  };
+}
+
+/** Paying down a supplier balance: Dr PAYABLES, Cr CASH. */
+export function supplierPaymentEntry(input: {
+  readonly entryId: string;
+  readonly sourceId: string;
+  readonly description: string;
+  readonly amountPaise: number;
+}): JournalEntry {
+  if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+    throw new AccountingError("Payment amount must be a positive whole number of paise.");
+  }
+  return {
+    id: input.entryId,
+    sourceId: input.sourceId,
+    sourceType: "SUPPLIER_PAYMENT",
+    description: input.description,
+    lines: balancedLines([
+      { account: "PAYABLES", debitPaise: input.amountPaise, creditPaise: 0 },
+      { account: "CASH", debitPaise: 0, creditPaise: input.amountPaise },
+    ]),
+    isReversal: false,
   };
 }

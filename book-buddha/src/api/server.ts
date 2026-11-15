@@ -120,6 +120,73 @@ const invoiceInput = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["taxRateBasisPoints"], message: "Tax rate must be positive for a taxable invoice." });
   }
 });
+const supplierInput = z.object({
+  companyId: id,
+  name,
+  email: z.string().email().optional(),
+  phone: optionalText.optional(),
+  phone2: optionalText.optional(),
+  classification: z.enum(CUSTOMER_CLASSIFICATIONS).optional(),
+  gstin: optionalText.optional(),
+  website: optionalText.optional(),
+  billingAddress: optionalText.optional(),
+  shippingAddress: optionalText.optional(),
+  internalNotes: optionalText.optional(),
+});
+const supplierPatchInput = z.object({
+  name: name.optional(),
+  email: z.string().email().nullable().optional(),
+  phone: nullableText,
+  phone2: nullableText,
+  classification: z.enum(CUSTOMER_CLASSIFICATIONS).nullable().optional(),
+  gstin: nullableText,
+  website: nullableText,
+  billingAddress: nullableText,
+  shippingAddress: nullableText,
+  internalNotes: nullableText,
+});
+const purchaseTaxFields = {
+  taxType: z.enum(["NONE", "CGST_SGST", "IGST"]).default("NONE"),
+  taxRateBasisPoints: z.number().int().min(0).max(10000).default(0),
+};
+const purchaseBillInput = z.object({
+  id: id.optional(),
+  businessId: id,
+  supplierId: id,
+  number: name,
+  supplierInvoiceNumber: optionalText.optional(),
+  billDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
+  dueDate: z.string().date().optional(),
+  notes: z.string().trim().optional(),
+  paymentAccount: z.enum(["CASH", "PAYABLES"]),
+  ...purchaseTaxFields,
+  lines: z.array(invoiceLine).min(1),
+});
+const expenseCategoryInput = z.object({ companyId: id, name });
+const expenseInput = z.object({
+  id: id.optional(),
+  businessId: id,
+  supplierId: id.optional(),
+  categoryId: id.optional(),
+  number: name,
+  expenseDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
+  description: name,
+  amountPaise: z.number().int().positive(),
+  paymentAccount: z.enum(["CASH", "PAYABLES"]),
+  ...purchaseTaxFields,
+});
+const supplierPaymentInput = z.object({
+  billId: id.optional(),
+  expenseId: id.optional(),
+  amountPaise: z.number().int().positive(),
+});
+const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CANCELLED" | undefined => {
+  if (value === undefined) return undefined;
+  if (value !== "DRAFT" && value !== "FINALIZED" && value !== "CANCELLED") {
+    throw new RepositoryValidationError("status must be DRAFT, FINALIZED or CANCELLED.");
+  }
+  return value;
+};
 const paymentInput = z.object({
   amountPaise: z.number().int().positive(),
 });
@@ -672,6 +739,134 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
 
   app.post<{ Params: { templateId: string } }>("/recurring-invoices/:templateId/deactivate", async (request) =>
     repository.deactivateRecurringInvoiceTemplate(request.params.templateId));
+
+  // ---- Slice 6: suppliers, purchase bills, expenses, supplier payments
+  app.post("/suppliers", async (request, reply) => {
+    const input = parseBody(supplierInput, request.body);
+    const { companyId, name: supplierName, ...rest } = input;
+    return reply.code(201).send({ id: repository.createSupplier({ companyId, name: supplierName, ...definedOnly(rest) }) });
+  });
+
+  app.get<{ Querystring: { companyId?: string; activeOnly?: string } }>(
+    "/suppliers",
+    async (request) =>
+      repository.listSuppliers(request.query.companyId, { activeOnly: activeOnlyQuery(request.query.activeOnly) }),
+  );
+
+  app.patch<{ Params: { id: string } }>("/suppliers/:id", async (request) => {
+    const patch = parseBody(supplierPatchInput, request.body);
+    repository.updateSupplier(request.params.id, definedOnly(patch));
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/suppliers/:id/active", async (request) => {
+    const input = parseBody(activeInput, request.body);
+    repository.setSupplierActive(request.params.id, input.active);
+    return { ok: true };
+  });
+
+  app.post("/expense-categories", async (request, reply) => {
+    const input = parseBody(expenseCategoryInput, request.body);
+    return reply.code(201).send({ id: repository.createExpenseCategory(input) });
+  });
+
+  app.get<{ Querystring: { companyId?: string } }>(
+    "/expense-categories",
+    async (request) => repository.listExpenseCategories(request.query.companyId),
+  );
+
+  app.post("/purchase-bills", async (request, reply) => {
+    const input = parseBody(purchaseBillInput, request.body);
+    const { lines, ...rest } = input;
+    const bill = repository.createPurchaseBill({
+      ...definedOnly(rest),
+      businessId: input.businessId,
+      supplierId: input.supplierId,
+      number: input.number,
+      billDate: input.billDate,
+      paymentAccount: input.paymentAccount,
+      lines: lines.map((line) => ({
+        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+        description: line.description,
+        quantity: line.quantity,
+        unitPricePaise: line.unitPricePaise,
+      })),
+    });
+    return reply.code(201).send(bill);
+  });
+
+  app.get<{ Querystring: { businessId?: string; supplierId?: string; status?: string } }>("/purchase-bills", async (request) => {
+    const status = documentStatus(request.query.status);
+    return repository.listPurchaseBills({
+      ...(request.query.businessId === undefined ? {} : { businessId: request.query.businessId }),
+      ...(request.query.supplierId === undefined ? {} : { supplierId: request.query.supplierId }),
+      ...(status === undefined ? {} : { status }),
+    });
+  });
+
+  app.get<{ Params: { id: string } }>("/purchase-bills/:id", async (request) =>
+    repository.getPurchaseBill(request.params.id));
+
+  app.post<{ Params: { id: string } }>("/purchase-bills/:id/finalize", async (request) =>
+    ({ journalEntry: repository.finalizePurchaseBill(request.params.id) }));
+
+  app.post<{ Params: { id: string } }>("/purchase-bills/:id/cancel", async (request) =>
+    ({ reversalEntry: repository.cancelPurchaseBill(request.params.id) }));
+
+  app.post("/expenses", async (request, reply) => {
+    const input = parseBody(expenseInput, request.body);
+    return reply.code(201).send(repository.createExpense({
+      ...definedOnly(input),
+      businessId: input.businessId,
+      number: input.number,
+      expenseDate: input.expenseDate,
+      description: input.description,
+      amountPaise: input.amountPaise,
+      paymentAccount: input.paymentAccount,
+    }));
+  });
+
+  app.get<{ Querystring: { businessId?: string; supplierId?: string; status?: string } }>("/expenses", async (request) => {
+    const status = documentStatus(request.query.status);
+    return repository.listExpenses({
+      ...(request.query.businessId === undefined ? {} : { businessId: request.query.businessId }),
+      ...(request.query.supplierId === undefined ? {} : { supplierId: request.query.supplierId }),
+      ...(status === undefined ? {} : { status }),
+    });
+  });
+
+  app.get<{ Params: { id: string } }>("/expenses/:id", async (request) => repository.getExpense(request.params.id));
+
+  app.post<{ Params: { id: string } }>("/expenses/:id/finalize", async (request) =>
+    ({ journalEntry: repository.finalizeExpense(request.params.id) }));
+
+  app.post<{ Params: { id: string } }>("/expenses/:id/cancel", async (request) =>
+    ({ reversalEntry: repository.cancelExpense(request.params.id) }));
+
+  app.post("/supplier-payments", async (request, reply) => {
+    const input = parseBody(supplierPaymentInput, request.body);
+    return reply.code(201).send(repository.recordSupplierPayment({
+      amountPaise: input.amountPaise,
+      ...(input.billId === undefined ? {} : { billId: input.billId }),
+      ...(input.expenseId === undefined ? {} : { expenseId: input.expenseId }),
+    }));
+  });
+
+  app.get<{ Querystring: { billId?: string; expenseId?: string; supplierId?: string } }>(
+    "/supplier-payments",
+    async (request) => repository.listSupplierPayments({
+      ...(request.query.billId === undefined ? {} : { billId: request.query.billId }),
+      ...(request.query.expenseId === undefined ? {} : { expenseId: request.query.expenseId }),
+      ...(request.query.supplierId === undefined ? {} : { supplierId: request.query.supplierId }),
+    }),
+  );
+
+  app.get("/reports/payables", async () => repository.getPayables());
+  app.get<{ Querystring: { supplierId?: string } }>("/reports/supplier-statement", async (request) => {
+    const supplierId = request.query.supplierId;
+    if (supplierId === undefined || supplierId.trim() === "") throw new RepositoryValidationError("supplierId is required.");
+    return repository.getSupplierStatement(supplierId);
+  });
 
   app.get<{ Querystring: { entityId?: string } }>(
     "/audit-events",
