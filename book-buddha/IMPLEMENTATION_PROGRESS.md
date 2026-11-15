@@ -16,6 +16,7 @@ limits are reached. Update it after every meaningful implementation phase.
 - [x] FIFO inventory, stock validation, COGS, and inventory reversals
 - [x] Trial Balance, Profit & Loss, Balance Sheet, General Ledger, fair sales, and stock reports
 - [x] Quotation-to-draft-invoice conversion
+- [x] Accrual-always posting, Balance Sheet credit-normal liabilities, business/date report filters, and a derived Cash/Accrual Profit & Loss toggle (Slice 7)
 - [x] React/Vite frontend and Fastify API
 - [x] 19 passing tests and successful backend/frontend builds
 - [x] README, setup guide, and requirements specification
@@ -31,7 +32,10 @@ limits are reached. Update it after every meaningful implementation phase.
 - [x] Supplier payments and payables ageing (backend; supplier **refunds** and cancelling a supplier payment DEFERRED)
 - [ ] Bank accounts, transfers, and reconciliation
 - [ ] Cash Flow Statement
-- [ ] Date/business/fair/item/customer filters and consolidated reports
+- [ ] Projects (fairs) as a first-class dimension with a per-project P&L (next slice)
+- [ ] Cash view of Trial Balance, Balance Sheet and General Ledger (deferred; the Balance Sheet needs an Unearned Revenue account from the Subscriptions slice)
+- [ ] Owner decision: how credit notes are recognised in the cash view
+- [ ] Fair, item, and customer report filters (business and date filters on P&L, General Ledger, Trial Balance and Balance Sheet are done in Slice 7c)
 - [ ] Opening balances
 - [ ] CSV/Excel import and export
 - [ ] PDF report export
@@ -133,9 +137,10 @@ PAYABLES (liability) and the P&L carries EXPENSE.
 - **Retained earnings on the Balance Sheet was corrected** from `SALES` only to
   `SALES - COGS - EXPENSE`. This changes sales-side Balance Sheet output whenever
   COGS exists (no prior test asserted it; the sheet could not balance without it).
-- **Known pre-existing presentation quirk (not changed):** liability rows report
-  as `debit - credit`, so liabilities (incl. PAYABLES) show as **negative**
-  numbers and `totalLiabilitiesPaise` is negative. A reporting/UI-slice fix.
+- ~~**Known pre-existing presentation quirk:** liability rows reported as
+  `debit - credit`, so liabilities (incl. PAYABLES) showed as **negative**
+  numbers and `totalLiabilitiesPaise` was negative.~~ **FIXED in Slice 7a:**
+  liabilities are now credit-normal and read positive.
 - Inventory ties to the ledger for **bill-sourced** stock only; stock added via
   `addStockMovement` (OPENING/ADJUSTMENT) still posts no GL entry (opening-balance
   offset account is a later decision).
@@ -145,10 +150,10 @@ Slice 6 gates passed: 87/87 vitest tests, tsc exit 0, vite build exit 0.
 > **⚠️ SUPERSEDED 2026-11-15 by the accrual-always decision (see `SLICE_7_PLAN.md`).**
 > The owner replaced the per-company cash/accrual model with **accrual-always posting +
 > a Cash/Accrual toggle at report level** (DD §4.5 / QBO). The payment-time deferral
-> described in this section (and the two engine helpers it added) will be **refactored
-> away in Slice 7b** — accrual becomes the only posting path, and cash-basis is a
+> described in this section (and the two engine helpers it added) was **refactored
+> away in Slice 7b** — accrual became the only posting path, and cash-basis is a
 > **derived report view** from payment allocations, never a posting restriction. Commit
-> `5576a21` stays in history; its tests get rewritten. The description below is retained
+> `5576a21` stays in history; its tests were rewritten in Slice 7b. The description below is retained
 > as the record of what was built, not as the current design.
 
 **Cash-basis credit purchases (payment-based expense recognition)** is
@@ -179,15 +184,90 @@ source-entry lookup and an empty reversal.
 
 Cash-basis slice gates passed: 93/93 vitest tests, tsc exit 0, vite build exit 0.
 
-The next implementation slice is **Slice 7: Accrual-always books + report foundations**,
-planned in full in `SLICE_7_PLAN.md` and **paused at the plan phase on 2026-11-15**
-(owner resumes the build next session). Order: **7a** Balance-Sheet liability-sign fix ·
-**7b** accrual-always posting refactor (removes the cash-basis branches on both the sales
-and purchase sides, including commit `5576a21`) · **7c** business_id + entry_date on
-`journal_entries` (migration v5 + backfill → per-business/date-filtered and consolidated
-reports) · **7d** Cash/Accrual report toggle, derived from payment allocations (never
-posted). Projects, subscriptions, imports, **banking (bank categorization + bill OCR, its
-own slice)**, cash flow, archive, and audit hardening follow in that order.
+Slice 7 (Accrual-always books + report foundations) is **complete**, built in four commits
+on branch `autonomous/book-buddha-finish`. The owner's model (answered 2026-11-15): post
+**always accrual**; `companies.accounting_basis` is only the report default; the cash view
+is derived and never posted.
+
+- **7a** (`5fc5aa8`) Balance Sheet liabilities are presented credit-normal. `getBalanceSheet()`
+  maps liability rows to `balancePaise = credit - debit`, so `totalAssets === totalLiabilities +
+  totalEquity` holds directly and liabilities read positive. `getReportAccountRows()` was
+  deliberately not changed because it also feeds the P&L, which needs debit minus credit.
+- **7b** (`4db437a`) Accrual-always posting. Every per-company cash/accrual branch was removed
+  from the sales side (`finalizeInvoice`, `cancelInvoice`, `recordPayment`) and the purchase side
+  (`finalizePurchaseBill`, `finalizeExpense`, `recordSupplierPayment`, and both cancel paths); net
+  -156 lines. Deleted: engine helpers `cashBasisPurchaseFinalizeEntry` and
+  `cashBasisSupplierPaymentLines` with their input types; repository helpers `cashBasisPaymentLines`
+  and `getInvoiceAccountingBasis`. `companies.accounting_basis` and the `AccountingBasis` type are
+  kept only as the stored reporting preference (the default for the 7d toggle). Regression tests run
+  the same scenario on a cash-basis and an accrual-basis company and assert identical journal lines,
+  on both the receivable and payable side. Commit `5576a21` (cash-basis credit purchases) is superseded.
+- **7c** (`fbd358c`) `business_id` and `entry_date` on `journal_entries` via **migration v5**
+  (`src/database/journal-dimensions-schema.ts`), additive and transactional. Columns are nullable in
+  SQLite; the non-null guarantee for new writes is enforced in the repository, and
+  `insertJournalEntry` takes a required `{ businessId, entryDate }` so the compiler forces every call
+  site to supply them. The backfill derives both from each entry's own source document, matching
+  entry-id shapes by exact equality (a payment entry's `source_id` is the invoice id, so a
+  source_id-only join would have dated payments with the invoice's date). Four gates: entry count
+  unchanged, zero NULLs (offenders named), `foreign_key_check`, and `journal_lines` count unchanged.
+  Two corrections made in review: (1) dates are **IST (UTC+5:30)**, not UTC, because `paid_at` and
+  `created_at` are UTC instants and `date()` on them put a 02:00 IST payment on the previous day (wrong
+  GST month, possibly wrong financial year); (2) a **reversal carries its own date**, so a March
+  cancellation no longer restates January. Report filters: P&L and General Ledger take
+  `{ businessId?, fromDate?, toDate? }`; Trial Balance and Balance Sheet take `{ businessId?, asAtDate? }`
+  (a balance sheet is a point in time, so there is deliberately no fromDate). Omitting the filters
+  matches the old consolidated behaviour, pinned by a regression test. The same filters are exposed as
+  `.strict()` zod query params on the four report endpoints. General Ledger orders by `entry_date` and
+  exposes `entryDate` alongside the posting timestamp.
+- **7d** (`710d4f6`) Derived Cash/Accrual toggle on the **Profit and Loss**. The cash view writes no
+  journal entries (a test counts both journal tables and compares the trial balance around every cash
+  call). One rule for every document: for a document with total T and cash-so-far p, every posted
+  accrual line is recognised in proportion p/T, each increment dated to the payment that caused it
+  (IST date). `allocateProportionally()` in `src/accounting/engine.ts` is the pure allocator; it uses a
+  cumulative target so successive payments telescope and a fully paid document lands exactly on its
+  accrual amounts. BigInt arithmetic, with a 3000-round fuzz test. `ProfitAndLossReport` gains `basis`,
+  `grossSalesPaise` and `gstOnSalesPaise` (additive, populated in both views). The filter gains
+  `basis`, defaulting to the business's company preference, or ACCRUAL when consolidated. Exposed as a
+  strict zod query param.
+
+**Owner's cash-view rules (implemented):** the cash P&L shows **gross sales = the cash actually
+received**, GST separately, and net = gross minus GST. **COGS follows the sale's collection, not the
+supplier payment** (50% collected means 50% of that invoice's COGS). Supplier payments move Payables
+and Cash only. The unpaid remainder stays a receivable or payable.
+
+**Owner's acceptance figures** (reproduced exactly by tests named `ACCEPTANCE ...`):
+- Invoice Rs 11,800 (taxable Rs 10,000 + 18% CGST/SGST Rs 1,800), COGS Rs 6,000, Rs 5,900 collected ->
+  cash view gross 590000 paise, GST 90000 (CGST 45000 / SGST 45000), net 500000, COGS 300000;
+  receivable still 590000.
+- Bill Rs 7,080 (stock Rs 5,000 + freight Rs 1,000, IGST 18% Rs 1,080), Rs 3,540 paid -> cash view
+  expense 50000, inventory 250000, input GST 54000; payable still 354000.
+- Net profit: accrual 300000 vs cash 150000.
+
+**Deliberate decisions in Slice 7 (surface to the owner):**
+- **Credit notes in the cash view need an owner decision.** The uniform rule recognises a credit note
+  pro rata with collections, measured against the ORIGINAL invoice total and dated to the payment
+  dates. So a note raised after an invoice is fully collected restates the earlier period. The
+  alternative, recognising a refund on its own date, would be a new mechanism; no refund mechanism was
+  invented.
+- Cash-view gross can differ from net + GST by a paise or two part-way through collecting an invoice
+  (gross is the actual cash received; net and GST are each rounded). It is exact at full collection and
+  on the owner's figures.
+- `GeneralLedgerRow.date` is still the posting timestamp; `entryDate` is the transaction date.
+
+**Not built in Slice 7 (open or deferred):**
+- No cash view of the Trial Balance, Balance Sheet or General Ledger; they stay accrual-only. The
+  owner's rule keeps AR/AP on the books, so a cash balance sheet cannot balance without an Unearned
+  Revenue account, which belongs to the later Subscriptions slice.
+- Still deferred from earlier slices: Slice 4 login UI and live Google OAuth, purchase returns, bill
+  discount, receipts/attachments, supplier refunds, opening-balance GL offset, and all UI.
+
+Slice 7 gates passed: 139/139 vitest tests in 15 files, tsc clean (no output), vite build ok.
+
+The next implementation slice is **Projects (fairs)**: a first-class QBO-style dimension (spec
+Design Document §3.3, §6.9, §10, §12.1), tied to one host customer, with its own P&L and no per-fair
+Balance Sheet. It needs a project dimension on journal entries and builds directly on 7c
+(`business_id` and `entry_date`). Subscriptions, imports, **banking (bank categorization + bill OCR,
+its own slice)**, cash flow, archive, and audit hardening follow after it, in that order.
 
 Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return
