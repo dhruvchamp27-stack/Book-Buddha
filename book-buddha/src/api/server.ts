@@ -153,6 +153,7 @@ const purchaseBillInput = z.object({
   id: id.optional(),
   businessId: id,
   supplierId: id,
+  fairId: id.optional(),
   number: name,
   supplierInvoiceNumber: optionalText.optional(),
   billDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
@@ -168,6 +169,7 @@ const expenseInput = z.object({
   businessId: id,
   supplierId: id.optional(),
   categoryId: id.optional(),
+  fairId: id.optional(),
   number: name,
   expenseDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
   description: name,
@@ -202,6 +204,7 @@ const stockMovementInput = z.object({
   quantity: z.number().int().positive(),
   unitCostPaise: z.number().int().nonnegative(),
   movementType: z.enum(["OPENING", "PURCHASE", "ADJUSTMENT"]),
+  fairId: id.optional(),
 });
 const creditNoteInput = z.object({
   invoiceId: id,
@@ -519,7 +522,13 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
 
   app.post("/inventory/movements", async (request, reply) => {
     const input = parseBody(stockMovementInput, request.body);
-    return reply.code(201).send(repository.addStockMovement(input));
+    return reply.code(201).send(repository.addStockMovement({
+      itemId: input.itemId,
+      movementType: input.movementType,
+      quantity: input.quantity,
+      unitCostPaise: input.unitCostPaise,
+      ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+    }));
   });
 
   app.get<{ Querystring: { itemId?: string } }>(

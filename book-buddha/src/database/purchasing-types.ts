@@ -61,6 +61,8 @@ export interface PurchaseBillInput {
   readonly id?: string;
   readonly businessId: string;
   readonly supplierId: string;
+  /** Optional project (fair); must belong to the business's company. Fixed once finalized. */
+  readonly fairId?: string;
   readonly number: string;
   readonly supplierInvoiceNumber?: string;
   /** YYYY-MM-DD */
@@ -86,6 +88,8 @@ export interface PurchaseBillRecord {
   readonly taxRateBasisPoints: number;
   readonly paymentAccount: PurchasePaymentAccount;
   readonly status: PurchaseDocumentStatus;
+  /** Present only when the bill is tagged to a project (fair). */
+  readonly fairId?: string;
   readonly lines: readonly PurchaseBillLine[];
   readonly subtotalPaise: number;
   readonly taxPaise: number;
@@ -98,6 +102,8 @@ export interface ExpenseInput {
   readonly businessId: string;
   readonly supplierId?: string;
   readonly categoryId?: string;
+  /** Optional project (fair); must belong to the business's company. Fixed once finalized. */
+  readonly fairId?: string;
   readonly number: string;
   /** YYYY-MM-DD */
   readonly expenseDate: string;
@@ -121,6 +127,8 @@ export interface ExpenseRecord {
   readonly taxRateBasisPoints: number;
   readonly paymentAccount: PurchasePaymentAccount;
   readonly status: PurchaseDocumentStatus;
+  /** Present only when the expense is tagged to a project (fair). */
+  readonly fairId?: string;
   readonly taxPaise: number;
   readonly totalPaise: number;
   readonly paidPaise: number;

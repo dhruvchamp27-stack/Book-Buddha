@@ -56,6 +56,11 @@ import {
   sessionExpiryIso,
 } from "../auth/session.js";
 
+/** Spread helper: `{}` when there is no fair, so a missing project is simply absent (stored NULL). */
+function fairDim(fairId: string | undefined): { fairId?: string } {
+  return fairId === undefined ? {} : { fairId };
+}
+
 /** Safety cap on catch-up drafts created for one template in a single generate call. */
 const MAX_DRAFTS_PER_TEMPLATE_PER_RUN = 366;
 
@@ -444,6 +449,8 @@ export interface StockMovement {
   readonly id: string;
   readonly itemId: string;
   readonly sourceId: string | null;
+  /** Reporting tag only (one shared stock pool): the project this movement belongs to, if any. */
+  readonly fairId?: string;
   readonly movementType: StockMovementType | "SALE" | "SALE_REVERSAL" | "PURCHASE_REVERSAL";
   readonly quantityDelta: number;
   readonly unitCostPaise: number;
@@ -978,7 +985,12 @@ export class AccountingRepository {
     movementType: StockMovementType;
     quantity: number;
     unitCostPaise: number;
+    /** Reporting tag only; OPENING and ADJUSTMENT movements only. Never affects FIFO or quantity. */
+    fairId?: string;
   }): StockMovement {
+    if (input.fairId !== undefined && input.movementType === "PURCHASE") {
+      throw new RepositoryValidationError("A project can be tagged on an opening or adjustment movement; purchases take the fair of their bill.");
+    }
     if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
       throw new RepositoryValidationError("Stock quantity must be a positive whole number.");
     }
@@ -1000,25 +1012,28 @@ export class AccountingRepository {
       quantityDelta: input.quantity,
       unitCostPaise: input.unitCostPaise,
       occurredAt: new Date().toISOString(),
+      ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
     };
+    if (input.fairId !== undefined) this.assertFairExists(input.fairId);
     this.db.prepare(
-      "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(movement.id, movement.itemId, null, movement.movementType, movement.quantityDelta, movement.unitCostPaise, movement.occurredAt);
+      "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(movement.id, movement.itemId, null, movement.movementType, movement.quantityDelta, movement.unitCostPaise, movement.occurredAt, input.fairId ?? null);
     this.insertAuditEvent({ action: "stock.movement_added", entityId: movement.itemId, occurredAt: movement.occurredAt });
     return movement;
   }
 
   public listStockMovements(itemId?: string): readonly StockMovement[] {
     const statement = itemId === undefined
-      ? this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at FROM stock_movements ORDER BY occurred_at, rowid")
-      : this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid");
+      ? this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id FROM stock_movements ORDER BY occurred_at, rowid")
+      : this.db.prepare("SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid");
     const rows = (itemId === undefined ? statement.all() : statement.all(itemId)) as Array<{
       id: string; item_id: string; source_id: string | null; movement_type: StockMovement["movementType"];
-      quantity_delta: number; unit_cost_paise: number; occurred_at: string;
+      quantity_delta: number; unit_cost_paise: number; occurred_at: string; fair_id: string | null;
     }>;
     return rows.map((row) => ({
       id: row.id, itemId: row.item_id, sourceId: row.source_id, movementType: row.movement_type,
       quantityDelta: row.quantity_delta, unitCostPaise: row.unit_cost_paise, occurredAt: row.occurred_at,
+      ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
     }));
   }
 
@@ -1306,9 +1321,9 @@ export class AccountingRepository {
           { account: invoice.paymentAccount, debitPaise: 0, creditPaise: taxablePaise + taxPaise },
         ],
       };
-      const inventoryCost = this.restoreCreditNoteStock(note);
+      const inventoryCost = this.restoreCreditNoteStock(note, invoice.fairId);
       const noteRow = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
-      const dims = { businessId: invoice.businessId, entryDate: istDateOf(noteRow.created_at) };
+      const dims = { businessId: invoice.businessId, entryDate: istDateOf(noteRow.created_at), ...fairDim(invoice.fairId) };
       this.insertJournalEntry(entry, dims);
       if (inventoryCost > 0) {
         this.insertJournalEntry({
@@ -1420,7 +1435,7 @@ export class AccountingRepository {
       this.db
         .prepare("UPDATE invoices SET status = ? WHERE id = ?")
         .run(result.invoice.status, invoiceId);
-      const dims = { businessId: invoice.businessId, entryDate: this.invoiceEntryDate(invoiceId) };
+      const dims = { businessId: invoice.businessId, entryDate: this.invoiceEntryDate(invoiceId), ...fairDim(invoice.fairId) };
       this.insertJournalEntry(result.journalEntry, dims);
       if (inventoryCostPaise > 0) {
         this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, false), dims);
@@ -1443,12 +1458,12 @@ export class AccountingRepository {
       }
       const originalEntry = this.getOriginalJournalEntry(invoiceId);
       const result = cancelInvoice(invoice, originalEntry);
-      const inventoryCostPaise = this.restoreInvoiceStock(invoiceId);
+      const inventoryCostPaise = this.restoreInvoiceStock(invoiceId, invoice.fairId);
       this.db
         .prepare("UPDATE invoices SET status = ? WHERE id = ?")
         .run(result.invoice.status, invoiceId);
       // A cancellation is its own event, dated the day it happens (never the invoice's date).
-      const dims = { businessId: invoice.businessId, entryDate: istDateOf() };
+      const dims = { businessId: invoice.businessId, entryDate: istDateOf(), ...fairDim(invoice.fairId) };
       this.insertJournalEntry(result.reversalEntry, dims);
       if (inventoryCostPaise > 0) {
         this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, true), dims);
@@ -1496,7 +1511,7 @@ export class AccountingRepository {
         description: `Payment for invoice ${invoice.number}`,
         isReversal: false,
         lines: paymentLines,
-      }, { businessId: invoice.businessId, entryDate: istDateOf(result.paidAt) });
+      }, { businessId: invoice.businessId, entryDate: istDateOf(result.paidAt), ...fairDim(invoice.fairId) });
       this.insertAuditEvent({
         action: "invoice.payment_received",
         entityId: invoiceId,
@@ -1925,17 +1940,19 @@ export class AccountingRepository {
    * The columns are nullable in SQLite (migration v5), so the non-null guarantee for every
    * NEW entry lives here: businessId and entryDate are required and validated.
    */
-  private insertJournalEntry(entry: JournalEntry, dimensions: { businessId: string; entryDate: string }): void {
+  private insertJournalEntry(entry: JournalEntry, dimensions: { businessId: string; entryDate: string; fairId?: string }): void {
     if (typeof dimensions.businessId !== "string" || dimensions.businessId.trim() === "") {
       throw new RepositoryValidationError("A journal entry needs a business.");
     }
+    // The project is OPTIONAL (nullable column): absent means NULL. When given it must be real.
+    if (dimensions.fairId !== undefined) this.assertFairExists(dimensions.fairId);
     this.assertIsoDate("Journal entry date", dimensions.entryDate);
     const now = new Date().toISOString();
     this.db
       .prepare(
-        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type, business_id, entry_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type, business_id, entry_date, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now, entry.sourceType ?? "INVOICE", dimensions.businessId, dimensions.entryDate);
+      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now, entry.sourceType ?? "INVOICE", dimensions.businessId, dimensions.entryDate, dimensions.fairId ?? null);
     const statement = this.db.prepare(
       "INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES (?, ?, ?, ?)",
     );
@@ -1985,7 +2002,7 @@ export class AccountingRepository {
     }
   }
 
-  private restoreCreditNoteStock(note: CreditNote): number {
+  private restoreCreditNoteStock(note: CreditNote, fairId: string | undefined): number {
     let totalCost = 0;
     for (const line of note.lines) {
       if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
@@ -2002,6 +2019,7 @@ export class AccountingRepository {
           movementType: "SALE_REVERSAL",
           quantityDelta: quantity,
           unitCostPaise: row.unit_cost_paise,
+          ...fairDim(fairId),
         });
         totalCost += quantity * row.unit_cost_paise;
         remaining -= quantity;
@@ -2028,6 +2046,7 @@ export class AccountingRepository {
           movementType: "SALE",
           quantityDelta: -quantity,
           unitCostPaise: layer.unitCostPaise,
+          ...fairDim(invoice.fairId),
         });
         totalCostPaise += quantity * layer.unitCostPaise;
         remaining -= quantity;
@@ -2044,7 +2063,7 @@ export class AccountingRepository {
     return totalCostPaise;
   }
 
-  private restoreInvoiceStock(invoiceId: string): number {
+  private restoreInvoiceStock(invoiceId: string, fairId: string | undefined): number {
     const rows = this.db.prepare(
       "SELECT item_id, quantity_delta, unit_cost_paise FROM stock_movements WHERE source_id = ? AND movement_type = 'SALE'",
     ).all(invoiceId) as Array<{ item_id: string; quantity_delta: number; unit_cost_paise: number }>;
@@ -2056,6 +2075,7 @@ export class AccountingRepository {
         movementType: "SALE_REVERSAL",
         quantityDelta: Math.abs(row.quantity_delta),
         unitCostPaise: row.unit_cost_paise,
+        ...fairDim(fairId),
       });
       totalCostPaise += Math.abs(row.quantity_delta) * row.unit_cost_paise;
     }
@@ -2143,10 +2163,13 @@ export class AccountingRepository {
     movementType: "SALE" | "SALE_REVERSAL" | "PURCHASE" | "PURCHASE_REVERSAL";
     quantityDelta: number;
     unitCostPaise: number;
+    /** Reporting tag ONLY. Never read by getStockLayers or any cost/quantity calculation. */
+    fairId?: string;
   }): void {
+    if (input.fairId !== undefined) this.assertFairExists(input.fairId);
     this.db.prepare(
-      "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(randomUUID(), input.itemId, input.sourceId, input.movementType, input.quantityDelta, input.unitCostPaise, new Date().toISOString());
+      "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(randomUUID(), input.itemId, input.sourceId, input.movementType, input.quantityDelta, input.unitCostPaise, new Date().toISOString(), input.fairId ?? null);
   }
 
   private getPaidAmount(invoiceId: string): number {
@@ -2546,6 +2569,26 @@ export class AccountingRepository {
     }
   }
 
+  /** A fair, when named, must be a non-empty id of an existing fair. */
+  private assertFairExists(fairId: string): void {
+    if (typeof fairId !== "string" || fairId.trim() === "") {
+      throw new RepositoryValidationError("A project (fair) id cannot be empty.");
+    }
+    if (this.db.prepare("SELECT 1 FROM fairs WHERE id = ?").get(fairId) === undefined) {
+      throw new RepositoryValidationError(`Fair ${fairId} was not found.`);
+    }
+  }
+
+  /** Purchase documents: the fair must belong to the same company as the document's business. */
+  private assertDocumentFair(fairId: string | undefined, companyId: string, label: string): void {
+    if (fairId === undefined) return;
+    this.assertFairExists(fairId);
+    const fair = this.db.prepare("SELECT company_id FROM fairs WHERE id = ?").get(fairId) as { company_id: string };
+    if (fair.company_id !== companyId) {
+      throw new RepositoryValidationError(`${label} fair must belong to the same company as the business.`);
+    }
+  }
+
   private requireBusinessCompany(businessId: string): { companyId: string } {
     const row = this.db
       .prepare("SELECT company_id FROM businesses WHERE id = ?")
@@ -2694,6 +2737,7 @@ export class AccountingRepository {
         this.assertIsoDate("Due date", input.dueDate);
         if (input.dueDate < input.billDate) throw new RepositoryValidationError("Due date cannot be before the bill date.");
       }
+      this.assertDocumentFair(input.fairId, business.companyId, "Bill");
       this.guard(() => validatePurchaseTax(taxType, rate));
       if (input.lines.length === 0) throw new RepositoryValidationError("A purchase bill must contain at least one line.");
       let subtotal = 0;
@@ -2719,12 +2763,13 @@ export class AccountingRepository {
       this.db
         .prepare(
           `INSERT INTO purchase_bills (id, business_id, supplier_id, number, supplier_invoice_number, bill_date, due_date,
-             notes, tax_type, tax_rate_basis_points, payment_account, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`,
+             notes, tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId, input.number, input.supplierInvoiceNumber ?? null, input.billDate,
           input.dueDate ?? null, input.notes ?? null, taxType, rate, input.paymentAccount, new Date().toISOString(),
+          input.fairId ?? null,
         );
       const lineStatement = this.db.prepare(
         "INSERT INTO purchase_bill_lines (bill_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
@@ -2742,6 +2787,7 @@ export class AccountingRepository {
       id: string; business_id: string; supplier_id: string; number: string; supplier_invoice_number: string | null;
       bill_date: string; due_date: string | null; notes: string | null; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
+      fair_id: string | null;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Purchase bill ${billId} was not found.`);
     const lineRows = this.db
@@ -2763,6 +2809,7 @@ export class AccountingRepository {
       supplierInvoiceNumber: row.supplier_invoice_number, billDate: row.bill_date, dueDate: row.due_date,
       notes: row.notes, taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points,
       paymentAccount: row.payment_account, status: row.status, lines,
+      ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
       subtotalPaise, taxPaise, totalPaise: subtotalPaise + taxPaise, paidPaise: paid.paid,
     };
   }
@@ -2792,7 +2839,7 @@ export class AccountingRepository {
           inventoryPaise += amount;
           this.insertStockMovement({
             itemId: line.itemId, sourceId: bill.id, movementType: "PURCHASE",
-            quantityDelta: line.quantity, unitCostPaise: line.unitPricePaise,
+            quantityDelta: line.quantity, unitCostPaise: line.unitPricePaise, ...fairDim(bill.fairId),
           });
         } else {
           expensePaise += amount;
@@ -2809,7 +2856,7 @@ export class AccountingRepository {
         taxRateBasisPoints: bill.taxRateBasisPoints,
         paymentAccount: bill.paymentAccount,
       }));
-      this.insertJournalEntry(result.entry, { businessId: bill.businessId, entryDate: bill.billDate });
+      this.insertJournalEntry(result.entry, { businessId: bill.businessId, entryDate: bill.billDate, ...fairDim(bill.fairId) });
       this.db.prepare("UPDATE purchase_bills SET status = 'FINALIZED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.finalized", entityId: bill.id, occurredAt: new Date().toISOString() });
       return result.entry;
@@ -2851,11 +2898,11 @@ export class AccountingRepository {
       for (const row of purchased) {
         this.insertStockMovement({
           itemId: row.item_id, sourceId: bill.id, movementType: "PURCHASE_REVERSAL",
-          quantityDelta: -row.quantity_delta, unitCostPaise: row.unit_cost_paise,
+          quantityDelta: -row.quantity_delta, unitCostPaise: row.unit_cost_paise, ...fairDim(bill.fairId),
         });
       }
       const reversal = this.guard(() => reverseEntry(original, `je-bill-${bill.id}-reversal`, `Cancellation of purchase bill ${bill.number}`));
-      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: istDateOf() });
+      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: istDateOf(), ...fairDim(bill.fairId) });
       this.db.prepare("UPDATE purchase_bills SET status = 'CANCELLED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -2892,6 +2939,7 @@ export class AccountingRepository {
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("Expense amount must be a positive whole number of paise.");
       }
+      this.assertDocumentFair(input.fairId, business.companyId, "Expense");
       this.guard(() => validatePurchaseTax(taxType, rate));
       if (input.supplierId !== undefined) {
         if (this.requireSupplier(input.supplierId).companyId !== business.companyId) {
@@ -2911,12 +2959,13 @@ export class AccountingRepository {
       this.db
         .prepare(
           `INSERT INTO expenses (id, business_id, supplier_id, category_id, number, expense_date, description, amount_paise,
-             tax_type, tax_rate_basis_points, payment_account, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`,
+             tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId ?? null, input.categoryId ?? null, input.number, input.expenseDate,
           input.description, input.amountPaise, taxType, rate, input.paymentAccount, new Date().toISOString(),
+          input.fairId ?? null,
         );
       this.insertAuditEvent({ action: "expense.created", entityId: id, occurredAt: new Date().toISOString() });
     })();
@@ -2928,6 +2977,7 @@ export class AccountingRepository {
       id: string; business_id: string; supplier_id: string | null; category_id: string | null; number: string;
       expense_date: string; description: string; amount_paise: number; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
+      fair_id: string | null;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Expense ${expenseId} was not found.`);
     const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(row.amount_paise * row.tax_rate_basis_points / 10000);
@@ -2939,6 +2989,7 @@ export class AccountingRepository {
       number: row.number, expenseDate: row.expense_date, description: row.description, amountPaise: row.amount_paise,
       taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points, paymentAccount: row.payment_account,
       status: row.status, taxPaise, totalPaise: row.amount_paise + taxPaise, paidPaise: paid.paid,
+      ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
     };
   }
 
@@ -2969,7 +3020,7 @@ export class AccountingRepository {
         taxRateBasisPoints: expense.taxRateBasisPoints,
         paymentAccount: expense.paymentAccount,
       }));
-      this.insertJournalEntry(result.entry, { businessId: expense.businessId, entryDate: expense.expenseDate });
+      this.insertJournalEntry(result.entry, { businessId: expense.businessId, entryDate: expense.expenseDate, ...fairDim(expense.fairId) });
       this.db.prepare("UPDATE expenses SET status = 'FINALIZED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.finalized", entityId: expense.id, occurredAt: new Date().toISOString() });
       return result.entry;
@@ -2985,7 +3036,7 @@ export class AccountingRepository {
       }
       const original = this.getSourceJournalEntry(expense.id, "EXPENSE");
       const reversal = this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
-      this.insertJournalEntry(reversal, { businessId: expense.businessId, entryDate: istDateOf() });
+      this.insertJournalEntry(reversal, { businessId: expense.businessId, entryDate: istDateOf(), ...fairDim(expense.fairId) });
       this.db.prepare("UPDATE expenses SET status = 'CANCELLED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.cancelled", entityId: expense.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -3005,11 +3056,11 @@ export class AccountingRepository {
       const doc = input.billId !== undefined
         ? (() => {
             const bill = this.getPurchaseBill(input.billId);
-            return { businessId: bill.businessId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
+            return { businessId: bill.businessId, fairId: bill.fairId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
           })()
         : (() => {
             const expense = this.getExpense(input.expenseId as string);
-            return { businessId: expense.businessId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
+            return { businessId: expense.businessId, fairId: expense.fairId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
           })();
       if (doc.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized documents can receive supplier payments.");
       if (doc.paymentAccount !== "PAYABLES") throw new RepositoryValidationError("Only documents payable later can receive supplier payments.");
@@ -3037,7 +3088,7 @@ export class AccountingRepository {
         sourceId,
         description: `Supplier payment for ${doc.number}`,
         amountPaise: payment.amountPaise,
-      })), { businessId: doc.businessId, entryDate: istDateOf(payment.paidAt) });
+      })), { businessId: doc.businessId, entryDate: istDateOf(payment.paidAt), ...fairDim(doc.fairId) });
       this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: payment.paidAt });
       return payment;
     })();
