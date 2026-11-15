@@ -372,24 +372,28 @@ describe("expenses", () => {
 });
 
 describe("validation and ownership", () => {
-  it("refuses PAYABLES bills and expenses for cash-basis companies", () => {
+  it("allows PAYABLES bills and expenses for cash-basis companies and defers recognition", () => {
     const world = setup("CASH");
     const { repository } = world;
     try {
-      expect(() => repository.createPurchaseBill({
+      const bill = repository.createPurchaseBill({
         businessId: world.businessId, supplierId: world.supplierId, number: "PB-C", billDate: "2026-11-01",
         paymentAccount: "PAYABLES", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }],
-      })).toThrow("cash-basis");
-      expect(() => repository.createExpense({
+      });
+      const expense = repository.createExpense({
         businessId: world.businessId, supplierId: world.supplierId, number: "EX-C", expenseDate: "2026-11-01",
         description: "x", amountPaise: 100, paymentAccount: "PAYABLES",
-      })).toThrow("cash-basis");
-      // CASH is allowed.
-      const bill = repository.createPurchaseBill({
+      });
+      // Non-stock bill and expense post nothing until paid.
+      expect(repository.finalizePurchaseBill(bill.id).lines).toHaveLength(0);
+      expect(repository.finalizeExpense(expense.id).lines).toHaveLength(0);
+      expect(repository.listJournalEntries()).toHaveLength(0);
+      // CASH is still allowed and posts at finalize.
+      const cashBill = repository.createPurchaseBill({
         businessId: world.businessId, supplierId: world.supplierId, number: "PB-C2", billDate: "2026-11-01",
         paymentAccount: "CASH", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }],
       });
-      expect(repository.finalizePurchaseBill(bill.id).lines).toHaveLength(2);
+      expect(repository.finalizePurchaseBill(cashBill.id).lines).toHaveLength(2);
     } finally {
       repository.close();
     }
@@ -493,5 +497,265 @@ describe("migration v4", () => {
     db.prepare("INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES ('r1', 'it1', 'bill-x', 'PURCHASE_REVERSAL', -1, 10, '2026-01-03')").run();
     // Re-running the guarded body is a no-op.
     expect(runMigrations(db)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- cash-basis credit purchases
+
+function entriesFor(repository: AccountingRepository, sourceId: string) {
+  return repository.listJournalEntries().filter((entry) => entry.sourceId === sourceId);
+}
+
+function entryBalanced(entry: { lines: readonly { debitPaise: number; creditPaise: number }[] }): boolean {
+  return entry.lines.reduce((t, l) => t + l.debitPaise, 0) === entry.lines.reduce((t, l) => t + l.creditPaise, 0);
+}
+
+function sumAccount(repository: AccountingRepository, sourceId: string, account: string, side: "debitPaise" | "creditPaise"): number {
+  return entriesFor(repository, sourceId)
+    .flatMap((entry) => entry.lines)
+    .filter((line) => line.account === account)
+    .reduce((total, line) => total + line[side], 0);
+}
+
+describe("cash-basis credit purchases", () => {
+  it("recognizes a cash PAYABLES expense only as it is paid, proportional with IGST", () => {
+    const world = setup("CASH");
+    const { repository } = world;
+    try {
+      const expense = repository.createExpense({
+        businessId: world.businessId, supplierId: world.supplierId, number: "EX-1", expenseDate: "2026-11-01",
+        description: "Rent", amountPaise: 10000, taxType: "IGST", taxRateBasisPoints: 1800, paymentAccount: "PAYABLES",
+      });
+      repository.finalizeExpense(expense.id);
+      expect(repository.listAuditEvents(expense.id).map((e) => e.action)).toContain("expense.finalized");
+      expect(entriesFor(repository, expense.id)).toHaveLength(0);
+      expect(repository.getProfitAndLoss().totalExpensesPaise).toBe(0);
+      let paid = 0;
+      for (const amount of [3000, 2800, 3000, 3000]) {
+        repository.recordSupplierPayment({ expenseId: expense.id, amountPaise: amount });
+        paid += amount;
+        expect(trialBalanceIsBalanced(repository)).toBe(true);
+        const last = entriesFor(repository, expense.id).at(-1);
+        expect(last?.lines.some((l) => l.account === "EXPENSE" && l.debitPaise > 0)).toBe(true);
+        expect(last?.lines.some((l) => l.account === "INPUT_IGST" && l.debitPaise > 0)).toBe(true);
+        expect(balance(repository, "EXPENSE") + balance(repository, "INPUT_IGST")).toBe(paid);
+        expect(repository.getProfitAndLoss().totalExpensesPaise).toBe(balance(repository, "EXPENSE"));
+      }
+      expect(paid).toBe(11800);
+      expect(balance(repository, "EXPENSE")).toBe(10000);
+      expect(balance(repository, "INPUT_IGST")).toBe(1800);
+      expect(balance(repository, "PAYABLES")).toBe(0);
+      expect(repository.getPayables()).toHaveLength(0);
+    } finally {
+      repository.close();
+    }
+  });
+
+  it("splits a mixed cash PAYABLES bill: inventory at finalize, expense and CGST/SGST on payment", () => {
+    const world = setup("CASH");
+    const { repository } = world;
+    try {
+      const bill = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-M", billDate: "2026-11-01",
+        paymentAccount: "PAYABLES", taxType: "CGST_SGST", taxRateBasisPoints: 1800,
+        lines: [
+          { itemId: world.stockItemId, description: "Atlas", quantity: 10, unitPricePaise: 500 },
+          { itemId: world.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 1001 },
+        ],
+      });
+      const V = 5000, E = 1001, Tx = Math.round(6001 * 0.18), T = 6001 + Tx;
+      expect(bill.totalPaise).toBe(T);
+      const posted = repository.finalizePurchaseBill(bill.id);
+      expect(posted.lines).toEqual([
+        { account: "INVENTORY", debitPaise: V, creditPaise: 0 },
+        { account: "PAYABLES", debitPaise: 0, creditPaise: V },
+      ]);
+      // Stock is sellable before any payment, and COGS posts.
+      sell(world, "S1", 4, 900);
+      expect(balance(repository, "COGS")).toBe(2000);
+      // Unpaid: no expense recognized; the payables report is document-level.
+      expect(repository.getProfitAndLoss().expenses.find((r) => r.account === "EXPENSE")).toBeUndefined();
+      expect(balance(repository, "INVENTORY")).toBe(V - 2000);
+      expect(balance(repository, "PAYABLES")).toBe(-V);
+      expect(repository.getPayables()[0]?.outstandingPaise).toBe(T);
+      let paid = 0;
+      for (const amount of [1, 999, 2500, T - 3500]) {
+        repository.recordSupplierPayment({ billId: bill.id, amountPaise: amount });
+        paid += amount;
+        expect(trialBalanceIsBalanced(repository)).toBe(true);
+      }
+      expect(paid).toBe(T);
+      expect(balance(repository, "PAYABLES")).toBe(0);
+      expect(balance(repository, "EXPENSE")).toBe(E);
+      expect(balance(repository, "INPUT_CGST")).toBe(Math.floor(Tx / 2));
+      expect(balance(repository, "INPUT_SGST")).toBe(Tx - Math.floor(Tx / 2));
+      expect(repository.getPayables()).toHaveLength(0);
+    } finally {
+      repository.close();
+    }
+  });
+
+  it("handles no-tax, all-inventory and all-expense variants", () => {
+    const world = setup("CASH");
+    const { repository } = world;
+    try {
+      const noTax = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-N", billDate: "2026-11-01", paymentAccount: "PAYABLES",
+        lines: [{ itemId: world.stockItemId, description: "a", quantity: 2, unitPricePaise: 300 }, { description: "svc", quantity: 1, unitPricePaise: 400 }],
+      });
+      repository.finalizePurchaseBill(noTax.id);
+      repository.recordSupplierPayment({ billId: noTax.id, amountPaise: 1 });
+      repository.recordSupplierPayment({ billId: noTax.id, amountPaise: 999 });
+      expect(balance(repository, "EXPENSE")).toBe(400);
+      expect(balance(repository, "PAYABLES")).toBe(0);
+
+      const allInv = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-I", billDate: "2026-11-01", paymentAccount: "PAYABLES",
+        taxType: "IGST", taxRateBasisPoints: 500, lines: [{ itemId: world.stockItemId, description: "a", quantity: 1, unitPricePaise: 2000 }],
+      });
+      repository.finalizePurchaseBill(allInv.id);
+      repository.recordSupplierPayment({ billId: allInv.id, amountPaise: 1000 });
+      repository.recordSupplierPayment({ billId: allInv.id, amountPaise: 1100 });
+      expect(sumAccount(repository, allInv.id, "EXPENSE", "debitPaise")).toBe(0);
+      expect(sumAccount(repository, allInv.id, "INPUT_IGST", "debitPaise")).toBe(100);
+      expect(sumAccount(repository, allInv.id, "PAYABLES", "debitPaise")).toBe(2000);
+      expect(sumAccount(repository, allInv.id, "PAYABLES", "creditPaise")).toBe(2000);
+
+      const allExp = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-E", billDate: "2026-11-01", paymentAccount: "PAYABLES",
+        lines: [{ description: "svc", quantity: 1, unitPricePaise: 700 }],
+      });
+      expect(repository.finalizePurchaseBill(allExp.id).lines).toHaveLength(0);
+      expect(entriesFor(repository, allExp.id)).toHaveLength(0);
+      repository.recordSupplierPayment({ billId: allExp.id, amountPaise: 700 });
+      expect(sumAccount(repository, allExp.id, "EXPENSE", "debitPaise")).toBe(700);
+      expect(trialBalanceIsBalanced(repository)).toBe(true);
+    } finally {
+      repository.close();
+    }
+  });
+
+  it("never posts a negative or zero line and lands on accrual totals (fuzz)", () => {
+    let seed = 12345;
+    const rand = (max: number): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return Math.floor(seed / 7) % (max + 1);
+    };
+    const rates = [0, 500, 1200, 1800, 2800];
+    for (let round = 0; round < 60; round += 1) {
+      const world = setup("CASH");
+      const { repository } = world;
+      try {
+        const V = rand(5000);
+        let E = rand(5000);
+        if (V + E === 0) E = 1;
+        const rate = rates[rand(rates.length - 1)] as number;
+        const taxType = rate === 0 ? "NONE" as const : (rand(1) === 0 ? "IGST" as const : "CGST_SGST" as const);
+        const lines = [
+          ...(V > 0 ? [{ itemId: world.stockItemId, description: "s", quantity: 1, unitPricePaise: V }] : []),
+          ...(E > 0 ? [{ description: "e", quantity: 1, unitPricePaise: E }] : []),
+        ];
+        const bill = repository.createPurchaseBill({
+          businessId: world.businessId, supplierId: world.supplierId, number: `F${round}`, billDate: "2026-11-01",
+          paymentAccount: "PAYABLES", taxType, taxRateBasisPoints: rate, lines,
+        });
+        repository.finalizePurchaseBill(bill.id);
+        const T = bill.totalPaise;
+        const Tx = T - V - E;
+        let remaining = T;
+        while (remaining > 0) {
+          const amount = rand(3) === 0 ? 1 : Math.max(1, Math.min(remaining, rand(Math.max(1, Math.floor(T / 3)))));
+          repository.recordSupplierPayment({ billId: bill.id, amountPaise: amount });
+          remaining -= amount;
+        }
+        for (const entry of entriesFor(repository, bill.id)) {
+          expect(entryBalanced(entry)).toBe(true);
+          for (const line of entry.lines) {
+            expect(line.debitPaise).toBeGreaterThanOrEqual(0);
+            expect(line.creditPaise).toBeGreaterThanOrEqual(0);
+            expect(line.debitPaise + line.creditPaise).toBeGreaterThan(0);
+          }
+        }
+        expect(trialBalanceIsBalanced(repository)).toBe(true);
+        expect(balance(repository, "PAYABLES")).toBe(0);
+        expect(balance(repository, "EXPENSE")).toBe(E);
+        expect(balance(repository, "INVENTORY")).toBe(V);
+        if (taxType === "IGST") expect(balance(repository, "INPUT_IGST")).toBe(Tx);
+        if (taxType === "CGST_SGST") {
+          expect(balance(repository, "INPUT_CGST")).toBe(Math.floor(Tx / 2));
+          expect(balance(repository, "INPUT_SGST")).toBe(Tx - Math.floor(Tx / 2));
+        }
+      } finally {
+        repository.close();
+      }
+    }
+  });
+
+  it("keeps the accrual path unchanged for PAYABLES bills and expenses", () => {
+    const world = setup("ACCRUAL");
+    const { repository } = world;
+    try {
+      const bill = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-A", billDate: "2026-11-01",
+        paymentAccount: "PAYABLES", taxType: "IGST", taxRateBasisPoints: 1800,
+        lines: [{ itemId: world.stockItemId, description: "a", quantity: 1, unitPricePaise: 1000 }, { description: "svc", quantity: 1, unitPricePaise: 500 }],
+      });
+      expect(repository.finalizePurchaseBill(bill.id).lines).toEqual([
+        { account: "INVENTORY", debitPaise: 1000, creditPaise: 0 },
+        { account: "EXPENSE", debitPaise: 500, creditPaise: 0 },
+        { account: "INPUT_IGST", debitPaise: 270, creditPaise: 0 },
+        { account: "PAYABLES", debitPaise: 0, creditPaise: 1770 },
+      ]);
+      const expense = repository.createExpense({
+        businessId: world.businessId, supplierId: world.supplierId, number: "EX-A", expenseDate: "2026-11-01",
+        description: "x", amountPaise: 1000, paymentAccount: "PAYABLES",
+      });
+      expect(repository.finalizeExpense(expense.id).lines).toEqual([
+        { account: "EXPENSE", debitPaise: 1000, creditPaise: 0 },
+        { account: "PAYABLES", debitPaise: 0, creditPaise: 1000 },
+      ]);
+      repository.recordSupplierPayment({ billId: bill.id, amountPaise: 700 });
+      expect(entriesFor(repository, bill.id).at(-1)?.lines).toEqual([
+        { account: "PAYABLES", debitPaise: 700, creditPaise: 0 },
+        { account: "CASH", debitPaise: 0, creditPaise: 700 },
+      ]);
+    } finally {
+      repository.close();
+    }
+  });
+
+  it("cancels unpaid cash credit documents and refuses once paid", () => {
+    const world = setup("CASH");
+    const { repository } = world;
+    try {
+      const expense = repository.createExpense({
+        businessId: world.businessId, supplierId: world.supplierId, number: "EX-X", expenseDate: "2026-11-01",
+        description: "x", amountPaise: 500, paymentAccount: "PAYABLES",
+      });
+      repository.finalizeExpense(expense.id);
+      expect(repository.cancelExpense(expense.id).lines).toHaveLength(0);
+      expect(repository.getExpense(expense.id).status).toBe("CANCELLED");
+      expect(repository.listJournalEntries()).toHaveLength(0);
+
+      const bill = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-X", billDate: "2026-11-01", paymentAccount: "PAYABLES",
+        lines: [{ itemId: world.stockItemId, description: "a", quantity: 3, unitPricePaise: 100 }],
+      });
+      repository.finalizePurchaseBill(bill.id);
+      repository.cancelPurchaseBill(bill.id);
+      expect(repository.getPurchaseBill(bill.id).status).toBe("CANCELLED");
+      expect(balance(repository, "INVENTORY")).toBe(0);
+      expect(balance(repository, "PAYABLES")).toBe(0);
+
+      const paidBill = repository.createPurchaseBill({
+        businessId: world.businessId, supplierId: world.supplierId, number: "PB-Y", billDate: "2026-11-01", paymentAccount: "PAYABLES",
+        lines: [{ description: "svc", quantity: 1, unitPricePaise: 300 }],
+      });
+      repository.finalizePurchaseBill(paidBill.id);
+      repository.recordSupplierPayment({ billId: paidBill.id, amountPaise: 100 });
+      expect(() => repository.cancelPurchaseBill(paidBill.id)).toThrow("cannot be cancelled");
+    } finally {
+      repository.close();
+    }
   });
 });

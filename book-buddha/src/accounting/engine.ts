@@ -289,3 +289,135 @@ export function supplierPaymentEntry(input: {
     isReversal: false,
   };
 }
+
+// ---------------------------------------------------------------- cash-basis credit purchases
+
+export interface CashBasisPurchaseFinalizeInput {
+  readonly entryId: string;
+  readonly sourceId: string;
+  readonly sourceType: Extract<JournalSourceType, "PURCHASE_BILL" | "EXPENSE">;
+  readonly description: string;
+  /** Total cost of stock-tracked lines. Only this part is posted before payment. */
+  readonly inventoryPaise: number;
+}
+
+/**
+ * Finalize posting for a cash-basis credit (PAYABLES) purchase: only the stock received is
+ * recorded (Dr INVENTORY / Cr PAYABLES). Expense and input tax wait for payments.
+ * Returns `{ entry: null }` when there is nothing to post (never an empty entry).
+ */
+export function cashBasisPurchaseFinalizeEntry(
+  input: CashBasisPurchaseFinalizeInput,
+): { readonly entry: JournalEntry } | { readonly entry: null } {
+  if (!Number.isInteger(input.inventoryPaise) || input.inventoryPaise < 0) {
+    throw new AccountingError("Purchase amounts must be non-negative whole paise.");
+  }
+  if (input.inventoryPaise === 0) return { entry: null };
+  return {
+    entry: {
+      id: input.entryId,
+      sourceId: input.sourceId,
+      sourceType: input.sourceType,
+      description: input.description,
+      lines: balancedLines([
+        { account: "INVENTORY", debitPaise: input.inventoryPaise, creditPaise: 0 },
+        { account: "PAYABLES", debitPaise: 0, creditPaise: input.inventoryPaise },
+      ]),
+      isReversal: false,
+    },
+  };
+}
+
+export interface CashBasisSupplierPaymentInput {
+  /** V: inventory part already booked to PAYABLES at finalize. */
+  readonly payablesBasePaise: number;
+  /** E: expense subtotal (non-stock lines). */
+  readonly expenseBasePaise: number;
+  readonly taxType: InvoiceTaxType;
+  readonly taxRateBasisPoints: number;
+  /** T: document total (V + E + input tax). */
+  readonly totalPaise: number;
+  readonly recognizedPayablesPaise: number;
+  readonly recognizedExpensePaise: number;
+  readonly recognizedCgstPaise: number;
+  readonly recognizedSgstPaise: number;
+  readonly recognizedIgstPaise: number;
+  /** A: this payment. */
+  readonly amountPaise: number;
+}
+
+/**
+ * Lines for one supplier payment on a cash-basis credit purchase. The payment is split
+ * across PAYABLES (stock already booked), EXPENSE and input tax in proportion to the document,
+ * driven by what is already recognized so no line is ever negative and totals land exactly.
+ */
+export function cashBasisSupplierPaymentLines(input: CashBasisSupplierPaymentInput): readonly JournalLine[] {
+  const amounts = [
+    input.payablesBasePaise, input.expenseBasePaise, input.totalPaise, input.recognizedPayablesPaise,
+    input.recognizedExpensePaise, input.recognizedCgstPaise, input.recognizedSgstPaise, input.recognizedIgstPaise,
+  ];
+  if (amounts.some((value) => !Number.isInteger(value) || value < 0)) {
+    throw new AccountingError("Purchase amounts must be non-negative whole paise.");
+  }
+  if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+    throw new AccountingError("Payment amount must be a positive whole number of paise.");
+  }
+  const { payablesBasePaise: v, expenseBasePaise: e, totalPaise: t, amountPaise: a } = input;
+  const taxPaise = t - v - e;
+  if (taxPaise !== inputTaxPaise(input.taxType, input.taxRateBasisPoints, v + e)) {
+    throw new AccountingError("Purchase total does not match its amounts and tax.");
+  }
+  const keys = ["payables", "expense", "input"] as const;
+  type Bucket = typeof keys[number];
+  const base: Record<Bucket, number> = { payables: v, expense: e, input: taxPaise };
+  const recognized: Record<Bucket, number> = {
+    payables: input.recognizedPayablesPaise,
+    expense: input.recognizedExpensePaise,
+    input: input.recognizedCgstPaise + input.recognizedSgstPaise + input.recognizedIgstPaise,
+  };
+  const priorPaid = recognized.payables + recognized.expense + recognized.input;
+  const paidAfter = priorPaid + a;
+  if (paidAfter > t) {
+    throw new AccountingError("Payment cannot exceed the outstanding balance.");
+  }
+  const delta: Record<Bucket, number> = { payables: 0, expense: 0, input: 0 };
+  for (const key of keys) {
+    const target = paidAfter === t ? base[key] : Math.round(paidAfter * base[key] / t);
+    delta[key] = Math.min(Math.max(target - recognized[key], 0), base[key] - recognized[key]);
+  }
+  let diff = a - (delta.payables + delta.expense + delta.input);
+  if (diff > 0) {
+    for (const key of keys) {
+      const add = Math.min(diff, base[key] - recognized[key] - delta[key]);
+      delta[key] += add;
+      diff -= add;
+    }
+  } else if (diff < 0) {
+    for (const key of keys) {
+      const take = Math.min(-diff, delta[key]);
+      delta[key] -= take;
+      diff += take;
+    }
+  }
+  if (diff !== 0) throw new AccountingError("Payment could not be allocated.");
+
+  const inputThis = delta.input;
+  let inputLines: readonly JournalLine[] = [];
+  if (input.taxType === "IGST") {
+    inputLines = inputThis > 0 ? [{ account: "INPUT_IGST", debitPaise: inputThis, creditPaise: 0 }] : [];
+  } else if (input.taxType === "CGST_SGST") {
+    const cgstThis = Math.floor((input.recognizedCgstPaise + input.recognizedSgstPaise + inputThis) / 2)
+      - input.recognizedCgstPaise;
+    const sgstThis = inputThis - cgstThis;
+    inputLines = [
+      ...(cgstThis > 0 ? [{ account: "INPUT_CGST" as const, debitPaise: cgstThis, creditPaise: 0 }] : []),
+      ...(sgstThis > 0 ? [{ account: "INPUT_SGST" as const, debitPaise: sgstThis, creditPaise: 0 }] : []),
+    ];
+  }
+  return balancedLines([
+    ...(delta.payables > 0 ? [{ account: "PAYABLES" as const, debitPaise: delta.payables, creditPaise: 0 }] : []),
+    ...(delta.expense > 0 ? [{ account: "EXPENSE" as const, debitPaise: delta.expense, creditPaise: 0 }] : []),
+    ...inputLines,
+    { account: "CASH", debitPaise: 0, creditPaise: a },
+  ]);
+}

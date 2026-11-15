@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   AccountingError,
   cancelInvoice,
+  cashBasisPurchaseFinalizeEntry,
+  cashBasisSupplierPaymentLines,
   finalizeInvoice,
   inputTaxPaise,
   purchaseEntry,
@@ -2318,14 +2320,6 @@ export class AccountingRepository {
     return { companyId: row.company_id, name: row.name };
   }
 
-  private assertCashBasisAllows(basis: AccountingBasis, paymentAccount: PurchasePaymentAccount): void {
-    if (basis === "CASH" && paymentAccount === "PAYABLES") {
-      throw new RepositoryValidationError(
-        "Credit purchases (payable later) are not supported for cash-basis companies yet. Use payment account CASH.",
-      );
-    }
-  }
-
   private assertIsoDate(label: string, value: string): void {
     if (!isValidIsoDate(value)) throw new RepositoryValidationError(`${label} must be a real date written as YYYY-MM-DD.`);
   }
@@ -2459,7 +2453,6 @@ export class AccountingRepository {
         this.assertIsoDate("Due date", input.dueDate);
         if (input.dueDate < input.billDate) throw new RepositoryValidationError("Due date cannot be before the bill date.");
       }
-      this.assertCashBasisAllows(business.basis, input.paymentAccount);
       this.guard(() => validatePurchaseTax(taxType, rate));
       if (input.lines.length === 0) throw new RepositoryValidationError("A purchase bill must contain at least one line.");
       let subtotal = 0;
@@ -2550,7 +2543,6 @@ export class AccountingRepository {
       const bill = this.getPurchaseBill(billId);
       if (bill.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase bills can be finalized.");
       const business = this.requireBusinessCompany(bill.businessId);
-      this.assertCashBasisAllows(business.basis, bill.paymentAccount);
       let inventoryPaise = 0;
       let expensePaise = 0;
       for (const line of bill.lines) {
@@ -2564,6 +2556,25 @@ export class AccountingRepository {
         } else {
           expensePaise += amount;
         }
+      }
+      if (business.basis === "CASH" && bill.paymentAccount === "PAYABLES") {
+        const deferred = this.guard(() => cashBasisPurchaseFinalizeEntry({
+          entryId: `je-bill-${bill.id}`,
+          sourceId: bill.id,
+          sourceType: "PURCHASE_BILL",
+          description: `Purchase bill ${bill.number}`,
+          inventoryPaise,
+        }));
+        if (deferred.entry !== null) this.insertJournalEntry(deferred.entry);
+        this.db.prepare("UPDATE purchase_bills SET status = 'FINALIZED' WHERE id = ?").run(bill.id);
+        this.insertAuditEvent({ action: "purchase_bill.finalized", entityId: bill.id, occurredAt: new Date().toISOString() });
+        return deferred.entry ?? {
+          id: `je-pending-${bill.id}`,
+          sourceId: bill.id,
+          description: `Cash-basis purchase bill ${bill.number} pending payment recognition`,
+          lines: [],
+          isReversal: false,
+        };
       }
       const result = this.guard(() => purchaseEntry({
         entryId: `je-bill-${bill.id}`,
@@ -2590,7 +2601,11 @@ export class AccountingRepository {
       if (bill.paidPaise > 0) {
         throw new RepositoryValidationError("A purchase bill with recorded supplier payments cannot be cancelled.");
       }
-      const original = this.getSourceJournalEntry(bill.id, "PURCHASE_BILL");
+      // A cash-basis credit bill with no stock lines has no finalize entry to reverse.
+      const original = this.findSourceJournalEntry(bill.id, "PURCHASE_BILL");
+      if (original === undefined && bill.paymentAccount !== "PAYABLES") {
+        throw new RepositoryValidationError(`Original journal entry for ${bill.id} was not found.`);
+      }
       // Per-lot check: this bill's OWN remaining layers (by source) must still cover what it bought.
       const purchased = this.db
         .prepare(
@@ -2620,8 +2635,16 @@ export class AccountingRepository {
           quantityDelta: -row.quantity_delta, unitCostPaise: row.unit_cost_paise,
         });
       }
-      const reversal = this.guard(() => reverseEntry(original, `je-bill-${bill.id}-reversal`, `Cancellation of purchase bill ${bill.number}`));
-      this.insertJournalEntry(reversal);
+      const reversal = original === undefined
+        ? {
+            id: `je-bill-${bill.id}-reversal`,
+            sourceId: bill.id,
+            description: `Cancellation of purchase bill ${bill.number}`,
+            lines: [],
+            isReversal: true,
+          }
+        : this.guard(() => reverseEntry(original, `je-bill-${bill.id}-reversal`, `Cancellation of purchase bill ${bill.number}`));
+      if (original !== undefined) this.insertJournalEntry(reversal);
       this.db.prepare("UPDATE purchase_bills SET status = 'CANCELLED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -2629,13 +2652,19 @@ export class AccountingRepository {
   }
 
   private getSourceJournalEntry(sourceId: string, sourceType: JournalSourceType): JournalEntry {
+    const entry = this.findSourceJournalEntry(sourceId, sourceType);
+    if (entry === undefined) throw new RepositoryValidationError(`Original journal entry for ${sourceId} was not found.`);
+    return entry;
+  }
+
+  /** Like getSourceJournalEntry, but returns undefined when nothing was posted. */
+  private findSourceJournalEntry(sourceId: string, sourceType: JournalSourceType): JournalEntry | undefined {
     const row = this.db
       .prepare(
         "SELECT id, source_id, description, is_reversal FROM journal_entries WHERE source_id = ? AND source_type = ? AND is_reversal = 0",
       )
       .get(sourceId, sourceType) as JournalEntryRow | undefined;
-    if (row === undefined) throw new RepositoryValidationError(`Original journal entry for ${sourceId} was not found.`);
-    return { ...this.getJournalEntry(row), sourceType };
+    return row === undefined ? undefined : { ...this.getJournalEntry(row), sourceType };
   }
 
   // ---- expenses
@@ -2652,7 +2681,6 @@ export class AccountingRepository {
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("Expense amount must be a positive whole number of paise.");
       }
-      this.assertCashBasisAllows(business.basis, input.paymentAccount);
       this.guard(() => validatePurchaseTax(taxType, rate));
       if (input.supplierId !== undefined) {
         if (this.requireSupplier(input.supplierId).companyId !== business.companyId) {
@@ -2719,7 +2747,25 @@ export class AccountingRepository {
     return this.db.transaction(() => {
       const expense = this.getExpense(expenseId);
       if (expense.status !== "DRAFT") throw new RepositoryValidationError("Only draft expenses can be finalized.");
-      this.assertCashBasisAllows(this.requireBusinessCompany(expense.businessId).basis, expense.paymentAccount);
+      if (this.requireBusinessCompany(expense.businessId).basis === "CASH" && expense.paymentAccount === "PAYABLES") {
+        const deferred = this.guard(() => cashBasisPurchaseFinalizeEntry({
+          entryId: `je-expense-${expense.id}`,
+          sourceId: expense.id,
+          sourceType: "EXPENSE",
+          description: `Expense ${expense.number}`,
+          inventoryPaise: 0,
+        }));
+        if (deferred.entry !== null) this.insertJournalEntry(deferred.entry);
+        this.db.prepare("UPDATE expenses SET status = 'FINALIZED' WHERE id = ?").run(expense.id);
+        this.insertAuditEvent({ action: "expense.finalized", entityId: expense.id, occurredAt: new Date().toISOString() });
+        return deferred.entry ?? {
+          id: `je-pending-${expense.id}`,
+          sourceId: expense.id,
+          description: `Cash-basis expense ${expense.number} pending payment recognition`,
+          lines: [],
+          isReversal: false,
+        };
+      }
       const result = this.guard(() => purchaseEntry({
         entryId: `je-expense-${expense.id}`,
         sourceId: expense.id,
@@ -2745,9 +2791,20 @@ export class AccountingRepository {
       if (expense.paidPaise > 0) {
         throw new RepositoryValidationError("An expense with recorded supplier payments cannot be cancelled.");
       }
-      const original = this.getSourceJournalEntry(expense.id, "EXPENSE");
-      const reversal = this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
-      this.insertJournalEntry(reversal);
+      const original = this.findSourceJournalEntry(expense.id, "EXPENSE");
+      if (original === undefined && expense.paymentAccount !== "PAYABLES") {
+        throw new RepositoryValidationError(`Original journal entry for ${expense.id} was not found.`);
+      }
+      const reversal = original === undefined
+        ? {
+            id: `je-expense-${expense.id}-reversal`,
+            sourceId: expense.id,
+            description: `Cancellation of expense ${expense.number}`,
+            lines: [],
+            isReversal: true,
+          }
+        : this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
+      if (original !== undefined) this.insertJournalEntry(reversal);
       this.db.prepare("UPDATE expenses SET status = 'CANCELLED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.cancelled", entityId: expense.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -2767,11 +2824,11 @@ export class AccountingRepository {
       const doc = input.billId !== undefined
         ? (() => {
             const bill = this.getPurchaseBill(input.billId);
-            return { number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise };
+            return { number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
           })()
         : (() => {
             const expense = this.getExpense(input.expenseId as string);
-            return { number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise };
+            return { number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
           })();
       if (doc.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized documents can receive supplier payments.");
       if (doc.paymentAccount !== "PAYABLES") throw new RepositoryValidationError("Only documents payable later can receive supplier payments.");
@@ -2792,12 +2849,50 @@ export class AccountingRepository {
       this.db
         .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(payment.id, payment.supplierId, payment.billId, payment.expenseId, payment.amountPaise, payment.paymentAccount, payment.paidAt);
-      this.insertJournalEntry(this.guard(() => supplierPaymentEntry({
-        entryId: `je-supplier-payment-${payment.id}`,
-        sourceId,
-        description: `Supplier payment for ${doc.number}`,
-        amountPaise: payment.amountPaise,
-      })));
+      // Choose the posting by what finalize actually posted (not by the current company basis).
+      const finalizeEntry = this.findSourceJournalEntry(sourceId, input.billId !== undefined ? "PURCHASE_BILL" : "EXPENSE");
+      const payablesCredit = finalizeEntry === undefined
+        ? 0
+        : finalizeEntry.lines.filter((line) => line.account === "PAYABLES").reduce((total, line) => total + line.creditPaise, 0);
+      if (finalizeEntry !== undefined && payablesCredit === doc.totalPaise) {
+        this.insertJournalEntry(this.guard(() => supplierPaymentEntry({
+          entryId: `je-supplier-payment-${payment.id}`,
+          sourceId,
+          description: `Supplier payment for ${doc.number}`,
+          amountPaise: payment.amountPaise,
+        })));
+      } else {
+        const recognizedRows = this.db
+          .prepare(
+            `SELECT jl.account AS account, COALESCE(SUM(jl.debit_paise), 0) AS debit
+             FROM journal_entries je JOIN journal_lines jl ON jl.journal_entry_id = je.id
+             WHERE je.source_id = ? AND je.source_type = 'SUPPLIER_PAYMENT' AND je.is_reversal = 0 AND jl.debit_paise > 0
+             GROUP BY jl.account`,
+          )
+          .all(sourceId) as Array<{ account: string; debit: number }>;
+        const recognized = (account: string): number => recognizedRows.find((row) => row.account === account)?.debit ?? 0;
+        const lines = this.guard(() => cashBasisSupplierPaymentLines({
+          payablesBasePaise: payablesCredit,
+          expenseBasePaise: doc.subtotalPaise - payablesCredit,
+          taxType: doc.taxType,
+          taxRateBasisPoints: doc.taxRateBasisPoints,
+          totalPaise: doc.totalPaise,
+          recognizedPayablesPaise: recognized("PAYABLES"),
+          recognizedExpensePaise: recognized("EXPENSE"),
+          recognizedCgstPaise: recognized("INPUT_CGST"),
+          recognizedSgstPaise: recognized("INPUT_SGST"),
+          recognizedIgstPaise: recognized("INPUT_IGST"),
+          amountPaise: payment.amountPaise,
+        }));
+        this.insertJournalEntry({
+          id: `je-supplier-payment-${payment.id}`,
+          sourceId,
+          sourceType: "SUPPLIER_PAYMENT",
+          description: `Supplier payment for ${doc.number}`,
+          lines,
+          isReversal: false,
+        });
+      }
       this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: payment.paidAt });
       return payment;
     })();
