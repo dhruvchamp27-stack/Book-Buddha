@@ -126,10 +126,10 @@ already sold, and **refused** if supplier payments exist. `getPayables` and
 PAYABLES (liability) and the P&L carries EXPENSE.
 
 **Deliberate decisions in Slice 6 (surface to the owner):**
-- **Recognition is accrual-at-finalize for all companies, BUT cash-basis
-  companies are refused PAYABLES (credit) bills/expenses** (CASH only). This keeps
-  the cash/accrual invariant intact without guessing; full cash-basis deferral of
-  credit purchases (symmetric with sales) is a later design decision.
+- ~~**Recognition is accrual-at-finalize for all companies, BUT cash-basis
+  companies are refused PAYABLES (credit) bills/expenses** (CASH only).~~
+  **SUPERSEDED** — cash-basis credit purchases are now fully supported with
+  payment-based expense recognition (see "Cash-basis credit purchases" below).
 - **Retained earnings on the Balance Sheet was corrected** from `SALES` only to
   `SALES - COGS - EXPENSE`. This changes sales-side Balance Sheet output whenever
   COGS exists (no prior test asserted it; the sheet could not balance without it).
@@ -141,6 +141,34 @@ PAYABLES (liability) and the P&L carries EXPENSE.
   offset account is a later decision).
 
 Slice 6 gates passed: 87/87 vitest tests, tsc exit 0, vite build exit 0.
+
+**Cash-basis credit purchases (payment-based expense recognition)** is
+**backend-done** (commit `5576a21`, no migration). Cash-basis companies can now
+create/track PAYABLES (credit) bills and expenses; the Slice-6 refusal is reversed.
+At finalize only stock received posts (Dr INVENTORY / Cr PAYABLES on V, the inventory
+subtotal; nothing posts when V=0). Expense (E) and input tax (ITC) are **deferred**
+and recognized proportionally as supplier payments are made. Two new pure engine
+helpers: `cashBasisPurchaseFinalizeEntry` (inventory-only finalize entry, or `null`),
+and `cashBasisSupplierPaymentLines` (a clamp-and-redistribute allocator driven by
+recognized-so-far, with a **cumulative** CGST/SGST split, so no journal line is ever
+negative and full payment lands exactly on {V, E, tax} == the accrual figures).
+`recordSupplierPayment` picks the plain vs deferred posting from **what finalize
+actually posted** (the PAYABLES credit vs the document total), not the current basis,
+so accrual is byte-identical. Cancel of a deferred V=0 document uses a non-throwing
+source-entry lookup and an empty reversal.
+
+**Handoff notes for the owner:**
+- The **ledger** PAYABLES balance equals V (inventory only) for a cash-basis credit
+  purchase, while `getPayables` reports the full document-level outstanding (V+E+tax).
+  This is deliberate — test req6 (full payable visible until paid) against `getPayables`,
+  not the ledger. Reports were not changed; P&L/Balance Sheet read the ledger and are
+  correct (deferred expense/ITC auto-excluded until paid).
+- COGS still hits the P&L if stock from an unpaid cash-basis bill is sold (existing
+  sales-side behaviour; inventory is basis-neutral).
+- Deferring ITC to payment is a symmetry choice, not GST-return timing — flag if the
+  owner wants ITC claimed at bill date instead.
+
+Cash-basis slice gates passed: 93/93 vitest tests, tsc exit 0, vite build exit 0.
 
 The next safe implementation slice is **Slice 7: Projects / subscriptions /
 consolidated and cash-basis reports** (where report-level cash-basis views and the
