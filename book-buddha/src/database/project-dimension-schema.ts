@@ -6,8 +6,10 @@ import type Database from "better-sqlite3";
  *   je-<inv>, je-<inv>-reversal, je-inventory-<inv>, je-inventory-<inv>-reversal
  *   je-payment-<payment>             (source_id is the INVOICE id)
  *   je-credit-note-<note>, je-credit-note-inventory-<note>   (source_id is the INVOICE id)
- * Purchase-bill, expense and supplier-payment entries are deliberately absent: those
- * documents have no fair yet (slice 8b adds one), so their entries stay NULL.
+ * Purchase-bill, expense and supplier-payment entries are deliberately absent from the
+ * BACKFILL: when this migration runs those documents have no fair column yet, so their
+ * entries stay NULL. From slice 8b onwards they do carry a fair on new writes, which is
+ * why gate 3 below validates every source type against its own document.
  */
 const INVOICE_ENTRY_SHAPE = `
   je.source_type = 'INVOICE'
@@ -90,13 +92,28 @@ export function applyProjectDimensionSchema(db: Database.Database): void {
     );
   }
 
-  // Gate 3: the other direction - no entry carries a fair its source document does not have
-  // (covers bill/expense/supplier-payment entries, fairless invoices, and any wrong fair).
+  // Gate 3: the other direction - no entry carries a fair its OWN source document does not
+  // have. Each source type is checked against its own document, NOT just against invoices:
+  // from slice 8b onwards bills, expenses and supplier payments legitimately carry a fair,
+  // so matching only invoices here would reject valid data whenever this body is re-run
+  // (the idempotence path, or any later repair that calls it).
   const stray = db
     .prepare(
       `SELECT je.id, je.source_type FROM journal_entries je
         WHERE je.fair_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM invoices i WHERE ${INVOICE_ENTRY_SHAPE} AND i.fair_id = je.fair_id)
+          AND NOT EXISTS (SELECT 1 FROM purchase_bills b
+                           WHERE je.source_type = 'PURCHASE_BILL'
+                             AND b.id = je.source_id AND b.fair_id = je.fair_id)
+          AND NOT EXISTS (SELECT 1 FROM expenses e
+                           WHERE je.source_type = 'EXPENSE'
+                             AND e.id = je.source_id AND e.fair_id = je.fair_id)
+          AND NOT EXISTS (SELECT 1 FROM supplier_payments sp
+                           WHERE je.source_type = 'SUPPLIER_PAYMENT'
+                             AND je.id = 'je-supplier-payment-' || sp.id
+                             AND je.fair_id = COALESCE(
+                                   (SELECT b.fair_id FROM purchase_bills b WHERE b.id = sp.bill_id),
+                                   (SELECT e.fair_id FROM expenses e WHERE e.id = sp.expense_id)))
         ORDER BY je.rowid`,
     )
     .all() as Array<{ id: string; source_type: string }>;

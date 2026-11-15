@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { migrations, runMigrations } from "./migrations.js";
+import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 
 const upTo5 = migrations.filter((m) => m.version <= 5);
 const TABLES = ["journal_entries", "stock_movements", "purchase_bills", "expenses"];
@@ -174,6 +175,24 @@ describe("migration v6: project (fair) dimension", () => {
     db.exec("UPDATE journal_entries SET fair_id = 'fairA' WHERE id = 'je-expense-exp1'");
     expect(() => runMigrations(db)).toThrow(/je-expense-exp1 \(EXPENSE\)/);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("accepts a bill entry whose fair matches its own bill, so re-running after slice 8b is safe", () => {
+    const db = dbAtV5();
+    seedParties(db);
+    db.prepare("INSERT INTO purchase_bills (id, business_id, supplier_id, number, bill_date, payment_account, status, created_at) VALUES ('bill1', 'biz', 'sup', 'B9', '2026-02-14', 'PAYABLES', 'FINALIZED', '2026-02-15T00:00:00.000Z')").run();
+    addEntry(db, "je-bill-bill1", "bill1", "PURCHASE_BILL");
+    runMigrations(db);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+
+    // Slice 8b onwards: bills legitimately carry a fair, and so do their journal entries.
+    db.exec("UPDATE purchase_bills SET fair_id = 'fairA' WHERE id = 'bill1'");
+    db.exec("UPDATE journal_entries SET fair_id = 'fairA' WHERE id = 'je-bill-bill1'");
+    expect(() => applyProjectDimensionSchema(db)).not.toThrow();
+
+    // A genuine mismatch is still caught, against the bill's own fair.
+    db.exec("UPDATE journal_entries SET fair_id = 'fairB' WHERE id = 'je-bill-bill1'");
+    expect(() => applyProjectDimensionSchema(db)).toThrow(/je-bill-bill1 \(PURCHASE_BILL\)/);
   });
 
   it("throws when an entry shape of a fair-carrying invoice was not mapped", () => {
