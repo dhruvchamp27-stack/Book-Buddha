@@ -88,7 +88,24 @@ after 1 hr idle. `recoverPassword` trusts an already-verified Google identity â€
 later UI slice; until then `/auth/recover` must stay localhost-only. Slice 4 gates
 passed: 58/58 vitest tests, tsc exit 0, vite build exit 0.
 
-The next safe implementation slice is **Slice 5: Customers, items, and inventory**.
+Slice 5 (Customers, items, inventory) is **backend-done**. Migration v3
+`customer_item_inventory` adds customer master fields (classification,
+per-category auto-numbering SCH/LIB/CLG/RET/GEN from 0001, GSTIN, website,
+2nd contact, billing/shipping address, internal notes, active flag) and item
+fields (description, selling/cost/MRP paise, reorder threshold, active), plus a
+`customer_number_counters` table for atomic numbering. Repository: enriched
+create/list for customers+items, `updateCustomer`/`updateItem`,
+`findDuplicateCustomers` (warn-not-block), `setCustomerActive`/`setItemActive`,
+`deleteCustomer` (refused if linked to invoices/credit notes/payments/recurring
+templates/fairs), and **read-only** inventory reports `getInventoryValuation`
+(FIFO), `getLowStockItems`, `getSalesByItem`. New `/customers`, `/items` and
+`/reports/{inventory-valuation,low-stock,sales-by-item}` routes.
+**No accounting/journal logic changed** â€” opening/purchase stock still posts no
+GL entry; tying the stock sub-ledger to the INVENTORY ledger is a deferred
+accounting decision for Slice 6 (purchasing) / opening balances. Slice 5 gates
+passed: 73/73 vitest tests, tsc exit 0, vite build exit 0.
+
+The next safe implementation slice is **Slice 6: Sales, payments, purchasing, expenses**.
 
 Credit notes already support
 finalized-invoice validation, partial item quantities, duplicate/over-return

@@ -6,6 +6,8 @@ import type { CreditNote } from "../accounting/types.js";
 import {
   AccountingRepository,
   AuthenticationError,
+  CUSTOMER_CLASSIFICATIONS,
+  CUSTOMER_NUMBERING_CATEGORIES,
   RepositoryValidationError,
 } from "../database/repository.js";
 
@@ -23,18 +25,56 @@ const companyInput = z.object({
   accountingBasis: z.enum(["CASH", "ACCRUAL"]).default("ACCRUAL"),
 });
 const businessInput = z.object({ companyId: id, name });
+const optionalText = z.string().trim().min(1);
 const customerInput = z.object({
   companyId: id,
   name,
   email: z.string().email().optional(),
   phone: z.string().trim().min(1).optional(),
+  classification: z.enum(CUSTOMER_CLASSIFICATIONS).optional(),
+  gstin: optionalText.optional(),
+  website: optionalText.optional(),
+  phone2: optionalText.optional(),
+  billingAddress: optionalText.optional(),
+  shippingAddress: optionalText.optional(),
+  internalNotes: optionalText.optional(),
+  numberingCategory: z.enum(CUSTOMER_NUMBERING_CATEGORIES).optional(),
+});
+const nullableText = optionalText.nullable().optional();
+const customerPatchInput = z.object({
+  name: name.optional(),
+  email: z.string().email().nullable().optional(),
+  phone: nullableText,
+  classification: z.enum(CUSTOMER_CLASSIFICATIONS).nullable().optional(),
+  gstin: nullableText,
+  website: nullableText,
+  phone2: nullableText,
+  billingAddress: nullableText,
+  shippingAddress: nullableText,
+  internalNotes: nullableText,
 });
 const itemInput = z.object({
   companyId: id,
   name,
   unit: name,
   trackStock: z.boolean().optional(),
+  description: optionalText.optional(),
+  sellingPricePaise: z.number().int().nonnegative().optional(),
+  costPricePaise: z.number().int().nonnegative().optional(),
+  mrpPaise: z.number().int().nonnegative().optional(),
+  reorderThreshold: z.number().int().nonnegative().optional(),
 });
+const itemPatchInput = z.object({
+  name: name.optional(),
+  unit: name.optional(),
+  description: nullableText,
+  sellingPricePaise: z.number().int().nonnegative().nullable().optional(),
+  costPricePaise: z.number().int().nonnegative().nullable().optional(),
+  mrpPaise: z.number().int().nonnegative().nullable().optional(),
+  reorderThreshold: z.number().int().nonnegative().nullable().optional(),
+});
+const activeInput = z.object({ active: z.boolean() });
+const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
   status: z.enum(["DRAFT", "QUOTATION"]).default("DRAFT"),
@@ -148,6 +188,11 @@ const authRecoverInput = z.object({
 }).refine((value) => value.googleSub !== undefined || value.email !== undefined, {
   message: "Provide googleSub or email.",
 });
+
+/** Drops keys whose value is undefined (keeps null, which means "clear"). */
+function definedOnly<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K], undefined> } {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as { [K in keyof T]?: Exclude<T[K], undefined> };
+}
 
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
@@ -263,14 +308,33 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     async (request) => repository.listFairs(request.query.companyId),
   );
 
-  app.get<{ Querystring: { companyId?: string } }>(
+  app.get<{ Querystring: { companyId?: string; activeOnly?: string } }>(
     "/customers",
-    async (request) => repository.listCustomers(request.query.companyId),
+    async (request) =>
+      repository.listCustomers(request.query.companyId, { activeOnly: activeOnlyQuery(request.query.activeOnly) }),
   );
 
-  app.get<{ Querystring: { companyId?: string } }>(
+  app.get<{ Querystring: { companyId?: string; name?: string; phone?: string; email?: string; gstin?: string } }>(
+    "/customers/duplicates",
+    async (request) => {
+      const { companyId, name: dupName, phone, email, gstin } = request.query;
+      if (companyId === undefined || companyId.trim() === "") {
+        throw new RepositoryValidationError("companyId is required.");
+      }
+      return repository.findDuplicateCustomers({
+        companyId,
+        ...(dupName === undefined ? {} : { name: dupName }),
+        ...(phone === undefined ? {} : { phone }),
+        ...(email === undefined ? {} : { email }),
+        ...(gstin === undefined ? {} : { gstin }),
+      });
+    },
+  );
+
+  app.get<{ Querystring: { companyId?: string; activeOnly?: string } }>(
     "/items",
-    async (request) => repository.listItems(request.query.companyId),
+    async (request) =>
+      repository.listItems(request.query.companyId, { activeOnly: activeOnlyQuery(request.query.activeOnly) }),
   );
 
   app.post("/companies", async (request, reply) => {
@@ -292,8 +356,33 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
       name: input.name,
       ...(input.email === undefined ? {} : { email: input.email }),
       ...(input.phone === undefined ? {} : { phone: input.phone }),
+      ...(input.classification === undefined ? {} : { classification: input.classification }),
+      ...(input.gstin === undefined ? {} : { gstin: input.gstin }),
+      ...(input.website === undefined ? {} : { website: input.website }),
+      ...(input.phone2 === undefined ? {} : { phone2: input.phone2 }),
+      ...(input.billingAddress === undefined ? {} : { billingAddress: input.billingAddress }),
+      ...(input.shippingAddress === undefined ? {} : { shippingAddress: input.shippingAddress }),
+      ...(input.internalNotes === undefined ? {} : { internalNotes: input.internalNotes }),
+      ...(input.numberingCategory === undefined ? {} : { numberingCategory: input.numberingCategory }),
     });
     return reply.code(201).send({ id: customerId });
+  });
+
+  app.patch<{ Params: { id: string } }>("/customers/:id", async (request) => {
+    const patch = parseBody(customerPatchInput, request.body);
+    repository.updateCustomer(request.params.id, definedOnly(patch));
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/customers/:id/active", async (request) => {
+    const input = parseBody(activeInput, request.body);
+    repository.setCustomerActive(request.params.id, input.active);
+    return { ok: true };
+  });
+
+  app.delete<{ Params: { id: string } }>("/customers/:id", async (request) => {
+    repository.deleteCustomer(request.params.id);
+    return { ok: true };
   });
 
   app.post("/items", async (request, reply) => {
@@ -303,9 +392,26 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
       name: input.name,
       unit: input.unit,
       ...(input.trackStock === undefined ? {} : { trackStock: input.trackStock }),
+      ...(input.description === undefined ? {} : { description: input.description }),
+      ...(input.sellingPricePaise === undefined ? {} : { sellingPricePaise: input.sellingPricePaise }),
+      ...(input.costPricePaise === undefined ? {} : { costPricePaise: input.costPricePaise }),
+      ...(input.mrpPaise === undefined ? {} : { mrpPaise: input.mrpPaise }),
+      ...(input.reorderThreshold === undefined ? {} : { reorderThreshold: input.reorderThreshold }),
     });
 
     return reply.code(201).send({ id: itemId });
+  });
+
+  app.patch<{ Params: { id: string } }>("/items/:id", async (request) => {
+    const patch = parseBody(itemPatchInput, request.body);
+    repository.updateItem(request.params.id, definedOnly(patch));
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/items/:id/active", async (request) => {
+    const input = parseBody(activeInput, request.body);
+    repository.setItemActive(request.params.id, input.active);
+    return { ok: true };
   });
 
   app.post("/fairs", async (request, reply) => {
@@ -574,6 +680,9 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
 
   app.get("/journal-entries", async () => repository.listJournalEntries());
 
+  app.get("/reports/inventory-valuation", async () => repository.getInventoryValuation());
+  app.get("/reports/low-stock", async () => repository.getLowStockItems());
+  app.get("/reports/sales-by-item", async () => repository.getSalesByItem());
   app.get("/reports/trial-balance", async () => repository.getTrialBalance());
   app.get("/reports/profit-and-loss", async () => repository.getProfitAndLoss());
   app.get("/reports/balance-sheet", async () => repository.getBalanceSheet());

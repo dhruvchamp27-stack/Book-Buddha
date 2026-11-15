@@ -64,6 +64,38 @@ export const migrations: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: "customer_item_inventory",
+    // Additive only: new nullable/defaulted columns plus one new table.
+    // Enum/paise validation lives in the repository layer.
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE customers ADD COLUMN customer_number TEXT;
+        ALTER TABLE customers ADD COLUMN classification TEXT;
+        ALTER TABLE customers ADD COLUMN gstin TEXT;
+        ALTER TABLE customers ADD COLUMN website TEXT;
+        ALTER TABLE customers ADD COLUMN phone2 TEXT;
+        ALTER TABLE customers ADD COLUMN billing_address TEXT;
+        ALTER TABLE customers ADD COLUMN shipping_address TEXT;
+        ALTER TABLE customers ADD COLUMN internal_notes TEXT;
+        ALTER TABLE customers ADD COLUMN numbering_category TEXT;
+        ALTER TABLE customers ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1));
+        ALTER TABLE items ADD COLUMN description TEXT;
+        ALTER TABLE items ADD COLUMN selling_price_paise INTEGER;
+        ALTER TABLE items ADD COLUMN cost_price_paise INTEGER;
+        ALTER TABLE items ADD COLUMN mrp_paise INTEGER;
+        ALTER TABLE items ADD COLUMN reorder_threshold INTEGER;
+        ALTER TABLE items ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1));
+        CREATE TABLE IF NOT EXISTS customer_number_counters (
+          company_id TEXT NOT NULL,
+          category TEXT NOT NULL,
+          next_seq INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY (company_id, category)
+        );
+      `);
+    },
+  },
 ];
 
 export function runMigrations(

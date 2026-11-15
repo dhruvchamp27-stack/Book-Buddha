@@ -195,6 +195,42 @@ export interface CustomerInput {
   readonly name: string;
   readonly email?: string;
   readonly phone?: string;
+  readonly classification?: string;
+  readonly gstin?: string;
+  readonly website?: string;
+  readonly phone2?: string;
+  readonly billingAddress?: string;
+  readonly shippingAddress?: string;
+  readonly internalNotes?: string;
+  /** When set, a customer_number (e.g. SCH0001) is auto-allocated. Callers can never set the number directly. */
+  readonly numberingCategory?: string;
+}
+
+/** Editable customer profile fields. `null` clears a value. customer_number is never editable. */
+export interface CustomerPatch {
+  readonly name?: string;
+  readonly email?: string | null;
+  readonly phone?: string | null;
+  readonly classification?: string | null;
+  readonly gstin?: string | null;
+  readonly website?: string | null;
+  readonly phone2?: string | null;
+  readonly billingAddress?: string | null;
+  readonly shippingAddress?: string | null;
+  readonly internalNotes?: string | null;
+}
+
+export const CUSTOMER_CLASSIFICATIONS = [
+  "Individual", "Business", "Company", "Partnership", "Trust", "Charity", "Government", "Other",
+] as const;
+export const CUSTOMER_NUMBERING_CATEGORIES = ["SCH", "LIB", "CLG", "RET", "GEN"] as const;
+
+export interface DuplicateCustomerQuery {
+  readonly companyId: string;
+  readonly name?: string;
+  readonly phone?: string;
+  readonly email?: string;
+  readonly gstin?: string;
 }
 
 export interface ItemInput {
@@ -203,6 +239,46 @@ export interface ItemInput {
   readonly name: string;
   readonly unit: string;
   readonly trackStock?: boolean;
+  readonly description?: string;
+  readonly sellingPricePaise?: number;
+  readonly costPricePaise?: number;
+  readonly mrpPaise?: number;
+  readonly reorderThreshold?: number;
+}
+
+/** Editable item fields. `null` clears an optional value. track_stock is not editable. */
+export interface ItemPatch {
+  readonly name?: string;
+  readonly unit?: string;
+  readonly description?: string | null;
+  readonly sellingPricePaise?: number | null;
+  readonly costPricePaise?: number | null;
+  readonly mrpPaise?: number | null;
+  readonly reorderThreshold?: number | null;
+}
+
+export interface InventoryValuationRow {
+  readonly itemId: string;
+  readonly itemName: string;
+  readonly unit: string;
+  readonly quantity: number;
+  readonly valuePaise: number;
+}
+
+export interface LowStockRow {
+  readonly itemId: string;
+  readonly itemName: string;
+  readonly unit: string;
+  readonly quantity: number;
+  readonly reorderThreshold: number;
+}
+
+export interface SalesByItemRow {
+  readonly itemId: string;
+  readonly itemName: string;
+  readonly unit: string;
+  readonly quantity: number;
+  readonly salesPaise: number;
 }
 
 export interface FairInput {
@@ -336,6 +412,16 @@ export interface CustomerRecord {
   readonly name: string;
   readonly email: string | null;
   readonly phone: string | null;
+  readonly customerNumber: string | null;
+  readonly classification: string | null;
+  readonly gstin: string | null;
+  readonly website: string | null;
+  readonly phone2: string | null;
+  readonly billingAddress: string | null;
+  readonly shippingAddress: string | null;
+  readonly internalNotes: string | null;
+  readonly numberingCategory: string | null;
+  readonly active: boolean;
 }
 
 export interface ItemRecord {
@@ -344,6 +430,12 @@ export interface ItemRecord {
   readonly name: string;
   readonly unit: string;
   readonly trackStock: boolean;
+  readonly description: string | null;
+  readonly sellingPricePaise: number | null;
+  readonly costPricePaise: number | null;
+  readonly mrpPaise: number | null;
+  readonly reorderThreshold: number | null;
+  readonly active: boolean;
 }
 
 export interface InvoiceSummary {
@@ -356,6 +448,36 @@ export interface InvoiceSummary {
   readonly fairId?: string;
   readonly taxType: Invoice["taxType"];
   readonly taxRateBasisPoints: number;
+}
+
+const CUSTOMER_SELECT =
+  "SELECT id, company_id, name, email, phone, customer_number, classification, gstin, website, phone2, billing_address, shipping_address, internal_notes, numbering_category, active FROM customers";
+
+interface CustomerRow {
+  id: string; company_id: string; name: string; email: string | null; phone: string | null;
+  customer_number: string | null; classification: string | null; gstin: string | null; website: string | null;
+  phone2: string | null; billing_address: string | null; shipping_address: string | null;
+  internal_notes: string | null; numbering_category: string | null; active: number;
+}
+
+function mapCustomerRow(row: CustomerRow): CustomerRecord {
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    customerNumber: row.customer_number,
+    classification: row.classification,
+    gstin: row.gstin,
+    website: row.website,
+    phone2: row.phone2,
+    billingAddress: row.billing_address,
+    shippingAddress: row.shipping_address,
+    internalNotes: row.internal_notes,
+    numberingCategory: row.numbering_category,
+    active: row.active === 1,
+  };
 }
 
 export class RepositoryValidationError extends Error {
@@ -420,38 +542,305 @@ export class AccountingRepository {
 
   public createCustomer(input: CustomerInput): string {
     this.requireCompany(input.companyId);
+    this.validateClassification(input.classification);
+    this.validateNumberingCategory(input.numberingCategory);
     const id = input.id ?? randomUUID();
-    this.db
-      .prepare(
-        "INSERT INTO customers (id, company_id, name, email, phone, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(
-        id,
-        input.companyId,
-        input.name,
-        input.email ?? null,
-        input.phone ?? null,
-        new Date().toISOString(),
-      );
+    this.db.transaction(() => {
+      const customerNumber = input.numberingCategory === undefined
+        ? null
+        : this.allocateCustomerNumber(input.companyId, input.numberingCategory);
+      this.db
+        .prepare(
+          `INSERT INTO customers (id, company_id, name, email, phone, created_at, customer_number, classification, gstin,
+             website, phone2, billing_address, shipping_address, internal_notes, numbering_category)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.companyId,
+          input.name,
+          input.email ?? null,
+          input.phone ?? null,
+          new Date().toISOString(),
+          customerNumber,
+          input.classification ?? null,
+          input.gstin ?? null,
+          input.website ?? null,
+          input.phone2 ?? null,
+          input.billingAddress ?? null,
+          input.shippingAddress ?? null,
+          input.internalNotes ?? null,
+          input.numberingCategory ?? null,
+        );
+      this.insertAuditEvent({ action: "customer.created", entityId: id, occurredAt: new Date().toISOString() });
+    })();
     return id;
+  }
+
+  /** Atomically takes the next sequence for (company, category). Must run inside a transaction. */
+  private allocateCustomerNumber(companyId: string, category: string): string {
+    this.db
+      .prepare("INSERT INTO customer_number_counters (company_id, category, next_seq) VALUES (?, ?, 1) ON CONFLICT(company_id, category) DO NOTHING")
+      .run(companyId, category);
+    const row = this.db
+      .prepare("SELECT next_seq FROM customer_number_counters WHERE company_id = ? AND category = ?")
+      .get(companyId, category) as { next_seq: number };
+    this.db
+      .prepare("UPDATE customer_number_counters SET next_seq = next_seq + 1 WHERE company_id = ? AND category = ?")
+      .run(companyId, category);
+    return `${category}${String(row.next_seq).padStart(4, "0")}`;
+  }
+
+  private validateClassification(value: string | null | undefined): void {
+    if (value === undefined || value === null) return;
+    if (!(CUSTOMER_CLASSIFICATIONS as readonly string[]).includes(value)) {
+      throw new RepositoryValidationError(`Classification must be one of: ${CUSTOMER_CLASSIFICATIONS.join(", ")}.`);
+    }
+  }
+
+  private validateNumberingCategory(value: string | undefined): void {
+    if (value === undefined) return;
+    if (!(CUSTOMER_NUMBERING_CATEGORIES as readonly string[]).includes(value)) {
+      throw new RepositoryValidationError(`Numbering category must be one of: ${CUSTOMER_NUMBERING_CATEGORIES.join(", ")}.`);
+    }
+  }
+
+  private validateOptionalPaise(label: string, value: number | null | undefined): void {
+    if (value === undefined || value === null) return;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RepositoryValidationError(`${label} must be a non-negative whole number of paise.`);
+    }
+  }
+
+  private validateReorderThreshold(value: number | null | undefined): void {
+    if (value === undefined || value === null) return;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RepositoryValidationError("Reorder threshold must be a non-negative whole number.");
+    }
+  }
+
+  public updateCustomer(customerId: string, patch: CustomerPatch): void {
+    this.requireCustomer(customerId);
+    this.validateClassification(patch.classification);
+    if (patch.name !== undefined && patch.name.trim() === "") {
+      throw new RepositoryValidationError("Customer name cannot be empty.");
+    }
+    const columns: Array<[string, string | null | undefined]> = [
+      ["name", patch.name], ["email", patch.email], ["phone", patch.phone],
+      ["classification", patch.classification], ["gstin", patch.gstin], ["website", patch.website],
+      ["phone2", patch.phone2], ["billing_address", patch.billingAddress],
+      ["shipping_address", patch.shippingAddress], ["internal_notes", patch.internalNotes],
+    ];
+    const changed = columns.filter(([, value]) => value !== undefined);
+    if (changed.length === 0) return;
+    this.db.transaction(() => {
+      this.db
+        .prepare(`UPDATE customers SET ${changed.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`)
+        .run(...changed.map(([, value]) => value as string | null), customerId);
+      this.insertAuditEvent({ action: "customer.updated", entityId: customerId, occurredAt: new Date().toISOString() });
+    })();
+  }
+
+  /** Non-blocking duplicate signal (warn-and-allow): createCustomer never refuses on a match. */
+  public findDuplicateCustomers(query: DuplicateCustomerQuery): readonly CustomerRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (query.name !== undefined && query.name.trim() !== "") {
+      conditions.push("LOWER(TRIM(name)) = ?");
+      params.push(query.name.trim().toLowerCase());
+    }
+    if (query.phone !== undefined && query.phone.trim() !== "") {
+      conditions.push("(TRIM(phone) = ? OR TRIM(phone2) = ?)");
+      params.push(query.phone.trim(), query.phone.trim());
+    }
+    if (query.email !== undefined && query.email.trim() !== "") {
+      conditions.push("LOWER(TRIM(email)) = ?");
+      params.push(query.email.trim().toLowerCase());
+    }
+    if (query.gstin !== undefined && query.gstin.trim() !== "") {
+      conditions.push("UPPER(TRIM(gstin)) = ?");
+      params.push(query.gstin.trim().toUpperCase());
+    }
+    if (conditions.length === 0) return [];
+    const rows = this.db
+      .prepare(`${CUSTOMER_SELECT} WHERE company_id = ? AND (${conditions.join(" OR ")}) ORDER BY name, rowid`)
+      .all(query.companyId, ...params) as CustomerRow[];
+    return rows.map(mapCustomerRow);
+  }
+
+  public setCustomerActive(customerId: string, active: boolean): void {
+    this.requireCustomer(customerId);
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE customers SET active = ? WHERE id = ?").run(active ? 1 : 0, customerId);
+      this.insertAuditEvent({
+        action: active ? "customer.activated" : "customer.deactivated",
+        entityId: customerId,
+        occurredAt: new Date().toISOString(),
+      });
+    })();
+  }
+
+  public deleteCustomer(customerId: string): void {
+    this.requireCustomer(customerId);
+    const linked = this.db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM invoices WHERE customer_id = @id)
+         + (SELECT COUNT(*) FROM credit_notes cn JOIN invoices i ON i.id = cn.invoice_id WHERE i.customer_id = @id)
+         + (SELECT COUNT(*) FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE i.customer_id = @id)
+         + (SELECT COUNT(*) FROM recurring_invoice_templates WHERE customer_id = @id)
+         + (SELECT COUNT(*) FROM fairs WHERE host_customer_id = @id) AS total`,
+      )
+      .get({ id: customerId }) as { total: number };
+    if (linked.total > 0) {
+      throw new RepositoryValidationError(
+        "This customer has linked invoices, credit notes, payments, recurring templates or fairs and cannot be deleted. Mark the customer inactive instead.",
+      );
+    }
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM customers WHERE id = ?").run(customerId);
+      this.insertAuditEvent({ action: "customer.deleted", entityId: customerId, occurredAt: new Date().toISOString() });
+    })();
+  }
+
+  private requireCustomer(customerId: string): void {
+    if (this.db.prepare("SELECT 1 FROM customers WHERE id = ?").get(customerId) === undefined) {
+      throw new RepositoryValidationError(`Customer ${customerId} was not found.`);
+    }
+  }
+
+  private requireItem(itemId: string): void {
+    if (this.db.prepare("SELECT 1 FROM items WHERE id = ?").get(itemId) === undefined) {
+      throw new RepositoryValidationError(`Item ${itemId} was not found.`);
+    }
   }
 
   public createItem(input: ItemInput): string {
     this.requireCompany(input.companyId);
+    this.validateOptionalPaise("Selling price", input.sellingPricePaise);
+    this.validateOptionalPaise("Cost price", input.costPricePaise);
+    this.validateOptionalPaise("MRP", input.mrpPaise);
+    this.validateReorderThreshold(input.reorderThreshold);
     const id = input.id ?? randomUUID();
-    this.db
-      .prepare(
-        "INSERT INTO items (id, company_id, name, unit, track_stock, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(
-        id,
-        input.companyId,
-        input.name,
-        input.unit,
-        input.trackStock === true ? 1 : 0,
-        new Date().toISOString(),
-      );
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO items (id, company_id, name, unit, track_stock, created_at, description, selling_price_paise,
+             cost_price_paise, mrp_paise, reorder_threshold)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.companyId,
+          input.name,
+          input.unit,
+          input.trackStock === true ? 1 : 0,
+          new Date().toISOString(),
+          input.description ?? null,
+          input.sellingPricePaise ?? null,
+          input.costPricePaise ?? null,
+          input.mrpPaise ?? null,
+          input.reorderThreshold ?? null,
+        );
+      this.insertAuditEvent({ action: "item.created", entityId: id, occurredAt: new Date().toISOString() });
+    })();
     return id;
+  }
+
+  public updateItem(itemId: string, patch: ItemPatch): void {
+    this.requireItem(itemId);
+    this.validateOptionalPaise("Selling price", patch.sellingPricePaise);
+    this.validateOptionalPaise("Cost price", patch.costPricePaise);
+    this.validateOptionalPaise("MRP", patch.mrpPaise);
+    this.validateReorderThreshold(patch.reorderThreshold);
+    if (patch.name !== undefined && patch.name.trim() === "") throw new RepositoryValidationError("Item name cannot be empty.");
+    if (patch.unit !== undefined && patch.unit.trim() === "") throw new RepositoryValidationError("Item unit cannot be empty.");
+    const columns: Array<[string, string | number | null | undefined]> = [
+      ["name", patch.name], ["unit", patch.unit], ["description", patch.description],
+      ["selling_price_paise", patch.sellingPricePaise], ["cost_price_paise", patch.costPricePaise],
+      ["mrp_paise", patch.mrpPaise], ["reorder_threshold", patch.reorderThreshold],
+    ];
+    const changed = columns.filter(([, value]) => value !== undefined);
+    if (changed.length === 0) return;
+    this.db.transaction(() => {
+      this.db
+        .prepare(`UPDATE items SET ${changed.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`)
+        .run(...changed.map(([, value]) => value as string | number | null), itemId);
+      this.insertAuditEvent({ action: "item.updated", entityId: itemId, occurredAt: new Date().toISOString() });
+    })();
+  }
+
+  public setItemActive(itemId: string, active: boolean): void {
+    this.requireItem(itemId);
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE items SET active = ? WHERE id = ?").run(active ? 1 : 0, itemId);
+      this.insertAuditEvent({
+        action: active ? "item.activated" : "item.deactivated",
+        entityId: itemId,
+        occurredAt: new Date().toISOString(),
+      });
+    })();
+  }
+
+  /**
+   * Quantity on hand and FIFO stock value per stock-tracked item, from the FIFO stock sub-ledger
+   * (remaining lot qty x lot unit cost). Read-only: posts no journal. This may differ from the GL
+   * INVENTORY balance until purchasing/opening-balance GL posting is designed (out of scope here).
+   */
+  public getInventoryValuation(): readonly InventoryValuationRow[] {
+    const items = this.db
+      .prepare("SELECT id, name, unit FROM items WHERE track_stock = 1 ORDER BY name, rowid")
+      .all() as Array<{ id: string; name: string; unit: string }>;
+    return items.map((item) => {
+      const layers = this.getStockLayers(item.id);
+      return {
+        itemId: item.id,
+        itemName: item.name,
+        unit: item.unit,
+        quantity: layers.reduce((total, layer) => total + layer.quantity, 0),
+        valuePaise: layers.reduce((total, layer) => total + layer.quantity * layer.unitCostPaise, 0),
+      };
+    });
+  }
+
+  /** Stock-tracked items at or below their reorder threshold. Items with no threshold are skipped. */
+  public getLowStockItems(): readonly LowStockRow[] {
+    const items = this.db
+      .prepare(
+        `SELECT i.id, i.name, i.unit, i.reorder_threshold,
+                COALESCE((SELECT SUM(quantity_delta) FROM stock_movements WHERE item_id = i.id), 0) AS quantity
+         FROM items i
+         WHERE i.track_stock = 1 AND i.reorder_threshold IS NOT NULL
+         ORDER BY i.name, i.rowid`,
+      )
+      .all() as Array<{ id: string; name: string; unit: string; reorder_threshold: number; quantity: number }>;
+    return items
+      .filter((item) => item.quantity <= item.reorder_threshold)
+      .map((item) => ({
+        itemId: item.id,
+        itemName: item.name,
+        unit: item.unit,
+        quantity: item.quantity,
+        reorderThreshold: item.reorder_threshold,
+      }));
+  }
+
+  /** Quantity and line amount (quantity x unit price, before invoice-level discount/tax) per item on finalized invoices. */
+  public getSalesByItem(): readonly SalesByItemRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT i.id, i.name, i.unit, SUM(il.quantity) AS quantity, SUM(il.quantity * il.unit_price_paise) AS sales_paise
+         FROM invoice_lines il
+         JOIN invoices inv ON inv.id = il.invoice_id
+         JOIN items i ON i.id = il.item_id
+         WHERE inv.status = 'FINALIZED'
+         GROUP BY i.id, i.name, i.unit
+         ORDER BY i.name, MIN(i.rowid)`,
+      )
+      .all() as Array<{ id: string; name: string; unit: string; quantity: number; sales_paise: number }>;
+    return rows.map((row) => ({
+      itemId: row.id, itemName: row.name, unit: row.unit, quantity: row.quantity, salesPaise: row.sales_paise,
+    }));
   }
 
   public createFair(input: FairInput): string {
@@ -574,36 +963,35 @@ export class AccountingRepository {
     return rows.map((row) => ({ id: row.id, companyId: row.company_id, name: row.name }));
   }
 
-  public listCustomers(companyId?: string): readonly CustomerRecord[] {
-    const statement = companyId === undefined
-      ? this.db.prepare("SELECT id, company_id, name, email, phone FROM customers ORDER BY name, id")
-      : this.db.prepare("SELECT id, company_id, name, email, phone FROM customers WHERE company_id = ? ORDER BY name, id");
-    const rows = (companyId === undefined ? statement.all() : statement.all(companyId)) as Array<{
-      id: string;
-      company_id: string;
-      name: string;
-      email: string | null;
-      phone: string | null;
-    }>;
-    return rows.map((row) => ({
-      id: row.id,
-      companyId: row.company_id,
-      name: row.name,
-      email: row.email,
-      phone: row.phone,
-    }));
+  public listCustomers(companyId?: string, options: { activeOnly?: boolean } = {}): readonly CustomerRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (companyId !== undefined) {
+      conditions.push("company_id = ?");
+      params.push(companyId);
+    }
+    if (options.activeOnly === true) conditions.push("active = 1");
+    const where = conditions.length === 0 ? "" : ` WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db.prepare(`${CUSTOMER_SELECT}${where} ORDER BY name, id`).all(...params) as CustomerRow[];
+    return rows.map(mapCustomerRow);
   }
 
-  public listItems(companyId?: string): readonly ItemRecord[] {
-    const statement = companyId === undefined
-      ? this.db.prepare("SELECT id, company_id, name, unit, track_stock FROM items ORDER BY name, id")
-      : this.db.prepare("SELECT id, company_id, name, unit, track_stock FROM items WHERE company_id = ? ORDER BY name, id");
-    const rows = (companyId === undefined ? statement.all() : statement.all(companyId)) as Array<{
-      id: string;
-      company_id: string;
-      name: string;
-      unit: string;
-      track_stock: number;
+  public listItems(companyId?: string, options: { activeOnly?: boolean } = {}): readonly ItemRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (companyId !== undefined) {
+      conditions.push("company_id = ?");
+      params.push(companyId);
+    }
+    if (options.activeOnly === true) conditions.push("active = 1");
+    const where = conditions.length === 0 ? "" : ` WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db.prepare(
+      `SELECT id, company_id, name, unit, track_stock, description, selling_price_paise, cost_price_paise,
+              mrp_paise, reorder_threshold, active FROM items${where} ORDER BY name, id`,
+    ).all(...params) as Array<{
+      id: string; company_id: string; name: string; unit: string; track_stock: number; description: string | null;
+      selling_price_paise: number | null; cost_price_paise: number | null; mrp_paise: number | null;
+      reorder_threshold: number | null; active: number;
     }>;
     return rows.map((row) => ({
       id: row.id,
@@ -611,6 +999,12 @@ export class AccountingRepository {
       name: row.name,
       unit: row.unit,
       trackStock: row.track_stock === 1,
+      description: row.description,
+      sellingPricePaise: row.selling_price_paise,
+      costPricePaise: row.cost_price_paise,
+      mrpPaise: row.mrp_paise,
+      reorderThreshold: row.reorder_threshold,
+      active: row.active === 1,
     }));
   }
 
