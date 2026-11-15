@@ -1434,6 +1434,13 @@ export class AccountingRepository {
   public cancelInvoice(invoiceId: string): JournalEntry {
     const cancelled = this.db.transaction(() => {
       const invoice = this.getInvoice(invoiceId);
+      // Symmetry with bills and expenses: a document with money against it cannot be
+      // cancelled. Reversing the whole invoice while the receipt stands would drive
+      // RECEIVABLES negative and leave the cash with nowhere to go (there is no refund
+      // path yet). Refund or reverse the payment first.
+      if (this.getPaidAmount(invoiceId) > 0) {
+        throw new RepositoryValidationError("An invoice with recorded payments cannot be cancelled.");
+      }
       const originalEntry = this.getOriginalJournalEntry(invoiceId);
       const result = cancelInvoice(invoice, originalEntry);
       const inventoryCostPaise = this.restoreInvoiceStock(invoiceId);

@@ -217,13 +217,15 @@ describe("AccountingRepository", () => {
         { account: "RECEIVABLES", debitPaise: 0, creditPaise: 10000 },
       ]);
 
-      // A part-paid cash-basis invoice follows the ordinary accrual cancellation rules.
-      const cancelled = repository.cancelInvoice(invoice.id);
-      expect(cancelled.isReversal).toBe(true);
-      expect(cancelled.lines).toEqual([
-        { account: "RECEIVABLES", debitPaise: 0, creditPaise: 25000 },
-        { account: "SALES", debitPaise: 25000, creditPaise: 0 },
-      ]);
+      // A part-paid invoice cannot be cancelled, exactly as a part-paid bill cannot:
+      // reversing the full 25000 while the 10000 receipt stands would leave RECEIVABLES
+      // at -10000 and the cash unaccounted for.
+      expect(() => repository.cancelInvoice(invoice.id)).toThrow("cannot be cancelled");
+      expect(repository.getInvoice(invoice.id).status).toBe("FINALIZED");
+      const receivable = repository.getTrialBalance().find((row) => row.account === "RECEIVABLES");
+      expect((receivable?.debitPaise ?? 0) - (receivable?.creditPaise ?? 0)).toBe(15000);
+      // Cancelling an UNPAID receivable invoice still works: covered above by
+      // "reverses a finalized invoice and restores stock".
     } finally {
       repository.close();
     }
