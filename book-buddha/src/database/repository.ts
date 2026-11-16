@@ -1346,13 +1346,12 @@ export class AccountingRepository {
       const invoice = this.getInvoice(note.invoiceId);
       this.validateCreditNoteLines(invoice, note.lines);
       const taxablePaise = note.lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
-      // Clamped, so this invoice's notes can never hand back more GST than it charged.
-      const taxPaise = this.creditNoteTaxPaise(invoice, taxablePaise);
-      const taxLines: JournalEntry["lines"] = invoice.taxType === "IGST"
-        ? [{ account: "OUTPUT_IGST", debitPaise: taxPaise, creditPaise: 0 }]
-        : invoice.taxType === "CGST_SGST"
-          ? [{ account: "OUTPUT_CGST", debitPaise: Math.floor(taxPaise / 2), creditPaise: 0 }, { account: "OUTPUT_SGST", debitPaise: taxPaise - Math.floor(taxPaise / 2), creditPaise: 0 }]
-          : [];
+      // One place decides the GST lines, capped per account and absorbing the remainder on a
+      // full return (see creditNoteTaxLines).
+      const taxLines: JournalEntry["lines"] = this.creditNoteTaxLines(invoice, taxablePaise);
+      // The settlement credit follows the tax ACTUALLY posted, or the caps would unbalance the
+      // entry and the door would reject it.
+      const postedTaxPaise = taxLines.reduce((sum, line) => sum + line.debitPaise, 0);
       const entry: JournalEntry = {
         id: `je-credit-note-${note.id}`,
         sourceId: invoice.id,
@@ -1361,7 +1360,7 @@ export class AccountingRepository {
         lines: [
           { account: "SALES", debitPaise: taxablePaise, creditPaise: 0 },
           ...taxLines,
-          { account: invoice.paymentAccount, debitPaise: 0, creditPaise: taxablePaise + taxPaise },
+          { account: invoice.paymentAccount, debitPaise: 0, creditPaise: taxablePaise + postedTaxPaise },
         ],
       };
       const inventoryCost = this.restoreCreditNoteStock(note, invoice.fairId);
@@ -1499,6 +1498,16 @@ export class AccountingRepository {
       if (this.getPaidAmount(invoiceId) > 0) {
         throw new RepositoryValidationError("An invoice with recorded payments cannot be cancelled.");
       }
+      // A finalized credit note is money against the invoice for exactly the same reason, and the
+      // guard above missed it. Cancellation reverses the ORIGINAL entry in full, so on a 1000
+      // invoice carrying a 400 note it reversed 1000 of SALES that only stood at 600 — leaving
+      // SALES with a 400 DEBIT balance and RECEIVABLES at -400, silently. Cancel the note first.
+      const creditedPaise = this.invoiceCreditedPaise(invoice);
+      if (creditedPaise > 0) {
+        throw new RepositoryValidationError(
+          `This invoice has ${creditedPaise} paise of credit notes against it and cannot be cancelled. Cancel the credit notes first.`,
+        );
+      }
       const originalEntry = this.getOriginalJournalEntry(invoiceId);
       const result = cancelInvoice(invoice, originalEntry);
       const inventoryCostPaise = this.restoreInvoiceStock(invoiceId, invoice.fairId);
@@ -1613,25 +1622,25 @@ export class AccountingRepository {
         id: string; number: string; customer_id: string; invoice_date: string;
         tax_rate_basis_points: number; total_paise: number; paid_paise: number;
       }>;
-    // Credit notes, per note so the tax rounds exactly as finalizeCreditNote rounded it. Netted
-    // in TypeScript rather than SQL because the per-note grouping cannot be correlated back to
-    // the outer invoice row portably. SAME DEFECT as recordPayment's cap: without this, an
+    // Credit notes, read from the POSTED journal exactly as invoiceCreditedPaise does, so the
+    // list and the payment cap can never disagree. Recomputing from the note lines would drift
+    // the moment a note's tax is clamped. SAME DEFECT as recordPayment's cap: without this, an
     // invoice that has been fully credited still appeared on the receivables list as owed.
     const creditedByInvoice = new Map<string, number>();
-    const noteRows = this.db
-      .prepare(
-        `SELECT cn.invoice_id, COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS taxable
-           FROM credit_notes cn
-           LEFT JOIN credit_note_lines cnl ON cnl.credit_note_id = cn.id
-          WHERE cn.status = 'FINALIZED'
-          GROUP BY cn.id`,
-      )
-      .all() as Array<{ invoice_id: string; taxable: number }>;
-    const rateOf = new Map(rows.map((row) => [row.id, row.tax_rate_basis_points]));
-    for (const note of noteRows) {
-      const rate = rateOf.get(note.invoice_id) ?? 0;
-      const inclusive = note.taxable + Math.round(note.taxable * rate / 10000);
-      creditedByInvoice.set(note.invoice_id, (creditedByInvoice.get(note.invoice_id) ?? 0) + inclusive);
+    for (
+      const note of this.db
+        .prepare(
+          `SELECT je.source_id AS invoice_id,
+                  COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS credited
+             FROM journal_lines jl
+             JOIN journal_entries je ON je.id = jl.journal_entry_id
+             JOIN invoices i ON i.id = je.source_id
+            WHERE je.id LIKE 'je-credit-note-%' AND jl.account = i.payment_account
+            GROUP BY je.source_id`,
+        )
+        .all() as Array<{ invoice_id: string; credited: number }>
+    ) {
+      creditedByInvoice.set(note.invoice_id, note.credited);
     }
     const now = Date.now();
     return rows
@@ -1910,24 +1919,7 @@ export class AccountingRepository {
     const businessParams = [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.fairId === undefined ? [] : [filter.fairId])];
     const documents: Array<{ type: "INVOICE" | "PURCHASE_BILL" | "EXPENSE"; id: string; paidAtOnce: boolean; totalPaise: () => number }> = [];
     for (const row of this.db.prepare(`SELECT id, payment_account FROM invoices WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
-      // Decision S2-2: a credit note RE-BASES the remainder. The denominator is what the customer
-      // is actually being asked to pay - the invoice less its credit notes - not the original
-      // bill. Against the original bill the cash view never converges on the accrual figure: a
-      // fully settled, part-credited invoice recognised only (net lines x net/original), always
-      // short. Re-based, paying the net amount in full recognises the net lines exactly.
-      //
-      // This is only safe because a credit note can no longer exceed what is still unpaid (R3),
-      // so a note can never invalidate a payment already recognised in a closed month - which is
-      // precisely what S1-6 forbids.
-      documents.push({
-        type: "INVOICE",
-        id: row.id,
-        paidAtOnce: row.payment_account === "CASH",
-        totalPaise: () => {
-          const invoice = this.getInvoice(row.id);
-          return this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice);
-        },
-      });
+      documents.push({ type: "INVOICE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.invoiceTotal(this.getInvoice(row.id)) });
     }
     for (const row of this.db.prepare(`SELECT id, payment_account FROM purchase_bills WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
       documents.push({ type: "PURCHASE_BILL", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.getPurchaseBill(row.id).totalPaise });
@@ -1972,27 +1964,96 @@ export class AccountingRepository {
         continue;
       }
 
-      // Credit document: scale the netted lines by cumulative cash / total, per payment.
+      // Credit document: an EVENT-ORDERED walk of its credit notes and payments (decision S2-2).
+      //
+      // At a credit note the remainder is RE-BASED: from then on, what is still to be recognised
+      // is (the lines as they now stand, less what is already recognised) measured over (what is
+      // still owed). Recognitions already emitted are never revisited, so a month that has been
+      // reported cannot move - which is what S1-6 requires.
+      //
+      // Simply dividing by the net total instead looks equivalent and is not: it re-measures
+      // EVERY earlier payment against the new lines, so returning a line that carried no COGS
+      // silently raised the COGS of an earlier, closed month. The walk keeps the note's effect
+      // entirely in the future, and still converges - once everything owed has been paid, the
+      // remaining balance is nil and every remaining line has been recognised.
       const totalPaise = doc.totalPaise();
       if (totalPaise <= 0) continue;
-      const lines = sumByAccount(docLines);
-      let paidBefore = 0;
+
+      type Event =
+        | { kind: "NOTE"; date: string; lines: readonly Natural[]; inclusivePaise: number }
+        | { kind: "PAYMENT"; date: string; amountPaise: number };
+
+      // A credit note's journal entries are `je-credit-note-<id>` (its sales and GST lines) and
+      // `je-credit-note-inventory-<id>` (the stock going back). Everything else is the invoice
+      // itself, plus any reversal. Entry dates are already the notes' own dates, so no extra
+      // query is needed; the note's tax-inclusive value is what it took off the bill, which is
+      // the negated sum of its sales and GST lines (settlement accounts are filtered out above).
+      const noteEntries = new Map<string, Array<(typeof lineRows)[number]>>();
+      const baseRows: Array<(typeof lineRows)[number]> = [];
+      for (const row of docLines) {
+        if (row.entry_id.startsWith("je-credit-note-")) {
+          const list = noteEntries.get(row.entry_id);
+          if (list === undefined) noteEntries.set(row.entry_id, [row]); else list.push(row);
+        } else baseRows.push(row);
+      }
+      const events: Event[] = [];
+      for (const [entryId, rows] of noteEntries) {
+        const lines = sumByAccount(rows);
+        const isStockEntry = entryId.startsWith("je-credit-note-inventory-");
+        events.push({
+          kind: "NOTE",
+          date: (rows[0] as (typeof lineRows)[number]).entry_date,
+          lines,
+          inclusivePaise: isStockEntry ? 0 : -lines.reduce((total, line) => total + line.amountPaise, 0),
+        });
+      }
       for (const payment of paymentsOf.get(key) ?? []) {
-        const paidAfter = Math.min(paidBefore + payment.amountPaise, totalPaise);
-        const date = istDateOf(payment.paidAt);
-        if (paidAfter > paidBefore) {
-          if (inPeriod(date)) {
-            const shares = allocateProportionally({
-              lineAmountsPaise: lines.map((line) => line.amountPaise), totalPaise, paidBeforePaise: paidBefore, paidAfterPaise: paidAfter,
-            });
-            lines.forEach((line, index) => {
-              const share = shares[index] as number;
-              if (share !== 0) recognitions.push({ date, account: line.account, amountPaise: share, documentType: doc.type, documentId: doc.id });
-            });
-            if (doc.type === "INVOICE") invoiceCollections.push({ date, amountPaise: payment.amountPaise });
-          }
+        events.push({ kind: "PAYMENT", date: istDateOf(payment.paidAt), amountPaise: payment.amountPaise });
+      }
+      // Notes before payments on the same day: the note reduces the bill, then cash is applied to
+      // whatever is left of it. Documented because the two orders give different figures.
+      events.sort((a, b) =>
+        a.date < b.date ? -1 : a.date > b.date ? 1 : a.kind === b.kind ? 0 : a.kind === "NOTE" ? -1 : 1);
+
+      const current = new Map<string, number>();
+      for (const line of sumByAccount(baseRows)) current.set(line.account, line.amountPaise);
+      const recognised = new Map<string, number>();
+      let balancePaise = totalPaise;
+      let cashPaise = 0;
+
+      for (const event of events) {
+        if (event.kind === "NOTE") {
+          for (const line of event.lines) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
+          balancePaise -= event.inclusivePaise;
+          continue;
         }
-        paidBefore = paidAfter;
+        const owedPaise = balancePaise - cashPaise;
+        if (owedPaise > 0) {
+          const appliedPaise = Math.min(event.amountPaise, owedPaise);
+          const accounts = [...current.keys()].sort();
+          // The cumulative allocator, restarted on the REMAINING amounts, so a full settlement
+          // lands on the remaining lines exactly however the rounding falls.
+          const shares = allocateProportionally({
+            lineAmountsPaise: accounts.map((account) => (current.get(account) ?? 0) - (recognised.get(account) ?? 0)),
+            totalPaise: owedPaise,
+            paidBeforePaise: 0,
+            paidAfterPaise: appliedPaise,
+          });
+          accounts.forEach((account, index) => {
+            const share = shares[index] as number;
+            if (share === 0) return;
+            // Accumulated whether or not it falls in the reported period: the filter decides what
+            // is SHOWN, never what has been recognised, or a date range would double count.
+            recognised.set(account, (recognised.get(account) ?? 0) + share);
+            if (inPeriod(event.date)) {
+              recognitions.push({ date: event.date, account, amountPaise: share, documentType: doc.type, documentId: doc.id });
+            }
+          });
+        }
+        if (doc.type === "INVOICE" && inPeriod(event.date)) {
+          invoiceCollections.push({ date: event.date, amountPaise: event.amountPaise });
+        }
+        cashPaise += event.amountPaise;
       }
     }
     return { recognitions, invoiceCollections };
@@ -2098,9 +2159,23 @@ export class AccountingRepository {
     return taxablePaise + Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
   }
 
-  /** The GST the invoice itself charged - the ceiling on how much tax its credit notes can give back. */
-  private invoiceTaxPaise(invoice: Invoice): number {
-    return this.invoiceTotal(invoice) - this.invoiceTaxableBase(invoice);
+  /**
+   * Output GST still OWED on this invoice - credits less debits, so the invoice's own charge less
+   * whatever its credit notes have already given back. Optionally for one account.
+   *
+   * Journal-derived, so it is self-correcting: whatever was actually posted is what limits the
+   * next note, with no second recomputation to drift out of step.
+   */
+  private outputTaxHeadroomPaise(invoiceId: string, account?: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS headroom
+           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.source_id = ? AND jl.account LIKE 'OUTPUT_%'
+                ${account === undefined ? "" : "AND jl.account = ?"}`,
+      )
+      .get(...(account === undefined ? [invoiceId] : [invoiceId, account])) as { headroom: number };
+    return row.headroom;
   }
 
   /**
@@ -2124,18 +2199,6 @@ export class AccountingRepository {
     return row.credited;
   }
 
-  /** Output GST already given back by this invoice's credit notes, straight from the journal. */
-  private creditedTaxPaise(invoiceId: string): number {
-    const row = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(jl.debit_paise) - SUM(jl.credit_paise), 0) AS tax
-           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
-          WHERE je.source_id = ? AND je.id LIKE 'je-credit-note-%' AND jl.account LIKE 'OUTPUT_%'`,
-      )
-      .get(invoiceId) as { tax: number };
-    return row.tax;
-  }
-
   /**
    * The GST a credit note of `taxablePaise` should carry, CLAMPED so this invoice's notes can
    * never give back more tax than it charged.
@@ -2146,9 +2209,49 @@ export class AccountingRepository {
    * a negative liability - with no error at all.
    */
   private creditNoteTaxPaise(invoice: Invoice, taxablePaise: number): number {
-    const uncapped = Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
-    const headroom = this.invoiceTaxPaise(invoice) - this.creditedTaxPaise(invoice.id);
-    return Math.max(0, Math.min(uncapped, headroom));
+    return this.creditNoteTaxLines(invoice, taxablePaise).reduce((sum, line) => sum + line.debitPaise, 0);
+  }
+
+  /** Taxable value of this invoice's FINALIZED credit notes (the note being posted is still a draft). */
+  private creditedTaxablePaise(invoiceId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS taxable
+           FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id
+          WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'`,
+      )
+      .get(invoiceId) as { taxable: number };
+    return row.taxable;
+  }
+
+  /**
+   * The output-GST lines a credit note of `taxablePaise` should carry - the single place this is
+   * decided, so validation and posting can never disagree.
+   *
+   * Each account is capped by what it still OWES on this invoice, which stops the per-note
+   * floor/remainder split leaving one GST account negative and the other overstated.
+   *
+   * A note that completes the taxable base takes ALL the remaining headroom, so a full return
+   * clears the invoice EXACTLY. Without that, rounding each note's share separately strands a
+   * paisa or two: a 2 x 17 invoice at 18% charges 6, but two notes of 17 round to 3 each and the
+   * per-account caps then allow only 5 of it, leaving the invoice 1 paisa short of settled.
+   */
+  private creditNoteTaxLines(invoice: Invoice, taxablePaise: number): Array<{ account: string; debitPaise: number; creditPaise: number }> {
+    const wanted = Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
+    const completesBase = this.creditedTaxablePaise(invoice.id) + taxablePaise >= this.invoiceTaxableBase(invoice);
+    const capped = (account: string, want: number): number => {
+      const room = this.outputTaxHeadroomPaise(invoice.id, account);
+      return Math.max(0, Math.min(completesBase ? room : want, room));
+    };
+    const lines = invoice.taxType === "IGST"
+      ? [{ account: "OUTPUT_IGST", debitPaise: capped("OUTPUT_IGST", wanted), creditPaise: 0 }]
+      : invoice.taxType === "CGST_SGST"
+        ? [
+          { account: "OUTPUT_CGST", debitPaise: capped("OUTPUT_CGST", Math.floor(wanted / 2)), creditPaise: 0 },
+          { account: "OUTPUT_SGST", debitPaise: capped("OUTPUT_SGST", wanted - Math.floor(wanted / 2)), creditPaise: 0 },
+        ]
+        : [];
+    return lines.filter((line) => line.debitPaise > 0); // the door rejects a zero-amount line
   }
 
   /** What the customer still owes: the bill, less credit notes, less cash already received. */

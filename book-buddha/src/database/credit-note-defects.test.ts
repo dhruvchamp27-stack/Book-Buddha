@@ -83,6 +83,18 @@ function outputTaxPaise(repository: AccountingRepository, invoiceId: string): nu
   return row.balance;
 }
 
+/** Net GST still owed on ONE output account for this invoice. */
+function taxPaise(repository: AccountingRepository, invoiceId: string, account: string): number {
+  const row = repository.db
+    .prepare(
+      `SELECT COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS balance
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.source_id = ? AND jl.account = ?`,
+    )
+    .get(invoiceId, account) as { balance: number };
+  return row.balance;
+}
+
 describe("DEFECT 1: a credit note must reduce what the customer can still pay", () => {
   it("refuses a payment of the original total once a credit note is finalized", () => {
     const w = world();
@@ -280,6 +292,134 @@ describe("DEFECT 2: a credit note is capped by what the invoice charged BEFORE t
       w.repository.saveCreditNote(creditNote(w, invoice, "cn2", 100000));
       w.repository.finalizeCreditNote("cn2");
       expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+});
+
+describe("DEFECT 3: cancelling an invoice that carries a credit note", () => {
+  it("is refused, because the cancellation would reverse more than was ever owed", () => {
+    const w = world();
+    try {
+      const invoice = finalizedInvoice(w, { unitPricePaise: 100000, quantity: 10 });
+      w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 400000));
+      w.repository.finalizeCreditNote("cn1");
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(600000);
+
+      // THE DEFECT: cancelInvoice guarded only on payments. It reverses the ORIGINAL entry in
+      // full, so a 1,000,000 invoice carrying a 400,000 note reversed 1,000,000 of SALES that
+      // stood at 600,000 - leaving SALES with a 400,000 DEBIT balance and RECEIVABLES at
+      // -400,000, silently, by a route neither earlier cap covered.
+      expect(() => w.repository.cancelInvoice(invoice.id)).toThrow(/400000 paise of credit notes/);
+
+      // The ledger is untouched and the invoice is still live.
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(600000);
+      expect(w.repository.getInvoice(invoice.id).status).toBe("FINALIZED");
+      const sales = w.repository.db
+        .prepare(
+          `SELECT COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS balance
+             FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+            WHERE je.source_id = ? AND jl.account = 'SALES'`,
+        )
+        .get(invoice.id) as { balance: number };
+      expect(sales.balance).toBe(600000);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("is allowed, as before, when the invoice has no credit notes", () => {
+    const w = world();
+    try {
+      const invoice = finalizedInvoice(w, { unitPricePaise: 100000 });
+      expect(() => w.repository.cancelInvoice(invoice.id)).not.toThrow();
+      expect(w.repository.getInvoice(invoice.id).status).toBe("CANCELLED");
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+});
+
+describe("DEFECT 4: GST is balanced per account, not just in total", () => {
+  it("clears CGST and SGST individually on a full return", () => {
+    const w = world();
+    try {
+      // 2 x 17 paise at 18%: the invoice charges 6 paise of GST, split 3 CGST / 3 SGST. Each note
+      // of 17 wants round(3.06) = 3, split floor/remainder as 1 and 2 - so two notes would hand
+      // back 2 of CGST and 4 of SGST. Capping only the TOTAL left CGST at -1 and SGST at +1: one
+      // a negative liability, the other overstated, with the total looking right.
+      const invoice = finalizedInvoice(w, { unitPricePaise: 17, quantity: 2, taxRateBasisPoints: 1800 });
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(40);
+      expect(taxPaise(w.repository, invoice.id, "OUTPUT_CGST")).toBe(3);
+      expect(taxPaise(w.repository, invoice.id, "OUTPUT_SGST")).toBe(3);
+
+      w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 17));
+      w.repository.finalizeCreditNote("cn1");
+      w.repository.saveCreditNote(creditNote(w, invoice, "cn2", 17));
+      w.repository.finalizeCreditNote("cn2");
+
+      // A full return clears every account EXACTLY - no stranded paisa, nothing negative.
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+      expect(taxPaise(w.repository, invoice.id, "OUTPUT_CGST")).toBe(0);
+      expect(taxPaise(w.repository, invoice.id, "OUTPUT_SGST")).toBe(0);
+      expect(outputTaxPaise(w.repository, invoice.id)).toBe(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("never lets a GST account go negative part-way through a series of notes", () => {
+    const w = world();
+    try {
+      const invoice = finalizedInvoice(w, { unitPricePaise: 17, quantity: 3, taxRateBasisPoints: 1800 });
+      for (const id of ["cn1", "cn2", "cn3"]) {
+        w.repository.saveCreditNote(creditNote(w, invoice, id, 17));
+        w.repository.finalizeCreditNote(id);
+        for (const account of ["OUTPUT_CGST", "OUTPUT_SGST"]) {
+          expect(taxPaise(w.repository, invoice.id, account), `${account} after ${id}`).toBeGreaterThanOrEqual(0);
+        }
+        expect(receivablesPaise(w.repository, invoice.id)).toBeGreaterThanOrEqual(0);
+      }
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+});
+
+/**
+ * CHARACTERISATION, not a defect: a CASH invoice behaves differently, and the owner should know.
+ * Its credit note refunds by crediting CASH directly, which is a real refund and leaves no
+ * negative balance - so a cash sale CAN be credited after the money came in, while a receivable
+ * sale cannot once it is paid (there is no payment-reversal path). Pinned so the asymmetry is
+ * visible when the refund path is designed.
+ */
+describe("the cash-invoice asymmetry (owner to rule)", () => {
+  it("allows a credit note on a paid-at-once CASH invoice and refunds through CASH", () => {
+    const w = world();
+    try {
+      const invoice: Invoice = {
+        id: "inv-cash", number: "INV-CASH", businessId: w.businessId, customerId: w.customerId,
+        invoiceDate: "2026-01-01", status: "DRAFT", paymentAccount: "CASH", taxType: "NONE", taxRateBasisPoints: 0,
+        lines: [{ itemId: w.itemId, description: "Line", quantity: 10, unitPricePaise: 100000 }],
+      };
+      w.repository.saveDraft(invoice);
+      w.repository.finalizeInvoice(invoice.id);
+      w.repository.saveCreditNote(creditNote(w, invoice, "cn-cash", 400000));
+      w.repository.finalizeCreditNote("cn-cash");
+
+      const cash = w.repository.db
+        .prepare(
+          `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS balance
+             FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+            WHERE je.source_id = ? AND jl.account = 'CASH'`,
+        )
+        .get(invoice.id) as { balance: number };
+      // Cash genuinely left the till: 1,000,000 in, 400,000 refunded out. Nothing is negative.
+      expect(cash.balance).toBe(600000);
+      expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(600000);
     } finally {
       w.repository.close();
     }

@@ -400,6 +400,65 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
   });
 
   /**
+   * THE property S1-6 demands, and the one a net denominator silently broke: a note must not move
+   * a month that has already been reported.
+   *
+   * The trap is mixed margins. Dividing by the net total re-measures EVERY earlier payment
+   * against the new lines, so returning a line that carried no COGS raised the COGS share of the
+   * earlier payment - January's cash expenses rose from 120,000 to 180,000 after a FEBRUARY note,
+   * even though January's cash and goods never changed. The event-ordered walk keeps the note's
+   * effect entirely in the future.
+   */
+  it("a note NEVER moves a month already reported, even when margins differ", () => {
+    vi.useFakeTimers();
+    at("2026-01-10T06:00:00.000Z");
+    const w = world();
+    try {
+      // Goods 1,000,000 (COGS 600,000) plus freight 500,000 which carries NO cost at all.
+      w.repository.saveDraft({
+        id: "INV-M", number: "INV-M", businessId: w.businessId, customerId: w.customerId,
+        invoiceDate: "2026-01-10", paymentAccount: "RECEIVABLES", status: "DRAFT",
+        taxType: "NONE", taxRateBasisPoints: 0,
+        lines: [
+          { itemId: w.goodsId, description: "Goods", quantity: 10, unitPricePaise: 100000 },
+          { itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 500000 },
+        ],
+      });
+      w.repository.finalizeInvoice("INV-M");
+      at("2026-01-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-M", 300000);
+      const january = () => w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
+      const before = january();
+      expect(before).toMatchObject({ totalIncomePaise: 300000, totalExpensesPaise: 120000 });
+
+      // February: the freight line is credited - the line with no COGS behind it.
+      at("2026-02-10T06:00:00.000Z");
+      w.repository.saveCreditNote({
+        id: "CN-M", invoiceId: "INV-M", number: "CN-M", reason: "Freight waived", status: "DRAFT",
+        lines: [{ itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 500000 }],
+      });
+      w.repository.finalizeCreditNote("CN-M");
+
+      // January is byte-for-byte what it was. This is the assertion that fails on a net total.
+      expect(january()).toMatchObject({ totalIncomePaise: before.totalIncomePaise, totalExpensesPaise: before.totalExpensesPaise });
+      expect(january().totalExpensesPaise).toBe(120000);
+      // February recognises nothing by itself: the note is not a cash event.
+      expect(w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" }).totalIncomePaise).toBe(0);
+
+      // And paying off the re-based remainder still converges on accrual.
+      at("2026-03-10T06:00:00.000Z");
+      w.repository.recordPayment("INV-M", 700000); // 1,500,000 billed - 500,000 credited - 300,000 paid
+      expect(() => w.repository.recordPayment("INV-M", 1)).toThrow(/outstanding balance of 0 paise/);
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(cash.totalIncomePaise).toBe(accrual.totalIncomePaise);
+      expect(cash.totalExpensesPaise).toBe(accrual.totalExpensesPaise);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  /**
    * The property that makes the re-basing right, and the one the old denominator could never
    * satisfy: once the customer has paid everything they owe, the cash view must equal the accrual
    * view. Against the original bill, settling the net 944,000 of a 1,180,000 invoice gave only

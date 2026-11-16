@@ -181,19 +181,28 @@ describe("project (fair) tagging, slice 8b", () => {
   });
 
   describe("stock movements carry the fair as a reporting tag only", () => {
+    // Two invoices, because R3 made cancelling a CREDITED invoice illegal: cancellation reverses
+    // the original entry in full, so on a credited invoice it reversed more than was ever owed
+    // and left SALES with a debit balance and RECEIVABLES negative. The tagging this test is
+    // about is unaffected - one invoice carries the credit note, the other is cancelled, and both
+    // reversal routes still tag their stock movement with the source fair.
     it("tags PURCHASE, SALE and SALE_REVERSAL (cancel and credit note) with the source fair", () => {
       const w = setup();
       buy(w, "B1", 10, 4000, w.fairA);
       sell(w, "I1", 4, 10000, w.fairB);
       creditNote(w, "CN1", "I1", 1, 10000);
-      w.repository.cancelInvoice("I1");
+      sell(w, "I2", 2, 10000, w.fairB);
+      w.repository.cancelInvoice("I2");
       const moves = w.repository.listStockMovements().map((m) => [m.movementType, m.sourceId, m.fairId]);
       expect(moves).toEqual([
         ["PURCHASE", "B1", w.fairA],
         ["SALE", "I1", w.fairB],
         ["SALE_REVERSAL", "CN1", w.fairB],
-        ["SALE_REVERSAL", "I1", w.fairB],
+        ["SALE", "I2", w.fairB],
+        ["SALE_REVERSAL", "I2", w.fairB],
       ]);
+      // And the illegal combination is refused rather than silently corrupting the ledger.
+      expect(() => w.repository.cancelInvoice("I1")).toThrow(/credit notes against it/);
     });
 
     it("lets OPENING and ADJUSTMENT take an explicit fair or none, and validates it", () => {
