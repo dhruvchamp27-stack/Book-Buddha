@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../api/server.js";
-import { AccountingRepository, type ProfitAndLossReport } from "./repository.js";
+import { AccountingRepository, RepositoryValidationError, istDateOf, type ProfitAndLossReport } from "./repository.js";
 
 /**
  * Derived Cash/Accrual Profit and Loss (sub-slice 7d). Posting stays accrual-always; the cash
@@ -83,13 +83,10 @@ afterEach(() => {
 
 describe("cash view: the owner's acceptance figures", () => {
   it("ACCEPTANCE invoice: Rs 11,800 invoice, Rs 5,900 collected -> cash 590000 gross / 90000 GST / 500000 net / 300000 COGS", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
 
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       expect(accrual).toMatchObject({
@@ -118,13 +115,10 @@ describe("cash view: the owner's acceptance figures", () => {
   });
 
   it("ACCEPTANCE bill: Rs 7,080 bill, Rs 3,540 paid -> cash expense 50000 / inventory 250000 / ITC 54000, payable 354000", () => {
-    vi.useFakeTimers();
-    at("2026-01-12T06:00:00.000Z");
     const w = world();
     try {
       const billId = ownerBill(w, "2026-01-12");
-      at("2026-01-21T06:00:00.000Z");
-      w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
+      w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-01-21" });
 
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       expect(row(accrual, "EXPENSE")).toBe(100000);
@@ -151,15 +145,12 @@ describe("cash view: the owner's acceptance figures", () => {
   });
 
   it("ACCEPTANCE net profit: accrual 300000 (Rs 3,000) vs cash 150000 (Rs 1,500) for the invoice + bill together", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
       const billId = ownerBill(w, "2026-01-12");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
-      w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
+      w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-01-20" });
 
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       expect(accrual).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 700000, netProfitPaise: 300000 });
@@ -174,14 +165,11 @@ describe("cash view: the owner's acceptance figures", () => {
   });
 
   it("COGS follows the sale's collection, not the supplier payment", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
       const billId = ownerBill(w, "2026-01-12");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordSupplierPayment({ billId, amountPaise: 708000 }); // supplier paid in full, customer paid nothing
+      w.repository.recordSupplierPayment({ billId, amountPaise: 708000, paidOn: "2026-01-20" }); // supplier paid in full, customer paid nothing
       const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
       expect(row(cash, "COGS")).toBe(0);
       expect(cash.totalIncomePaise).toBe(0);
@@ -194,17 +182,14 @@ describe("cash view: the owner's acceptance figures", () => {
 
 describe("cash view: convergence, rounding and periods", () => {
   it("full collection recognises exactly the accrual figures (every P&L total equal)", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
       const billId = ownerBill(w, "2026-01-12");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
-      w.repository.recordPayment("INV-1", 590000);
-      w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
-      w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
+      w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-01-20" });
+      w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-01-20" });
 
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
@@ -216,15 +201,12 @@ describe("cash view: convergence, rounding and periods", () => {
   });
 
   it("many odd payments (1, 999, 2500, remainder) land exactly with no paise lost", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
       const remainder = 1180000 - 1 - 999 - 2500;
       for (const amount of [1, 999, 2500, remainder]) {
-        at("2026-01-20T06:00:00.000Z");
-        w.repository.recordPayment("INV-1", amount);
+        w.repository.recordPayment("INV-1", amount, "2026-01-20");
         // Never over the accrual figure at any point.
         expect(w.repository.getProfitAndLoss({ basis: "CASH" }).totalIncomePaise).toBeLessThanOrEqual(1000000);
       }
@@ -242,15 +224,11 @@ describe("cash view: convergence, rounding and periods", () => {
   });
 
   it("period split: January and February each show their own collections and together equal the fully collected figures", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
-      at("2026-02-10T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
+      w.repository.recordPayment("INV-1", 590000, "2026-02-10");
 
       const jan = w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
       const feb = w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" });
@@ -298,14 +276,11 @@ describe("cash view: convergence, rounding and periods", () => {
   });
 
   it("filters the cash view by business", () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
       const other = w.repository.createBusiness({ companyId: w.companyId, name: "Other" });
       ownerInvoice(w, "INV-1", "2026-01-10");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
       expect(w.repository.getProfitAndLoss({ basis: "CASH", businessId: w.businessId }).totalIncomePaise).toBe(500000);
       expect(w.repository.getProfitAndLoss({ basis: "CASH", businessId: other }).totalIncomePaise).toBe(0);
     } finally {
@@ -502,17 +477,14 @@ describe("cash view: default basis resolution", () => {
 
 describe("cash view is derived, never posted", () => {
   it("writes no journal entries or lines: counts are unchanged by every cash report call", async () => {
-    vi.useFakeTimers();
-    at("2026-01-10T06:00:00.000Z");
     const w = world("CASH");
     const app = buildApi(w.repository);
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
       ownerInvoice(w, "INV-C", "2026-01-11", "CASH");
       const billId = ownerBill(w, "2026-01-12");
-      at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000);
-      w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
+      w.repository.recordPayment("INV-1", 590000, "2026-01-20");
+      w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-01-20" });
 
       const before = counts(w.repository);
       expect(before.entries).toBeGreaterThan(0);
@@ -530,6 +502,171 @@ describe("cash view is derived, never posted", () => {
       expect(w.repository.getTrialBalance()).toEqual(tbBefore);
       // The company is CASH-basis but posting was accrual-always: the ledger still holds the full invoices.
       expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(2000000);
+    } finally {
+      await app.close();
+      w.repository.close();
+    }
+  });
+});
+
+describe("payment dates: a payment can be entered after the fact with its real date", () => {
+  /** Invoice dated 10 Jan, bill dated 12 Jan; both are entered "today" (real clock, no fake timers). */
+  function entered(): { w: World; billId: string } {
+    const w = world();
+    ownerInvoice(w, "INV-1", "2026-01-10");
+    return { w, billId: ownerBill(w, "2026-01-12") };
+  }
+  const cashIncome = (w: World, fromDate: string, toDate: string): number =>
+    w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate }).totalIncomePaise;
+  const cashExpense = (w: World, fromDate: string, toDate: string): number =>
+    w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate }).totalExpensesPaise;
+  const entryDateOf = (w: World, id: string): string =>
+    (w.repository.db.prepare("SELECT entry_date FROM journal_entries WHERE id = ?").get(id) as { entry_date: string }).entry_date;
+
+  it("ACCEPTANCE customer payment: Rs 5,900 collected on 14 Feb against a January invoice lands in the February cash P&L only", () => {
+    const { w } = entered();
+    try {
+      const payment = w.repository.recordPayment("INV-1", 590000, "2026-02-14");
+      expect(cashIncome(w, "2026-01-01", "2026-01-31")).toBe(0);
+      expect(cashIncome(w, "2026-02-01", "2026-02-28")).toBe(500000);
+      expect(w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" })).toMatchObject({
+        grossSalesPaise: 590000, gstOnSalesPaise: 90000, totalExpensesPaise: 300000,
+      });
+      // The stored date and the ledger date agree.
+      expect(istDateOf(payment.paidAt)).toBe("2026-02-14");
+      expect(entryDateOf(w, `je-payment-${payment.id}`)).toBe("2026-02-14");
+      expect(w.repository.listPayments("INV-1")[0]?.paidAt).toBe(payment.paidAt);
+      // Accrual is untouched: the sale stays in January.
+      expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL", fromDate: "2026-01-01", toDate: "2026-01-31" }).totalIncomePaise).toBe(1000000);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("ACCEPTANCE supplier payment: Rs 3,540 paid on 5 Mar against a January bill lands in the March cash P&L only", () => {
+    const { w, billId } = entered();
+    try {
+      const payment = w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-03-05" });
+      expect(cashExpense(w, "2026-01-01", "2026-02-28")).toBe(0);
+      expect(cashExpense(w, "2026-03-01", "2026-03-31")).toBe(50000);
+      expect(istDateOf(payment.paidAt)).toBe("2026-03-05");
+      expect(entryDateOf(w, `je-supplier-payment-${payment.id}`)).toBe("2026-03-05");
+      expect(w.repository.listSupplierPayments({ billId })[0]?.paidAt).toBe(payment.paidAt);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("the same date reaches every date-range report: general ledger, trial balance and balance sheet", () => {
+    const { w, billId } = entered();
+    try {
+      const customerPayment = w.repository.recordPayment("INV-1", 590000, "2026-02-14");
+      const supplierPayment = w.repository.recordSupplierPayment({ billId, amountPaise: 354000, paidOn: "2026-02-20" });
+      const ids = (fromDate: string, toDate: string): string[] =>
+        [...new Set(w.repository.getGeneralLedger({ fromDate, toDate }).map((r) => r.journalEntryId))];
+      expect(ids("2026-02-01", "2026-02-28").sort()).toEqual(
+        [`je-payment-${customerPayment.id}`, `je-supplier-payment-${supplierPayment.id}`].sort(),
+      );
+      expect(ids("2026-02-14", "2026-02-14")).toEqual([`je-payment-${customerPayment.id}`]);
+      expect(ids("2026-01-01", "2026-01-31")).not.toContain(`je-payment-${customerPayment.id}`);
+      const cashAsAt = (asAtDate: string): number => {
+        const row = w.repository.getTrialBalance({ asAtDate }).find((r) => r.account === "CASH");
+        return (row?.debitPaise ?? 0) - (row?.creditPaise ?? 0);
+      };
+      expect(cashAsAt("2026-02-13")).toBe(0);
+      expect(cashAsAt("2026-02-14")).toBe(590000);
+      expect(cashAsAt("2026-02-20")).toBe(590000 - 354000);
+      expect(w.repository.getBalanceSheet({ asAtDate: "2026-02-13" }).assets.find((r) => r.account === "CASH")).toBeUndefined();
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("no date given: both payments are stamped with the moment of recording, exactly as before", () => {
+    const { w, billId } = entered();
+    try {
+      const before = Date.now();
+      const customerPayment = w.repository.recordPayment("INV-1", 590000);
+      const supplierPayment = w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
+      const after = Date.now();
+      for (const [paidAt, entryId] of [
+        [customerPayment.paidAt, `je-payment-${customerPayment.id}`],
+        [supplierPayment.paidAt, `je-supplier-payment-${supplierPayment.id}`],
+      ] as const) {
+        expect(Date.parse(paidAt)).toBeGreaterThanOrEqual(before);
+        expect(Date.parse(paidAt)).toBeLessThanOrEqual(after);
+        expect(entryDateOf(w, entryId)).toBe(istDateOf(paidAt));
+      }
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("a dated payment is a full ISO instant that sorts alongside undated ones", () => {
+    const { w } = entered();
+    try {
+      const old = w.repository.recordPayment("INV-1", 100000, "2026-02-14");
+      const now = w.repository.recordPayment("INV-1", 100000);
+      expect(old.paidAt).toBe("2026-02-14T06:30:00.000Z");
+      expect(w.repository.listPayments("INV-1").map((p) => p.id)).toEqual([old.id, now.id]);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses an impossible or malformed date, for customers and suppliers, and writes nothing", () => {
+    const { w, billId } = entered();
+    try {
+      const before = counts(w.repository);
+      const rows = (): number =>
+        (w.repository.db.prepare("SELECT (SELECT COUNT(*) FROM payments) + (SELECT COUNT(*) FROM supplier_payments) AS n").get() as { n: number }).n;
+      for (const bad of ["2026-02-30", "2026-13-01", "2025-02-29", "14/02/2026", "2026-2-3", "yesterday", "2026-02-14T10:00:00Z", ""]) {
+        expect(() => w.repository.recordPayment("INV-1", 1000, bad)).toThrow(RepositoryValidationError);
+        expect(() => w.repository.recordPayment("INV-1", 1000, bad)).toThrow("Payment date must be a real date");
+        expect(() => w.repository.recordSupplierPayment({ billId, amountPaise: 1000, paidOn: bad })).toThrow(RepositoryValidationError);
+      }
+      expect(rows()).toBe(0);
+      expect(counts(w.repository)).toEqual(before);
+      // A leap day is a real date.
+      expect(w.repository.recordPayment("INV-1", 1000, "2028-02-29").paidAt).toBe("2028-02-29T06:30:00.000Z");
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("over-paying is still refused when a date is given", () => {
+    const { w } = entered();
+    try {
+      expect(() => w.repository.recordPayment("INV-1", 1180001, "2026-02-14")).toThrow("cannot exceed");
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("API: accepts paidOn on both payment routes and answers 400 (not 500) for a bad date", async () => {
+    const { w, billId } = entered();
+    const app = buildApi(w.repository);
+    try {
+      const post = (url: string, payload: Record<string, unknown>) => app.inject({ method: "POST", url, payload });
+
+      const good = await post("/invoices/INV-1/payments", { amountPaise: 590000, paidOn: "2026-02-14" });
+      expect(good.statusCode).toBe(201);
+      expect(istDateOf(good.json<{ paidAt: string }>().paidAt)).toBe("2026-02-14");
+      const goodSupplier = await post("/supplier-payments", { billId, amountPaise: 354000, paidOn: "2026-03-05" });
+      expect(goodSupplier.statusCode).toBe(201);
+      expect(istDateOf(goodSupplier.json<{ paidAt: string }>().paidAt)).toBe("2026-03-05");
+      expect(cashIncome(w, "2026-02-01", "2026-02-28")).toBe(500000);
+      expect(cashExpense(w, "2026-03-01", "2026-03-31")).toBe(50000);
+
+      const before = counts(w.repository);
+      for (const bad of ["2026-02-30", "14/02/2026", "tomorrow", 20260214, null]) {
+        expect((await post("/invoices/INV-1/payments", { amountPaise: 1000, paidOn: bad })).statusCode).toBe(400);
+        expect((await post("/supplier-payments", { billId, amountPaise: 1000, paidOn: bad })).statusCode).toBe(400);
+      }
+      expect(counts(w.repository)).toEqual(before);
+
+      // No date at all still works.
+      expect((await post("/invoices/INV-1/payments", { amountPaise: 1000 })).statusCode).toBe(201);
     } finally {
       await app.close();
       w.repository.close();

@@ -177,10 +177,12 @@ const expenseInput = z.object({
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
   ...purchaseTaxFields,
 });
+const paidOn = z.string().date("Use a real date written as YYYY-MM-DD.").optional();
 const supplierPaymentInput = z.object({
   billId: id.optional(),
   expenseId: id.optional(),
   amountPaise: z.number().int().positive(),
+  paidOn,
 });
 const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CANCELLED" | undefined => {
   if (value === undefined) return undefined;
@@ -191,6 +193,7 @@ const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CAN
 };
 const paymentInput = z.object({
   amountPaise: z.number().int().positive(),
+  paidOn,
 });
 const fairInput = z.object({
   companyId: id,
@@ -703,7 +706,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     "/invoices/:invoiceId/payments",
     async (request, reply) => {
       const input = parseBody(paymentInput, request.body);
-      return reply.code(201).send(repository.recordPayment(request.params.invoiceId, input.amountPaise));
+      return reply.code(201).send(repository.recordPayment(request.params.invoiceId, input.amountPaise, input.paidOn));
     },
   );
 
@@ -889,6 +892,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
       amountPaise: input.amountPaise,
       ...(input.billId === undefined ? {} : { billId: input.billId }),
       ...(input.expenseId === undefined ? {} : { expenseId: input.expenseId }),
+      ...(input.paidOn === undefined ? {} : { paidOn: input.paidOn }),
     }));
   });
 

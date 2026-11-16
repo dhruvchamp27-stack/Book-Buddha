@@ -138,6 +138,8 @@ export interface SupplierPaymentInput {
   readonly billId?: string;
   readonly expenseId?: string;
   readonly amountPaise: number;
+  /** Business date the money moved (YYYY-MM-DD, IST). Defaults to today. */
+  readonly paidOn?: string;
 }
 
 export interface PayableRow {

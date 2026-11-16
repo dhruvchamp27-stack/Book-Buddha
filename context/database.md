@@ -85,6 +85,28 @@ ordered, with `PRAGMA foreign_key_check`.
 ## Prototype schema (ARCH §6) — the subset that actually exists
 `companies, businesses, customers, fairs, items, invoices, invoice_lines,
 credit_notes, credit_note_lines, journal_entries, journal_lines, audit_events,
-payments, stock_movements`. Company → many businesses/customers/items/fairs; fair →
-one host customer; invoice → business + fair + customer; invoice_lines → items;
-journal_entries → invoices. **No hash chain, no `documents` header, invoice-level GST.**
+payments, stock_movements`, plus (Slice 4–6) `auth_users, auth_sessions,
+customer_number_counters, suppliers, purchase_bills, purchase_bill_lines,
+expense_categories, expenses, supplier_payments, recurring_invoice_templates`.
+Company → many businesses/customers/items/fairs; fair → one host customer; invoice →
+business + fair + customer; invoice_lines → items.
+**No hash chain, no `documents` header, invoice-level GST.**
+
+### Migration versions applied (`schema_migrations`)
+v1 baseline · v2 auth · v3 customer/item/inventory · v4 purchasing+expenses (rebuilds
+`journal_entries`/`journal_lines`/`stock_movements`, so `transactional: false`) ·
+**v5 `business_id` + `entry_date` on `journal_entries`** · **v6 `fair_id` on
+`journal_entries`, `stock_movements`, `purchase_bills`, `expenses`**.
+Next free version: **v7** (the chart-of-accounts CHECK rebuild — see
+`book-buddha/REMAINING_BUILD_PLAN.md` S1).
+
+### Dimensions on `journal_entries` (v5/v6) — read before touching reports
+`business_id` (required on new writes, enforced in the repository since SQLite cannot add a
+NOT NULL column) · `entry_date` (transaction date, `YYYY-MM-DD`, **IST** — not the
+`created_at` insert time) · `fair_id` (**permanently nullable**: a project is optional on
+every record, DD §3.3 — never add a zero-NULL gate for it).
+`insertJournalEntry(entry, { businessId, entryDate, fairId? })` is the single choke point
+that writes them, and is where FY-locking should be enforced (plan S5).
+**Trap:** an immutability trigger blocking `UPDATE` on `journal_entries` would make any
+future column backfill impossible — scope such triggers to the amount/account columns, or
+add them in the last migration.

@@ -27,13 +27,22 @@ the docs disagree it is listed as an open question, not resolved.*
 - `testing/testing.md` is a **stale draft** — revise before using as a checklist.
 
 ## Open questions awaiting the owner
-- **Slice 7 build gate (needed before 7b/7d — see `book-buddha/SLICE_7_PLAN.md`):**
-  (1) Does any **real (non-test) cash-basis data** exist in a live DB? Decides whether 7b
-  needs a legacy conversion (reversal-repost or true-up) or is a clean refactor.
-  (2) **Hand-worked acceptance figures:** cash + accrual numbers for one **part-paid
-  invoice** and one **part-paid bill**, incl. **how COGS appears in the cash view**.
-  (3) OK the **chart-of-accounts** add (Unearned Revenue / Bank / Uncategorized) in one
-  migration against the fixed 13-code CHECK.
+- ~~**Slice 7 build gate** (1) real cash-basis data? (2) hand-worked cash/accrual figures?
+  (3) chart-of-accounts add?~~ **ALL ANSWERED 2026-11-15.** (1) No real data — no `.db` file
+  exists, so 7b was a clean refactor (assumption stated: `BOOK_BUDDHA_DATABASE` could point
+  outside the project, which was not checked). (2) Figures given and reproduced as
+  `ACCEPTANCE …` tests. (3) All four codes in one migration → decisions.md **S1-4**.
+- **CONFIRM the acceptance figures actually produced** (7d and 8c are *built, unconfirmed*):
+  cash invoice gross 590000 / GST 90000 / net 500000 / COGS 300000 with receivable 590000;
+  cash bill expense 50000 / inventory 250000 / ITC 54000 with payable 354000; net profit
+  accrual 300000 vs cash 150000. Fair A P&L sales 40000, costs 23000, profit 17000; Fair B
+  sales 20000, costs 12000, profit 8000.
+- **Subscriptions (DD §11.6) — needed before that slice can start:** exact early-closure
+  behaviour · statement layouts · refund-vs-carry-forward default. Slice is DEFERRED (S1-5).
+- **Small open calls carried out of this session:** should an unknown `fairId` error instead
+  of returning an empty report? Should `GeneralLedgerRow.date` present the transaction date
+  (`entryDate`) rather than the posting timestamp? Is a 1-paise gross-vs-(net+GST) difference
+  mid-collection acceptable in the cash P&L?
 - **FD §H (bank categorization / OCR / archive — still unapproved):** (1) archive scope —
   masters only, or documents too (with hide-from-default filter)? (2) auto-record payment
   when a bank line matches a vendor bill, or require an extra confirm? (3) Uncategorized

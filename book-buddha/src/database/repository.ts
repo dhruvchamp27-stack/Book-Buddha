@@ -1477,8 +1477,20 @@ export class AccountingRepository {
     return cancelled;
   }
 
-  public recordPayment(invoiceId: string, amountPaise: number): Payment {
+  /**
+   * Stored `paid_at` for a payment. No date given: the instant of recording. A business date (YYYY-MM-DD):
+   * noon IST on that day, still a full ISO instant so the column stays one format; noon keeps the date
+   * stable under both IST conversion and a plain UTC slice.
+   */
+  private paymentInstant(paidOn: string | undefined): string {
+    if (paidOn === undefined) return new Date().toISOString();
+    this.assertIsoDate("Payment date", paidOn);
+    return new Date(`${paidOn}T12:00:00+05:30`).toISOString();
+  }
+
+  public recordPayment(invoiceId: string, amountPaise: number, paidOn?: string): Payment {
     const payment = this.db.transaction(() => {
+      const paidAt = this.paymentInstant(paidOn);
       const invoice = this.getInvoice(invoiceId);
       if (invoice.status !== "FINALIZED") {
         throw new RepositoryValidationError("Only finalized invoices can receive payments.");
@@ -1499,7 +1511,7 @@ export class AccountingRepository {
         invoiceId,
         amountPaise,
         paymentAccount: "CASH",
-        paidAt: new Date().toISOString(),
+        paidAt,
       };
       this.db
         .prepare("INSERT INTO payments (id, invoice_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?)")
@@ -1518,7 +1530,7 @@ export class AccountingRepository {
       this.insertAuditEvent({
         action: "invoice.payment_received",
         entityId: invoiceId,
-        occurredAt: result.paidAt,
+        occurredAt: new Date().toISOString(),
       });
       return result;
     })();
@@ -3017,6 +3029,7 @@ export class AccountingRepository {
 
   public recordSupplierPayment(input: SupplierPaymentInput): SupplierPayment {
     return this.db.transaction(() => {
+      const paidAt = this.paymentInstant(input.paidOn);
       if ((input.billId === undefined) === (input.expenseId === undefined)) {
         throw new RepositoryValidationError("Provide exactly one of billId or expenseId.");
       }
@@ -3046,7 +3059,7 @@ export class AccountingRepository {
         expenseId: input.expenseId ?? null,
         amountPaise: input.amountPaise,
         paymentAccount: "CASH",
-        paidAt: new Date().toISOString(),
+        paidAt,
       };
       this.db
         .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -3059,7 +3072,7 @@ export class AccountingRepository {
         description: `Supplier payment for ${doc.number}`,
         amountPaise: payment.amountPaise,
       })), { businessId: doc.businessId, entryDate: istDateOf(payment.paidAt), ...fairDim(doc.fairId) });
-      this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: payment.paidAt });
+      this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: new Date().toISOString() });
       return payment;
     })();
   }
