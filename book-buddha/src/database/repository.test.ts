@@ -185,7 +185,7 @@ describe("AccountingRepository", () => {
       expect(repository.listPayments(invoice.id)).toHaveLength(1);
       expect(repository.listJournalEntries()).toHaveLength(2);
       expect(() => repository.recordPayment(invoice.id, 20000)).toThrow(
-        "Payment cannot exceed the invoice outstanding balance.",
+        /Payment cannot exceed the invoice outstanding balance of 15000 paise/,
       );
     } finally {
       repository.close();

@@ -473,6 +473,8 @@ export interface ReceivableRow {
   readonly invoiceDate: string;
   readonly totalPaise: number;
   readonly paidPaise: number;
+  /** Tax-inclusive value of finalized credit notes on this invoice; reduces what is owed. */
+  readonly creditedPaise: number;
   readonly outstandingPaise: number;
   readonly ageDays: number;
 }
@@ -1538,10 +1540,15 @@ export class AccountingRepository {
       if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
         throw new RepositoryValidationError("Payment amount must be a positive whole number of paise.");
       }
-      const totalPaise = this.invoiceTotal(invoice);
-      const paidPaise = this.getPaidAmount(invoiceId);
-      if (amountPaise > totalPaise - paidPaise) {
-        throw new RepositoryValidationError("Payment cannot exceed the invoice outstanding balance.");
+      // DEFECT FIXED: this capped against the ORIGINAL invoice total and counted only the
+      // `payments` table, so a credit note did not reduce what the customer could still pay.
+      // On a credited invoice they could overpay, driving RECEIVABLES NEGATIVE with no error
+      // and no refund path to put it right.
+      const outstandingPaise = this.invoiceOutstandingPaise(invoice);
+      if (amountPaise > outstandingPaise) {
+        throw new RepositoryValidationError(
+          `Payment cannot exceed the invoice outstanding balance of ${outstandingPaise} paise.`,
+        );
       }
       const result: Payment = {
         id: randomUUID(),
@@ -1591,6 +1598,7 @@ export class AccountingRepository {
     const rows = this.db
       .prepare(
         `SELECT i.id, i.number, i.customer_id, COALESCE(i.invoice_date, i.created_at) AS invoice_date,
+                i.tax_rate_basis_points,
                 (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
                   + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
                 COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id), 0) AS paid_paise
@@ -1600,19 +1608,46 @@ export class AccountingRepository {
          GROUP BY i.id
          ORDER BY i.created_at`,
       )
-      .all() as Array<{ id: string; number: string; customer_id: string; invoice_date: string; total_paise: number; paid_paise: number }>;
+      .all() as Array<{
+        id: string; number: string; customer_id: string; invoice_date: string;
+        tax_rate_basis_points: number; total_paise: number; paid_paise: number;
+      }>;
+    // Credit notes, per note so the tax rounds exactly as finalizeCreditNote rounded it. Netted
+    // in TypeScript rather than SQL because the per-note grouping cannot be correlated back to
+    // the outer invoice row portably. SAME DEFECT as recordPayment's cap: without this, an
+    // invoice that has been fully credited still appeared on the receivables list as owed.
+    const creditedByInvoice = new Map<string, number>();
+    const noteRows = this.db
+      .prepare(
+        `SELECT cn.invoice_id, COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS taxable
+           FROM credit_notes cn
+           LEFT JOIN credit_note_lines cnl ON cnl.credit_note_id = cn.id
+          WHERE cn.status = 'FINALIZED'
+          GROUP BY cn.id`,
+      )
+      .all() as Array<{ invoice_id: string; taxable: number }>;
+    const rateOf = new Map(rows.map((row) => [row.id, row.tax_rate_basis_points]));
+    for (const note of noteRows) {
+      const rate = rateOf.get(note.invoice_id) ?? 0;
+      const inclusive = note.taxable + Math.round(note.taxable * rate / 10000);
+      creditedByInvoice.set(note.invoice_id, (creditedByInvoice.get(note.invoice_id) ?? 0) + inclusive);
+    }
     const now = Date.now();
     return rows
-      .map((row) => ({
-        invoiceId: row.id,
-        invoiceNumber: row.number,
-        customerId: row.customer_id,
-        invoiceDate: row.invoice_date,
-        totalPaise: row.total_paise,
-        paidPaise: row.paid_paise,
-        outstandingPaise: row.total_paise - row.paid_paise,
-        ageDays: Math.max(0, Math.floor((now - Date.parse(row.invoice_date)) / 86400000)),
-      }))
+      .map((row) => {
+        const creditedPaise = creditedByInvoice.get(row.id) ?? 0;
+        return {
+          invoiceId: row.id,
+          invoiceNumber: row.number,
+          customerId: row.customer_id,
+          invoiceDate: row.invoice_date,
+          totalPaise: row.total_paise,
+          paidPaise: row.paid_paise,
+          creditedPaise,
+          outstandingPaise: row.total_paise - creditedPaise - row.paid_paise,
+          ageDays: Math.max(0, Math.floor((now - Date.parse(row.invoice_date)) / 86400000)),
+        };
+      })
       .filter((row) => row.outstandingPaise > 0);
   }
 
@@ -2029,11 +2064,47 @@ export class AccountingRepository {
     postJournalEntry(this.db, entry, dimensions);
   }
 
-  private invoiceTotal(invoice: Invoice): number {
-    const taxablePaise = invoice.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0)
+  /**
+   * What the invoice actually CHARGED before tax: lines, less the discount, plus any extra charge.
+   * This - not the tax-inclusive total - is what a credit note's lines can be measured against,
+   * because a note's lines are taxable amounts and its own GST is added on top of them.
+   */
+  private invoiceTaxableBase(invoice: Invoice): number {
+    return invoice.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0)
       - (invoice.discountPaise ?? 0)
       + (invoice.extraChargePaise ?? 0);
+  }
+
+  private invoiceTotal(invoice: Invoice): number {
+    const taxablePaise = this.invoiceTaxableBase(invoice);
     return taxablePaise + Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
+  }
+
+  /**
+   * The tax-inclusive value of every FINALIZED credit note on this invoice - what has been taken
+   * back off the customer's bill, and so off what they still owe.
+   *
+   * Summed PER NOTE, matching finalizeCreditNote's own arithmetic exactly: it rounds the tax for
+   * each note separately, so rounding the sum of the taxable amounts instead could differ by a
+   * paisa from what was actually credited to RECEIVABLES. A test pins this to the posted journal.
+   */
+  private invoiceCreditedPaise(invoice: Invoice): number {
+    const rate = invoice.taxRateBasisPoints ?? 0;
+    const notes = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS taxable
+           FROM credit_notes cn
+           LEFT JOIN credit_note_lines cnl ON cnl.credit_note_id = cn.id
+          WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'
+          GROUP BY cn.id`,
+      )
+      .all(invoice.id) as Array<{ taxable: number }>;
+    return notes.reduce((total, note) => total + note.taxable + Math.round(note.taxable * rate / 10000), 0);
+  }
+
+  /** What the customer still owes: the bill, less credit notes, less cash already received. */
+  private invoiceOutstandingPaise(invoice: Invoice): number {
+    return this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice) - this.getPaidAmount(invoice.id);
   }
 
   private validateCreditNoteLines(invoice: Invoice, lines: readonly CreditNoteLine[]): void {
@@ -2060,8 +2131,15 @@ export class AccountingRepository {
     const alreadyCredited = this.db.prepare(
       "SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS total FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'",
     ).get(invoice.id) as { total: number };
-    if (creditTotal + alreadyCredited.total > this.invoiceTotal(invoice)) {
-      throw new RepositoryValidationError("Credit notes cannot exceed the original invoice total.");
+    // DEFECT FIXED: this compared a TAXABLE credit sum against the TAX-INCLUSIVE invoice total,
+    // so an 18% invoice could be over-credited by a further 18% - and the note's own GST was then
+    // added on top of that. It also ignored the invoice discount, letting a note credit more than
+    // was ever charged. Both sides are now the net taxable base.
+    const taxableBase = this.invoiceTaxableBase(invoice);
+    if (creditTotal + alreadyCredited.total > taxableBase) {
+      throw new RepositoryValidationError(
+        `Credit notes cannot exceed what the invoice charged before tax (${taxableBase} paise); this note would take the total credited to ${creditTotal + alreadyCredited.total} paise.`,
+      );
     }
   }
 
