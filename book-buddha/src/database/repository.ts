@@ -27,7 +27,7 @@ import type {
   PurchasePaymentAccount,
   SupplierPayment,
 } from "../accounting/types.js";
-import type { AccountingBasis } from "../accounting/types.js";
+import { ACCOUNT_CODES, type AccountingBasis } from "../accounting/types.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
 import { RepositoryValidationError } from "./errors.js";
@@ -1346,7 +1346,8 @@ export class AccountingRepository {
       const invoice = this.getInvoice(note.invoiceId);
       this.validateCreditNoteLines(invoice, note.lines);
       const taxablePaise = note.lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
-      const taxPaise = Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
+      // Clamped, so this invoice's notes can never hand back more GST than it charged.
+      const taxPaise = this.creditNoteTaxPaise(invoice, taxablePaise);
       const taxLines: JournalEntry["lines"] = invoice.taxType === "IGST"
         ? [{ account: "OUTPUT_IGST", debitPaise: taxPaise, creditPaise: 0 }]
         : invoice.taxType === "CGST_SGST"
@@ -2080,26 +2081,57 @@ export class AccountingRepository {
     return taxablePaise + Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
   }
 
+  /** The GST the invoice itself charged - the ceiling on how much tax its credit notes can give back. */
+  private invoiceTaxPaise(invoice: Invoice): number {
+    return this.invoiceTotal(invoice) - this.invoiceTaxableBase(invoice);
+  }
+
   /**
    * The tax-inclusive value of every FINALIZED credit note on this invoice - what has been taken
    * back off the customer's bill, and so off what they still owe.
    *
-   * Summed PER NOTE, matching finalizeCreditNote's own arithmetic exactly: it rounds the tax for
-   * each note separately, so rounding the sum of the taxable amounts instead could differ by a
-   * paisa from what was actually credited to RECEIVABLES. A test pins this to the posted journal.
+   * Read from the POSTED journal, not recomputed from the note lines. Recomputing would disagree
+   * with the ledger the moment a note's tax is clamped (see creditNoteTaxPaise), and the figure
+   * that decides what a customer may still pay has to be the one actually on the books.
+   * The `je-credit-note-inventory-%` entries also match the id prefix but never touch the
+   * settlement account, so filtering on that account excludes them.
    */
   private invoiceCreditedPaise(invoice: Invoice): number {
-    const rate = invoice.taxRateBasisPoints ?? 0;
-    const notes = this.db
+    const row = this.db
       .prepare(
-        `SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS taxable
-           FROM credit_notes cn
-           LEFT JOIN credit_note_lines cnl ON cnl.credit_note_id = cn.id
-          WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'
-          GROUP BY cn.id`,
+        `SELECT COALESCE(SUM(jl.credit_paise) - SUM(jl.debit_paise), 0) AS credited
+           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.source_id = ? AND je.id LIKE 'je-credit-note-%' AND jl.account = ?`,
       )
-      .all(invoice.id) as Array<{ taxable: number }>;
-    return notes.reduce((total, note) => total + note.taxable + Math.round(note.taxable * rate / 10000), 0);
+      .get(invoice.id, invoice.paymentAccount) as { credited: number };
+    return row.credited;
+  }
+
+  /** Output GST already given back by this invoice's credit notes, straight from the journal. */
+  private creditedTaxPaise(invoiceId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(jl.debit_paise) - SUM(jl.credit_paise), 0) AS tax
+           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.source_id = ? AND je.id LIKE 'je-credit-note-%' AND jl.account LIKE 'OUTPUT_%'`,
+      )
+      .get(invoiceId) as { tax: number };
+    return row.tax;
+  }
+
+  /**
+   * The GST a credit note of `taxablePaise` should carry, CLAMPED so this invoice's notes can
+   * never give back more tax than it charged.
+   *
+   * Without the clamp, per-note rounding over-credits: a 2 x 25 paise invoice at 18% charges 9
+   * paise of GST (round(9.0)), but two notes of 25 each round to 5 (round(4.5) goes up), handing
+   * back 10. That one paisa drove RECEIVABLES to -1 and left output SGST with a debit balance -
+   * a negative liability - with no error at all.
+   */
+  private creditNoteTaxPaise(invoice: Invoice, taxablePaise: number): number {
+    const uncapped = Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
+    const headroom = this.invoiceTaxPaise(invoice) - this.creditedTaxPaise(invoice.id);
+    return Math.max(0, Math.min(uncapped, headroom));
   }
 
   /** What the customer still owes: the bill, less credit notes, less cash already received. */
@@ -2139,6 +2171,22 @@ export class AccountingRepository {
     if (creditTotal + alreadyCredited.total > taxableBase) {
       throw new RepositoryValidationError(
         `Credit notes cannot exceed what the invoice charged before tax (${taxableBase} paise); this note would take the total credited to ${creditTotal + alreadyCredited.total} paise.`,
+      );
+    }
+    // SECOND CAP, tax-inclusive, against what is still OWED rather than the whole bill. Without
+    // it, crediting an invoice the customer has already paid drove RECEIVABLES negative with no
+    // error - money the books said we owed back, with no refund path to pay it. Refusing is the
+    // same choice cancelInvoice already makes ("an invoice with recorded payments cannot be
+    // cancelled"), and it keeps the books right until the refund path (deferred) exists.
+    const paidPaise = this.getPaidAmount(invoice.id);
+    const creditedPaise = this.invoiceCreditedPaise(invoice);
+    const thisNotePaise = creditTotal + this.creditNoteTaxPaise(invoice, creditTotal);
+    const roomPaise = this.invoiceTotal(invoice) - creditedPaise - paidPaise;
+    if (thisNotePaise > roomPaise) {
+      throw new RepositoryValidationError(
+        paidPaise > 0
+          ? `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is still unpaid. Refund the customer instead - crediting more than is owed would leave the books showing money due back with no way to pay it.`
+          : `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is left to credit.`,
       );
     }
   }
@@ -3752,9 +3800,12 @@ export class AccountingRepository {
    */
   public setAccountActive(code: string, active: boolean): void {
     const account = this.getAccount(code);
-    if (account.role !== null && !active) {
+    // Guard on the codes the ENGINE ITSELF emits, not just on `role`. SALES, COGS and EXPENSE
+    // have no role but are hardcoded by the posting engine, so deactivating SALES made every
+    // finalize and every credit note fail at the door - the app broke, from a settings screen.
+    if (!active && (ACCOUNT_CODES as readonly string[]).includes(code)) {
       throw new RepositoryValidationError(
-        `${code} is a built-in control account that the engine posts to, so it cannot be deactivated.`,
+        `${code} is a built-in account that the engine posts to automatically, so it cannot be deactivated.`,
       );
     }
     if (account.active === active) return;

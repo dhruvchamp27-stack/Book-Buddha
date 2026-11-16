@@ -387,7 +387,19 @@ describe("cash view: credit notes (current behaviour, pinned; owner decision pen
     }
   });
 
-  it("a note raised after full collection restates the earlier collection periods retroactively (dated to the payments)", () => {
+  /**
+   * This test used to pin the OPPOSITE behaviour: a note raised after full collection was folded
+   * into the invoice's lines, so the already-recognised payment was re-measured and JANUARY - a
+   * month that had been reported and closed - silently changed from 1,000,000 to 800,000, while
+   * February showed nothing. That directly contradicts S1-6 ("a previously collected invoice:
+   * NEVER rewrite an earlier month's cash figures").
+   *
+   * R3 resolves it by PREVENTION rather than by re-dating: a credit note may no longer exceed
+   * what is still unpaid, so the situation cannot arise. The same choice cancelInvoice already
+   * makes. The cost is that a genuine return-after-payment has to wait for the refund path,
+   * which is deferred - and that gap is the owner's to close, so it is named in the message.
+   */
+  it("refuses a note that exceeds what is unpaid, so no closed month can be rewritten", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();
@@ -395,17 +407,16 @@ describe("cash view: credit notes (current behaviour, pinned; owner decision pen
       ownerInvoice(w, "INV-1", "2026-01-10");
       at("2026-01-20T06:00:00.000Z");
       w.repository.recordPayment("INV-1", 1180000);
-      const before = w.repository.getProfitAndLoss({ basis: "CASH" });
+      const january = w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
+      expect(january.totalIncomePaise).toBe(1000000);
+
       at("2026-02-10T06:00:00.000Z");
-      creditNote(w, "CN-1");
-      expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(800000);
-      expect(before.totalIncomePaise).toBe(1000000);
-      // The note is folded into the invoice's lines, so the payment already recognised is re-measured
-      // against the lines as they stand now. January (the collection month) changes after the fact;
-      // February (the note's own month) shows nothing. Pinned as-is; an owner decision is pending.
-      expect(w.repository.getProfitAndLoss({ basis: "CASH" }).totalIncomePaise).toBe(800000);
-      expect(w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" }).totalIncomePaise).toBe(800000);
-      expect(w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" }).totalIncomePaise).toBe(0);
+      expect(() => creditNote(w, "CN-1")).toThrow(/only 0 paise of the invoice is still unpaid/);
+
+      // January is untouched, which is the whole point.
+      expect(w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" }).totalIncomePaise).toBe(1000000);
+      expect(w.repository.getProfitAndLoss({ basis: "CASH" }).totalIncomePaise).toBe(1000000);
+      expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(1000000);
     } finally {
       w.repository.close();
     }

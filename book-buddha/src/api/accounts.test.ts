@@ -82,8 +82,18 @@ describe("chart of accounts API", () => {
       // A control account the engine posts to cannot be switched off.
       expect((await app.inject({ method: "POST", url: "/accounts/CASH/active", payload: { active: false } })).statusCode).toBe(400);
       expect((await app.inject({ method: "POST", url: "/accounts/RECEIVABLES/active", payload: { active: false } })).statusCode).toBe(400);
-      // A non-control system account may be retired - a company with no loans need not see LOANS.
+      // Nor an account the ENGINE hardcodes but that has no role: deactivating SALES used to be
+      // allowed and then broke every finalize and every credit note at the posting door.
+      for (const code of ["SALES", "COGS", "EXPENSE", "INVENTORY", "PAYABLES", "OUTPUT_CGST", "INPUT_IGST"]) {
+        expect(
+          (await app.inject({ method: "POST", url: `/accounts/${code}/active`, payload: { active: false } })).statusCode,
+          `${code} must not be deactivatable`,
+        ).toBe(400);
+      }
+      // A system account the engine never posts to on its own MAY be retired - a company with no
+      // loans need not see LOANS on the list.
       expect((await app.inject({ method: "POST", url: "/accounts/LOANS/active", payload: { active: false } })).statusCode).toBe(200);
+      expect((await app.inject({ method: "POST", url: "/accounts/CAPITAL/active", payload: { active: false } })).statusCode).toBe(200);
 
       // Renaming an account that does not exist, and renaming to nothing.
       expect((await app.inject({ method: "PATCH", url: "/accounts/NOPE", payload: { name: "X" } })).statusCode).toBe(400);

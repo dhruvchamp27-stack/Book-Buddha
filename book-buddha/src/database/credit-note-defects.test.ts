@@ -71,6 +71,18 @@ function receivablesPaise(repository: AccountingRepository, invoiceId: string): 
   return row.balance;
 }
 
+/** Net output GST still owed on this invoice: credit-normal, so credits less debits. */
+function outputTaxPaise(repository: AccountingRepository, invoiceId: string): number {
+  const row = repository.db
+    .prepare(
+      `SELECT COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS balance
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.source_id = ? AND jl.account LIKE 'OUTPUT_%'`,
+    )
+    .get(invoiceId) as { balance: number };
+  return row.balance;
+}
+
 describe("DEFECT 1: a credit note must reduce what the customer can still pay", () => {
   it("refuses a payment of the original total once a credit note is finalized", () => {
     const w = world();
@@ -111,7 +123,7 @@ describe("DEFECT 1: a credit note must reduce what the customer can still pay", 
     }
   });
 
-  it("never lets RECEIVABLES go negative, and shows the credit on the receivables report", () => {
+  it("takes a fully credited invoice off the receivables list and allows no further payment", () => {
     const w = world();
     try {
       const invoice = finalizedInvoice(w, { unitPricePaise: 100000 });
@@ -143,27 +155,54 @@ describe("DEFECT 1: a credit note must reduce what the customer can still pay", 
     }
   });
 
-  it("counts each credit note's tax exactly as it was POSTED, rounding per note", () => {
+  it("never hands back more GST than the invoice charged, whatever the per-note rounding", () => {
     const w = world();
     try {
-      // 18%: two notes of 25 paise taxable each round to 5 paise tax apiece (4.5 up), so 60 paise
-      // is credited in total — whereas rounding the summed 50 would give 59. The cap must agree
-      // with the ledger, not with a tidier recomputation.
-      // Quantity 2 so there are two units to return, one per note.
-      const invoice = finalizedInvoice(w, { unitPricePaise: 10000, quantity: 2, taxRateBasisPoints: 1800 });
+      // 2 x 25 paise at 18%: the invoice charges 9 paise of GST (round(9.0)), but a note of 25
+      // rounds to 5 (round(4.5) goes up). Two such notes would hand back 10 - one paisa more than
+      // was ever charged - leaving RECEIVABLES at -1 and output SGST with a DEBIT balance, i.e. a
+      // negative liability. The second note's tax is clamped to the 4 paise of headroom instead.
+      const invoice = finalizedInvoice(w, { unitPricePaise: 25, quantity: 2, taxRateBasisPoints: 1800 });
+      const total = 50 + 9;
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(total);
+
       w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 25));
       w.repository.finalizeCreditNote("cn1");
       w.repository.saveCreditNote(creditNote(w, invoice, "cn2", 25));
       w.repository.finalizeCreditNote("cn2");
 
-      const total = 20000 + Math.round(20000 * 0.18); // 23600
-      const credited = 2 * (25 + 5); // 60, as posted
-      expect(total - receivablesPaise(w.repository, invoice.id)).toBe(credited);
-      expect(() => w.repository.recordPayment(invoice.id, total - credited + 1)).toThrow(
-        new RegExp(`outstanding balance of ${total - credited} paise`),
-      );
-      w.repository.recordPayment(invoice.id, total - credited);
+      // A full return clears the invoice EXACTLY - never past it.
       expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+      expect(outputTaxPaise(w.repository, invoice.id)).toBe(0);
+      expect(() => w.repository.recordPayment(invoice.id, 1)).toThrow(/outstanding balance of 0 paise/);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses a credit note on an invoice the customer has ALREADY paid", () => {
+    const w = world();
+    try {
+      const invoice = finalizedInvoice(w, { unitPricePaise: 100000 });
+      w.repository.recordPayment(invoice.id, 100000);
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+
+      // THE DEFECT: this used to be accepted, leaving RECEIVABLES at -40000 - the books saying
+      // money was due back to the customer, with no refund path able to pay it. getReceivables
+      // then hid the row entirely behind its "outstanding > 0" filter.
+      // Refused as early as the DRAFT, since that is where the lines are first validated.
+      expect(() => w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 40000)))
+        .toThrow(/only 0 paise of the invoice is still unpaid/);
+      expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
+      expect(w.repository.listCreditNotes({ invoiceId: invoice.id })).toHaveLength(0);
+
+      // Part-paid: a note is allowed only up to what is still owed.
+      const other = finalizedInvoice(w, { id: "inv2", unitPricePaise: 100000 });
+      w.repository.recordPayment(other.id, 70000);
+      expect(() => w.repository.saveCreditNote(creditNote(w, other, "cn2", 30001))).toThrow(/only 30000 paise/);
+      w.repository.saveCreditNote(creditNote(w, other, "cn3", 30000));
+      w.repository.finalizeCreditNote("cn3");
+      expect(receivablesPaise(w.repository, other.id)).toBe(0);
     } finally {
       w.repository.close();
     }
