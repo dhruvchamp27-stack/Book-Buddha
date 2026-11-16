@@ -34,6 +34,7 @@ import { RepositoryValidationError } from "./errors.js";
 import { postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { reportConditions } from "./report-filters-sql.js";
+import { SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
 import type {
   ExpenseCategoryRecord,
   ExpenseInput,
@@ -356,7 +357,8 @@ export interface CreditNoteSummary {
 }
 
 export interface TrialBalanceRow {
-  readonly account: AccountCode;
+  /** A code from chart_accounts, which the user can extend at runtime - NOT a fixed union. */
+  readonly account: string;
   readonly debitPaise: number;
   readonly creditPaise: number;
 }
@@ -366,6 +368,17 @@ export interface ReportAccountRow {
   readonly debitPaise: number;
   readonly creditPaise: number;
   readonly balancePaise: number;
+}
+
+/**
+ * A report row carrying its classification, JOINed from chart_accounts (decision S2-1).
+ * Every report section is selected by `type` or `role`, never by a hardcoded list of codes, so
+ * an account the user adds cannot be silently dropped from a report - which, for a
+ * balance-sheet account, used to unbalance the sheet with no error at all.
+ */
+export interface ClassifiedReportAccountRow extends ReportAccountRow {
+  readonly type: AccountType;
+  readonly role: AccountRole | null;
 }
 
 export interface ProfitAndLossReport {
@@ -393,7 +406,8 @@ export interface ProfitAndLossReport {
  */
 export interface CashRecognitionRow {
   readonly date: string;
-  readonly account: AccountCode;
+  /** A chart_accounts code, extensible at runtime - NOT a fixed union. */
+  readonly account: string;
   readonly amountPaise: number;
   readonly documentType: "INVOICE" | "PURCHASE_BILL" | "EXPENSE";
   readonly documentId: string;
@@ -1670,12 +1684,15 @@ export class AccountingRepository {
     // Derive the cash view ONCE: both the account rows and gross sales come out of it.
     const derivation = basis === "CASH" ? this.deriveCashView(rangeFilter) : undefined;
     const rows = derivation === undefined ? this.getReportAccountRows(rangeFilter) : this.cashViewAccountRows(derivation);
-    const income = rows.filter((row) => row.account === "SALES");
-    const expenses = rows.filter((row) => row.account === "COGS" || row.account === "EXPENSE");
+    // Grouped by CLASS, never by a list of codes: an income or expense account the user adds
+    // appears here automatically.
+    const income = rows.filter((row) => row.type === "INCOME");
+    const expenses = rows.filter((row) => row.type === "EXPENSE");
     const totalIncomePaise = income.reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
     const totalExpensesPaise = expenses.reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
+    // GST on sales is a ROLE, not a class: these are liabilities, and `type` cannot single them out.
     const gstOnSalesPaise = rows
-      .filter((row) => row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST")
+      .filter((row) => row.role === "OUTPUT_GST")
       .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
     const grossSalesPaise = derivation === undefined
       ? totalIncomePaise + gstOnSalesPaise
@@ -1705,18 +1722,30 @@ export class AccountingRepository {
    * An already-computed cash view, shaped like the ledger rows the accrual P&L uses
    * (net per account). Takes the derivation rather than a filter so a cash P&L derives once.
    */
-  private cashViewAccountRows(derivation: CashViewDerivation): readonly ReportAccountRow[] {
-    const totals = new Map<AccountCode, number>();
+  private cashViewAccountRows(derivation: CashViewDerivation): readonly ClassifiedReportAccountRow[] {
+    const classes = this.accountClasses();
+    const totals = new Map<string, number>();
     for (const row of derivation.recognitions) {
       totals.set(row.account, (totals.get(row.account) ?? 0) + row.amountPaise);
     }
-    const rows: ReportAccountRow[] = [];
+    const rows: ClassifiedReportAccountRow[] = [];
     for (const [account, natural] of [...totals.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       if (natural === 0) continue;
-      const creditNormal = account === "SALES" || account.startsWith("OUTPUT_");
+      const classification = classes.get(account);
+      if (classification === undefined) {
+        throw new AccountingError(`Account "${account}" is recognised in the cash view but has no row in chart_accounts.`);
+      }
+      const creditNormal = AccountingRepository.creditNormal(classification.type);
       const debitPaise = creditNormal ? (natural < 0 ? -natural : 0) : (natural > 0 ? natural : 0);
       const creditPaise = creditNormal ? (natural > 0 ? natural : 0) : (natural < 0 ? -natural : 0);
-      rows.push({ account, debitPaise, creditPaise, balancePaise: debitPaise - creditPaise });
+      rows.push({
+        account,
+        type: classification.type,
+        role: classification.role,
+        debitPaise,
+        creditPaise,
+        balancePaise: debitPaise - creditPaise,
+      });
     }
     return rows;
   }
@@ -1765,9 +1794,19 @@ export class AccountingRepository {
     const inPeriod = (date: string): boolean =>
       (filter.fromDate === undefined || date >= filter.fromDate) && (filter.toDate === undefined || date <= filter.toDate);
 
-    type Natural = { account: AccountCode; amountPaise: number };
-    const accounts = ["SALES", "COGS", "EXPENSE", "INVENTORY", "OUTPUT_CGST", "OUTPUT_SGST", "OUTPUT_IGST", "INPUT_CGST", "INPUT_SGST", "INPUT_IGST"] as const;
-    const creditNormal = (account: string): boolean => account === "SALES" || account.startsWith("OUTPUT_");
+    type Natural = { account: string; amountPaise: number };
+    const classes = this.accountClasses();
+    // EXCLUSION, not an inclusion list. The old list named the ten accounts to include, so any
+    // account added later was silently dropped from the cash P&L. What actually belongs out is
+    // settlement - how a document was paid (cash, bank) and what was owed (receivables,
+    // payables). Everything else a document posts is performance and is recognised as cash lands.
+    const creditNormal = (account: string): boolean => {
+      const classification = classes.get(account);
+      if (classification === undefined) {
+        throw new AccountingError(`Account "${account}" appears in the ledger but has no row in chart_accounts.`);
+      }
+      return AccountingRepository.creditNormal(classification.type);
+    };
 
     // Posted lines of the P&L-side accounts, grouped by document and by entry.
     const lineRows = this.db
@@ -1775,13 +1814,15 @@ export class AccountingRepository {
         `SELECT je.id AS entry_id, je.source_type, je.source_id,
                 COALESCE(je.entry_date, date(je.created_at, '+330 minutes')) AS entry_date,
                 jl.account, jl.debit_paise, jl.credit_paise
-           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
-          WHERE jl.account IN (${accounts.map(() => "?").join(",")})
+           FROM journal_lines jl
+           JOIN journal_entries je ON je.id = jl.journal_entry_id
+           JOIN chart_accounts ca ON ca.code = jl.account
+          WHERE ca.role IS NULL OR ca.role NOT IN (${SETTLEMENT_ROLES.map(() => "?").join(",")})
           ORDER BY je.rowid, jl.id`,
       )
-      .all(...accounts) as Array<{
+      .all(...SETTLEMENT_ROLES) as Array<{
       entry_id: string; source_type: string; source_id: string; entry_date: string;
-      account: AccountCode; debit_paise: number; credit_paise: number;
+      account: string; debit_paise: number; credit_paise: number;
     }>;
     const byDocument = new Map<string, Array<(typeof lineRows)[number]>>();
     for (const row of lineRows) {
@@ -1822,7 +1863,7 @@ export class AccountingRepository {
     const recognitions: CashRecognitionRow[] = [];
     const invoiceCollections: Array<{ date: string; amountPaise: number }> = [];
     const sumByAccount = (rows: ReadonlyArray<(typeof lineRows)[number]>): Natural[] => {
-      const sums = new Map<AccountCode, number>();
+      const sums = new Map<string, number>();
       for (const row of rows) sums.set(row.account, (sums.get(row.account) ?? 0) + natural(row));
       return [...sums.entries()].map(([account, amountPaise]) => ({ account, amountPaise }));
     };
@@ -1888,35 +1929,39 @@ export class AccountingRepository {
       );
     }
     const rows = this.getReportAccountRows(filter);
-    const assets = rows.filter((row) =>
-      row.account === "CASH" || row.account === "RECEIVABLES" || row.account === "INVENTORY"
-      || row.account === "INPUT_CGST" || row.account === "INPUT_SGST" || row.account === "INPUT_IGST");
-    // Liabilities are credit-normal: present them as credit - debit so owed amounts are positive.
-    const liabilities = rows
-      .filter((row) =>
-        row.account === "OUTPUT_CGST" || row.account === "OUTPUT_SGST" || row.account === "OUTPUT_IGST"
-        || row.account === "PAYABLES")
-      .map((row) => ({ ...row, balancePaise: row.creditPaise - row.debitPaise }));
-    // Retained earnings = SALES - COGS - EXPENSE (net of debit/credit), so the sheet balances.
+    // Every section is a CLASS. Because the three classes below partition the balance-sheet rows
+    // exactly, and income less expenses becomes retained earnings, the sheet cannot be
+    // unbalanced by an account nobody remembered to add to a list.
+    const assets = rows.filter((row) => row.type === "ASSET");
+    // Liabilities and equity are credit-normal: present them as credit - debit so owed and
+    // contributed amounts read positive.
+    const creditSide = (row: ClassifiedReportAccountRow) => ({ ...row, balancePaise: row.creditPaise - row.debitPaise });
+    const liabilities = rows.filter((row) => row.type === "LIABILITY").map(creditSide);
+    const postedEquity = rows.filter((row) => row.type === "EQUITY").map(creditSide);
+    // Retained earnings = all income less all expenses, so the sheet balances. It is DERIVED and
+    // deliberately has no row in chart_accounts: nothing may ever post to it directly.
     const netProfitPaise = rows
-      .filter((row) => row.account === "SALES")
+      .filter((row) => row.type === "INCOME")
       .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0)
       - rows
-        .filter((row) => row.account === "COGS" || row.account === "EXPENSE")
+        .filter((row) => row.type === "EXPENSE")
         .reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
-    const equity: readonly ReportAccountRow[] = [{
+    const retainedEarnings: ClassifiedReportAccountRow = {
       account: "RETAINED_EARNINGS",
+      type: "EQUITY",
+      role: null,
       debitPaise: netProfitPaise < 0 ? Math.abs(netProfitPaise) : 0,
       creditPaise: netProfitPaise > 0 ? netProfitPaise : 0,
       balancePaise: netProfitPaise,
-    }];
+    };
+    const equity: readonly ClassifiedReportAccountRow[] = [...postedEquity, retainedEarnings];
     return {
       assets,
       liabilities,
       equity,
       totalAssetsPaise: assets.reduce((total, row) => total + row.balancePaise, 0),
       totalLiabilitiesPaise: liabilities.reduce((total, row) => total + row.balancePaise, 0),
-      totalEquityPaise: netProfitPaise,
+      totalEquityPaise: equity.reduce((total, row) => total + row.balancePaise, 0),
     };
   }
 
@@ -2178,27 +2223,59 @@ export class AccountingRepository {
     return reportConditions(filter);
   }
 
-  private getReportAccountRows(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string } = {}): readonly ReportAccountRow[] {
+  private getReportAccountRows(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string } = {}): readonly ClassifiedReportAccountRow[] {
     const { where, params } = this.reportConditions(filter);
     const rows = this.db
       .prepare(
-        `SELECT jl.account AS account, SUM(jl.debit_paise) AS debit_paise, SUM(jl.credit_paise) AS credit_paise
+        // LEFT JOIN, deliberately not an inner one: an inner join would silently DROP a line whose
+        // account is missing from the chart, which is the exact failure this slice exists to kill.
+        // The FK and the v9 trigger make it impossible, so if it ever happens we want to hear it.
+        `SELECT jl.account AS account, ca.type AS type, ca.role AS role,
+                SUM(jl.debit_paise) AS debit_paise, SUM(jl.credit_paise) AS credit_paise
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.journal_entry_id
+         LEFT JOIN chart_accounts ca ON ca.code = jl.account
          ${where}
          GROUP BY jl.account ORDER BY jl.account`,
       )
       .all(...params) as Array<{
-      account: AccountCode;
+      account: string;
+      type: AccountType | null;
+      role: AccountRole | null;
       debit_paise: number;
       credit_paise: number;
     }>;
-    return rows.map((row) => ({
-      account: row.account,
-      debitPaise: row.debit_paise,
-      creditPaise: row.credit_paise,
-      balancePaise: row.debit_paise - row.credit_paise,
-    }));
+    return rows.map((row) => {
+      if (row.type === null) {
+        throw new AccountingError(
+          `Account "${row.account}" has journal lines but no row in chart_accounts, so no report can classify it.`,
+        );
+      }
+      return {
+        account: row.account,
+        type: row.type,
+        role: row.role,
+        debitPaise: row.debit_paise,
+        creditPaise: row.credit_paise,
+        balancePaise: row.debit_paise - row.credit_paise,
+      };
+    });
+  }
+
+  /** The classification of every account, for the places that work from codes rather than rows. */
+  private accountClasses(): ReadonlyMap<string, { type: AccountType; role: AccountRole | null }> {
+    const rows = this.db.prepare("SELECT code, type, role FROM chart_accounts").all() as Array<{
+      code: string; type: AccountType; role: AccountRole | null;
+    }>;
+    return new Map(rows.map((r) => [r.code, { type: r.type, role: r.role }]));
+  }
+
+  /**
+   * Which side an account's balance naturally sits on, DERIVED from its class and never chosen
+   * (S2-1). Income, liabilities and equity are credit-normal; assets and expenses debit-normal.
+   */
+  private static creditNormal(type: AccountType): boolean {
+    return type === "INCOME" || type === "LIABILITY" || type === "EQUITY";
   }
 
   public createRecurringInvoiceTemplate(input: RecurringInvoiceTemplateInput): RecurringInvoiceTemplate {

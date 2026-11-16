@@ -10,6 +10,7 @@ import {
 } from "./chart-accounts-schema.js";
 import { AUDIT_TRIGGER_NAMES } from "./audit-chain-schema.js";
 import { ACCOUNT_CODES } from "../accounting/types.js";
+import { AccountingRepository } from "./repository.js";
 
 /** A database at the schema just BEFORE the chart of accounts (everything up to v8). */
 function preV9Db(): Database.Database {
@@ -200,5 +201,102 @@ describe("the chart itself is guarded", () => {
     expect(() =>
       db.exec("INSERT INTO chart_accounts (code, company_id, name, type, active, created_at, updated_at) VALUES ('SALES', 'c1', 'Other sales', 'INCOME', 1, 't', 't')"),
     ).toThrow(/UNIQUE|PRIMARY KEY/);
+  });
+});
+
+/**
+ * The structural invariants the table buys us. These are the tests that would have caught the
+ * old bug: a code missing from one of three hardcoded report lists was silently dropped, and for
+ * a balance-sheet account that unbalanced the sheet with NO error at all.
+ */
+describe("reports are classified by the table, not by a hardcoded list", () => {
+  /**
+   * One balanced journal entry that touches EVERY seeded account, so each report section has
+   * something in it. Posted through SQL rather than the door because the door's own validation
+   * is the subject of the next commit; what is under test here is the report classification.
+   */
+  function postAcrossEveryAccount(db: Database.Database): void {
+    seedEntry(db, "je-all");
+    const codes = (db.prepare("SELECT code, type FROM chart_accounts ORDER BY code").all() as Array<{ code: string; type: string }>);
+    const insert = db.prepare("INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES ('je-all', ?, ?, ?)");
+    // Debit every debit-normal account 1000 and credit every credit-normal one, then square the
+    // entry off against CASH so debits equal credits exactly.
+    let debits = 0;
+    let credits = 0;
+    for (const { code, type } of codes) {
+      if (code === "CASH") continue;
+      const creditNormal = type === "INCOME" || type === "LIABILITY" || type === "EQUITY";
+      insert.run(code, creditNormal ? 0 : 1000, creditNormal ? 1000 : 0);
+      if (creditNormal) credits += 1000; else debits += 1000;
+    }
+    const squareOff = credits - debits;
+    insert.run("CASH", squareOff > 0 ? squareOff : 0, squareOff > 0 ? 0 : -squareOff);
+  }
+
+  it("keeps assets = liabilities + equity with EVERY seeded account posted to", () => {
+    const repository = new AccountingRepository();
+    const db = repository.db;
+    postAcrossEveryAccount(db);
+    const sheet = repository.getBalanceSheet();
+    expect(sheet.totalAssetsPaise).toBe(sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
+    // And every account that was posted to appears in exactly one section of the sheet or the P&L.
+    const pl = repository.getProfitAndLoss({ basis: "ACCRUAL" });
+    const placed = [...sheet.assets, ...sheet.liabilities, ...sheet.equity, ...pl.income, ...pl.expenses]
+      .map((r) => r.account)
+      .filter((code) => code !== "RETAINED_EARNINGS");
+    const posted = (db.prepare("SELECT DISTINCT account FROM journal_lines").all() as Array<{ account: string }>).map((r) => r.account);
+    expect([...placed].sort()).toEqual([...posted].sort());
+    expect(new Set(placed).size, "an account was placed in two sections at once").toBe(placed.length);
+  });
+
+  it("agrees with a raw SUM over journal_lines, so the JOIN drops nothing", () => {
+    const repository = new AccountingRepository();
+    const db = repository.db;
+    postAcrossEveryAccount(db);
+    const tb = repository.getTrialBalance();
+    const raw = db.prepare("SELECT COALESCE(SUM(debit_paise), 0) AS d, COALESCE(SUM(credit_paise), 0) AS c FROM journal_lines").get() as { d: number; c: number };
+    expect(tb.reduce((t, r) => t + r.debitPaise, 0)).toBe(raw.d);
+    expect(tb.reduce((t, r) => t + r.creditPaise, 0)).toBe(raw.c);
+    expect(raw.d).toBe(raw.c);
+    expect(tb).toHaveLength((db.prepare("SELECT COUNT(DISTINCT account) AS n FROM journal_lines").get() as { n: number }).n);
+  });
+
+  it("puts a RUNTIME-created account into the right report section with no code change", () => {
+    const repository = new AccountingRepository();
+    const db = repository.db;
+    seedEntry(db);
+    db.exec(`
+      INSERT INTO chart_accounts (code, company_id, name, type, active, created_at, updated_at)
+        VALUES ('FAIR_STALL_RENT', NULL, 'Fair stall rent', 'EXPENSE', 1, 't', 't'),
+               ('SPONSORSHIP', NULL, 'Sponsorship income', 'INCOME', 1, 't', 't'),
+               ('DEPOSITS_HELD', NULL, 'Refundable deposits held', 'LIABILITY', 1, 't', 't');
+      INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES
+        ('je1', 'FAIR_STALL_RENT', 5000, 0),
+        ('je1', 'SPONSORSHIP', 0, 3000),
+        ('je1', 'DEPOSITS_HELD', 0, 2000);
+    `);
+    const pl = repository.getProfitAndLoss({ basis: "ACCRUAL" });
+    expect(pl.expenses.map((r) => r.account)).toContain("FAIR_STALL_RENT");
+    expect(pl.income.map((r) => r.account)).toContain("SPONSORSHIP");
+    expect(pl.totalExpensesPaise).toBe(5000);
+    expect(pl.totalIncomePaise).toBe(3000);
+    const sheet = repository.getBalanceSheet();
+    expect(sheet.liabilities.map((r) => r.account)).toContain("DEPOSITS_HELD");
+    // The whole point: a brand-new account cannot unbalance the sheet.
+    expect(sheet.totalAssetsPaise).toBe(sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
+  });
+
+  it("refuses to report at all on a ledger account with no seat in the chart", () => {
+    const repository = new AccountingRepository();
+    const db = repository.db;
+    seedEntry(db);
+    db.exec("INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES ('je1', 'SALES', 0, 100)");
+    // Forge the orphan the FK and trigger exist to prevent, and prove the reports shout rather
+    // than silently dropping it the way the hardcoded lists used to.
+    db.exec("DROP TRIGGER journal_lines_account_exists");
+    db.pragma("foreign_keys = OFF");
+    db.exec("INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES ('je1', 'ORPHAN', 100, 0)");
+    expect(() => repository.getBalanceSheet()).toThrow(/ORPHAN/);
+    expect(() => repository.getTrialBalance()).toThrow(/chart_accounts/);
   });
 });
