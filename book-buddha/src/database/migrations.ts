@@ -5,6 +5,7 @@ import { applyJournalDimensionsSchema } from "./journal-dimensions-schema.js";
 import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 import { applyAttachmentsSchema } from "./attachments-schema.js";
 import { applyAuditChainSchema } from "./audit-chain-schema.js";
+import { applyChartOfAccountsSchema } from "./chart-accounts-schema.js";
 
 export interface Migration {
   version: number;
@@ -140,6 +141,15 @@ export const migrations: readonly Migration[] = [
     // triggers. Never a table rebuild, so no cascade-delete hazard.
     // Default (transactional) so a failed backfill rolls the whole thing back.
     up: applyAuditChainSchema,
+  },
+  {
+    version: 9,
+    name: "chart_of_accounts",
+    // Rebuilds journal_lines to drop the fixed account CHECK in favour of an FK + trigger against
+    // the new chart_accounts table, so accounts can be created at runtime (decision S2-1). The
+    // rebuild needs PRAGMA foreign_keys = OFF (a no-op inside a transaction), so it manages its own.
+    transactional: false,
+    up: applyChartOfAccountsSchema,
   },
 ];
 
