@@ -222,7 +222,7 @@ describe("DEFECT 1: a credit note must reduce what the customer can still pay", 
 });
 
 describe("DEFECT 2: a credit note is capped by what the invoice charged BEFORE tax", () => {
-  it("refuses a taxable credit equal to the tax-inclusive total of an 18% invoice", () => {
+  it("ACCEPTANCE 18% over-credit: refuses a taxable credit equal to the tax-inclusive total", () => {
     const w = world();
     try {
       // Taxable 100000, GST 18000, total 118000.
@@ -311,7 +311,7 @@ describe("DEFECT 3: cancelling an invoice that carries a credit note", () => {
       // full, so a 1,000,000 invoice carrying a 400,000 note reversed 1,000,000 of SALES that
       // stood at 600,000 - leaving SALES with a 400,000 DEBIT balance and RECEIVABLES at
       // -400,000, silently, by a route neither earlier cap covered.
-      expect(() => w.repository.cancelInvoice(invoice.id)).toThrow(/400000 paise of credit notes/);
+      expect(() => w.repository.cancelInvoice(invoice.id)).toThrow(/400000 paise of credit notes against it/);
 
       // The ledger is untouched and the invoice is still live.
       expect(receivablesPaise(w.repository, invoice.id)).toBe(600000);

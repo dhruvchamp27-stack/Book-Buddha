@@ -380,7 +380,7 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
    * and 62.5% of the net lines (800,000 / 480,000 / 144,000) gives the new figures. The old
    * denominator was the original 1,180,000, making the share 50%.
    */
-  it("a note before collection re-bases the remainder: later collections measure against what is OWED", () => {
+  it("ACCEPTANCE re-base: a note before collection, later collections measured against what is OWED", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();
@@ -409,7 +409,7 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
    * even though January's cash and goods never changed. The event-ordered walk keeps the note's
    * effect entirely in the future.
    */
-  it("a note NEVER moves a month already reported, even when margins differ", () => {
+  it("ACCEPTANCE mixed margins: a note NEVER moves a month already reported", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();
@@ -459,13 +459,64 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
   });
 
   /**
+   * OPEN, PINNED, AWAITING THE OWNER'S RULING. When the credit note is itself the settling
+   * event - it exactly equals what was left unpaid - no payment follows it, so the COGS behind
+   * the goods the customer KEPT is never recognised on the cash basis. Here 200,000 of COGS is
+   * stranded: cash expenses 400,000 against an accrual 600,000.
+   *
+   * There is nowhere obviously right to put it: S2-2 rules out the note's own date, S1-6 rules
+   * out rewriting January, and no later cash exists to attach it to. So the cash view CONVERGES
+   * only when a payment follows the last note, and this test pins what happens when none does
+   * rather than pretending otherwise.
+   */
+  it("does NOT converge when the note itself settles the invoice (open question)", () => {
+    vi.useFakeTimers();
+    at("2026-01-10T06:00:00.000Z");
+    const w = world();
+    try {
+      // Goods 1,000,000 (COGS 600,000) plus freight 500,000 with no cost. Total 1,500,000.
+      w.repository.saveDraft({
+        id: "INV-T", number: "INV-T", businessId: w.businessId, customerId: w.customerId,
+        invoiceDate: "2026-01-10", paymentAccount: "RECEIVABLES", status: "DRAFT",
+        taxType: "NONE", taxRateBasisPoints: 0,
+        lines: [
+          { itemId: w.goodsId, description: "Goods", quantity: 10, unitPricePaise: 100000 },
+          { itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 500000 },
+        ],
+      });
+      w.repository.finalizeInvoice("INV-T");
+      at("2026-01-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-T", 1000000, "2026-01-20"); // everything but the freight
+      at("2026-02-10T06:00:00.000Z");
+      // Allowed: it is exactly the 500,000 still unpaid.
+      w.repository.saveCreditNote({
+        id: "CN-T", invoiceId: "INV-T", number: "CN-T", reason: "Freight waived", status: "DRAFT",
+        lines: [{ itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 500000 }],
+      });
+      w.repository.finalizeCreditNote("CN-T");
+
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(accrual).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 600000 });
+      // Income agrees; COGS does not, and 200,000 is stranded. This is the gap to rule on.
+      expect(cash.totalIncomePaise).toBe(1000000);
+      expect(cash.totalExpensesPaise).toBe(400000);
+      expect(accrual.totalExpensesPaise - cash.totalExpensesPaise).toBe(200000);
+      // Not a rounding artefact and not recoverable by paying more: nothing is owed.
+      expect(() => w.repository.recordPayment("INV-T", 1)).toThrow(/outstanding balance of 0 paise/);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  /**
    * The property that makes the re-basing right, and the one the old denominator could never
    * satisfy: once the customer has paid everything they owe, the cash view must equal the accrual
    * view. Against the original bill, settling the net 944,000 of a 1,180,000 invoice gave only
    * 80% of the net lines - 640,000 of income against an accrual 800,000 - and the gap never
    * closed, no matter how much was collected.
    */
-  it("CONVERGES: settling the re-based balance in full lands exactly on the accrual figures", () => {
+  it("ACCEPTANCE convergence: settling the re-based balance in full lands on the accrual figures", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();

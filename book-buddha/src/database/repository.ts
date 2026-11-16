@@ -1501,11 +1501,16 @@ export class AccountingRepository {
       // A finalized credit note is money against the invoice for exactly the same reason, and the
       // guard above missed it. Cancellation reverses the ORIGINAL entry in full, so on a 1000
       // invoice carrying a 400 note it reversed 1000 of SALES that only stood at 600 — leaving
-      // SALES with a 400 DEBIT balance and RECEIVABLES at -400, silently. Cancel the note first.
+      // SALES with a 400 DEBIT balance and RECEIVABLES at -400, silently.
+      //
+      // KNOWN DEAD END: there is no path to cancel a finalized credit note (CreditNoteStatus has
+      // a CANCELLED value that nothing ever sets), so an invoice carrying one can never be
+      // cancelled at all. The message says what is true rather than suggesting a step that does
+      // not exist; the way out is the credit-note cancellation path, which is still unbuilt.
       const creditedPaise = this.invoiceCreditedPaise(invoice);
       if (creditedPaise > 0) {
         throw new RepositoryValidationError(
-          `This invoice has ${creditedPaise} paise of credit notes against it and cannot be cancelled. Cancel the credit notes first.`,
+          `This invoice has ${creditedPaise} paise of credit notes against it and cannot be cancelled: the cancellation would reverse more than the invoice still owes. A finalized credit note cannot yet be undone, so this invoice can no longer be cancelled.`,
         );
       }
       const originalEntry = this.getOriginalJournalEntry(invoiceId);
@@ -2021,34 +2026,54 @@ export class AccountingRepository {
       let balancePaise = totalPaise;
       let cashPaise = 0;
 
+      // A SEGMENT is the stretch between two credit notes. Inside it the cumulative allocator
+      // runs exactly as it always did - paidBefore/paidAfter against the segment's own lines and
+      // balance - so a document with NO credit notes behaves identically to before, by
+      // construction. (Restarting the allocator at every payment instead would silently change
+      // the intermediate shares of every multi-payment bill, expense and uncredited invoice:
+      // with one line of 10 against a total of 30 and payments of 1, 1 and 28, the second
+      // payment recognises 1 cumulatively but 0 if each payment is allocated on its own.)
+      // Only a note opens a new segment, re-based on what is left.
+      let segmentLines = [...current.keys()].sort();
+      let segmentAmounts = segmentLines.map((account) => current.get(account) ?? 0);
+      let segmentBalance = balancePaise;
+      let segmentPaid = 0;
+
+      const openSegment = (): void => {
+        segmentLines = [...current.keys()].sort();
+        segmentAmounts = segmentLines.map((account) => (current.get(account) ?? 0) - (recognised.get(account) ?? 0));
+        segmentBalance = balancePaise - cashPaise;
+        segmentPaid = 0;
+      };
+
       for (const event of events) {
         if (event.kind === "NOTE") {
           for (const line of event.lines) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
           balancePaise -= event.inclusivePaise;
+          openSegment();
           continue;
         }
-        const owedPaise = balancePaise - cashPaise;
-        if (owedPaise > 0) {
-          const appliedPaise = Math.min(event.amountPaise, owedPaise);
-          const accounts = [...current.keys()].sort();
-          // The cumulative allocator, restarted on the REMAINING amounts, so a full settlement
-          // lands on the remaining lines exactly however the rounding falls.
-          const shares = allocateProportionally({
-            lineAmountsPaise: accounts.map((account) => (current.get(account) ?? 0) - (recognised.get(account) ?? 0)),
-            totalPaise: owedPaise,
-            paidBeforePaise: 0,
-            paidAfterPaise: appliedPaise,
-          });
-          accounts.forEach((account, index) => {
-            const share = shares[index] as number;
-            if (share === 0) return;
-            // Accumulated whether or not it falls in the reported period: the filter decides what
-            // is SHOWN, never what has been recognised, or a date range would double count.
-            recognised.set(account, (recognised.get(account) ?? 0) + share);
-            if (inPeriod(event.date)) {
-              recognitions.push({ date: event.date, account, amountPaise: share, documentType: doc.type, documentId: doc.id });
-            }
-          });
+        if (segmentBalance > 0) {
+          const segmentPaidAfter = Math.min(segmentPaid + event.amountPaise, segmentBalance);
+          if (segmentPaidAfter > segmentPaid) {
+            const shares = allocateProportionally({
+              lineAmountsPaise: segmentAmounts,
+              totalPaise: segmentBalance,
+              paidBeforePaise: segmentPaid,
+              paidAfterPaise: segmentPaidAfter,
+            });
+            segmentLines.forEach((account, index) => {
+              const share = shares[index] as number;
+              if (share === 0) return;
+              // Accumulated whether or not it falls in the reported period: the filter decides
+              // what is SHOWN, never what has been recognised, or a date range would double count.
+              recognised.set(account, (recognised.get(account) ?? 0) + share);
+              if (inPeriod(event.date)) {
+                recognitions.push({ date: event.date, account, amountPaise: share, documentType: doc.type, documentId: doc.id });
+              }
+            });
+          }
+          segmentPaid = segmentPaidAfter;
         }
         if (doc.type === "INVOICE" && inPeriod(event.date)) {
           invoiceCollections.push({ date: event.date, amountPaise: event.amountPaise });
@@ -2305,7 +2330,7 @@ export class AccountingRepository {
     if (thisNotePaise > roomPaise) {
       throw new RepositoryValidationError(
         paidPaise > 0
-          ? `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is still unpaid. Refund the customer instead - crediting more than is owed would leave the books showing money due back with no way to pay it.`
+          ? `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is still unpaid. Crediting more than is owed would leave the books showing money due back to the customer, and there is no refund path yet to pay it.`
           : `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is left to credit.`,
       );
     }
