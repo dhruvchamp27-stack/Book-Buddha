@@ -34,7 +34,7 @@ import { RepositoryValidationError } from "./errors.js";
 import { postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { reportConditions } from "./report-filters-sql.js";
-import { SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
+import { ACCOUNT_TYPES, SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
 import type {
   ExpenseCategoryRecord,
   ExpenseInput,
@@ -368,6 +368,19 @@ export interface ReportAccountRow {
   readonly debitPaise: number;
   readonly creditPaise: number;
   readonly balancePaise: number;
+}
+
+/** An account in the chart. `system` accounts are the engine's own, shared by every company. */
+export interface ChartAccount {
+  readonly code: string;
+  readonly companyId: string | null;
+  readonly name: string;
+  readonly type: AccountType;
+  /** The job this account does in the engine; only system accounts have one. */
+  readonly role: AccountRole | null;
+  readonly parentCode: string | null;
+  readonly active: boolean;
+  readonly system: boolean;
 }
 
 /**
@@ -3403,6 +3416,162 @@ export class AccountingRepository {
 
   private insertAuditEvent(event: AuditEvent): void {
     appendAuditEvent(this.db, event);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Chart of accounts (decision S2-1). The account-creation PAGE is UI and is deferred with all
+  // other UI; this is the backend it will sit on. Every change is audited, because the chart
+  // decides which report line a figure lands on.
+  // ---------------------------------------------------------------------------
+
+  public listAccounts(filter: { companyId?: string; includeInactive?: boolean } = {}): readonly ChartAccount[] {
+    // A company sees its OWN accounts plus the shared system ones (company_id NULL).
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (filter.companyId !== undefined) {
+      conditions.push("(company_id IS NULL OR company_id = ?)");
+      params.push(filter.companyId);
+    }
+    if (filter.includeInactive !== true) conditions.push("active = 1");
+    const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db
+      .prepare(`SELECT code, company_id, name, type, role, parent_code, active FROM chart_accounts ${where} ORDER BY type, code`)
+      .all(...params) as Array<{
+      code: string; company_id: string | null; name: string; type: AccountType;
+      role: AccountRole | null; parent_code: string | null; active: number;
+    }>;
+    return rows.map((row) => ({
+      code: row.code,
+      companyId: row.company_id,
+      name: row.name,
+      type: row.type,
+      role: row.role,
+      parentCode: row.parent_code,
+      active: row.active === 1,
+      system: row.company_id === null,
+    }));
+  }
+
+  public getAccount(code: string): ChartAccount {
+    const account = this.listAccounts({ includeInactive: true }).find((a) => a.code === code);
+    if (account === undefined) throw new RepositoryValidationError(`Account ${code} was not found.`);
+    return account;
+  }
+
+  /**
+   * Creates a USER account. Three things are deliberately not on offer:
+   *  - a `role`: control accounts (cash, bank, receivables, payables, inventory, GST) are the
+   *    engine's own and cannot be user-created (S2-1);
+   *  - a normal side or a cash-view/cash-flow treatment: all three DERIVE from the class;
+   *  - a company_id of NULL: only the migration seeds system accounts.
+   */
+  public createAccount(input: { companyId: string; code: string; name: string; type: AccountType; parentCode?: string }): string {
+    this.requireCompany(input.companyId);
+    const code = input.code.trim().toUpperCase();
+    // A code is an identifier, not prose: it ends up in SQL, in reports and in exports.
+    if (!/^[A-Z][A-Z0-9_]{1,39}$/.test(code)) {
+      throw new RepositoryValidationError(
+        "An account code must be 2 to 40 characters, start with a letter, and use only letters, numbers and underscores.",
+      );
+    }
+    const name = input.name.trim();
+    if (name === "") throw new RepositoryValidationError("An account needs a name.");
+    if (!(ACCOUNT_TYPES as readonly string[]).includes(input.type)) {
+      throw new RepositoryValidationError(`An account class must be one of ${ACCOUNT_TYPES.join(", ")}.`);
+    }
+    if (code === "RETAINED_EARNINGS") {
+      throw new RepositoryValidationError(
+        "RETAINED_EARNINGS is derived by the Balance Sheet from income less expenses and cannot be an account.",
+      );
+    }
+    const existing = this.db.prepare("SELECT company_id FROM chart_accounts WHERE code = ?").get(code) as { company_id: string | null } | undefined;
+    if (existing !== undefined) {
+      throw new RepositoryValidationError(
+        existing.company_id === null
+          ? `${code} is a built-in account and already exists.`
+          : `An account with the code ${code} already exists.`,
+      );
+    }
+    if (input.parentCode !== undefined) {
+      const parent = this.db.prepare("SELECT type, company_id FROM chart_accounts WHERE code = ?").get(input.parentCode) as
+        | { type: AccountType; company_id: string | null }
+        | undefined;
+      if (parent === undefined) throw new RepositoryValidationError(`Parent account ${input.parentCode} was not found.`);
+      // A sub-account that reports in a different section from its parent would make the tree lie.
+      if (parent.type !== input.type) {
+        throw new RepositoryValidationError(
+          `A sub-account of ${input.parentCode} must be classed ${parent.type}, not ${input.type}.`,
+        );
+      }
+      if (parent.company_id !== null && parent.company_id !== input.companyId) {
+        throw new RepositoryValidationError(`Parent account ${input.parentCode} belongs to another company.`);
+      }
+    }
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO chart_accounts (code, company_id, name, type, role, parent_code, active, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?)",
+        )
+        .run(code, input.companyId, name, input.type, input.parentCode ?? null, now, now);
+      appendAuditEvent(this.db, {
+        action: "ACCOUNT_CREATED",
+        entityId: code,
+        entityType: "chart_account",
+        companyId: input.companyId,
+        occurredAt: now,
+        afterValues: { code, name, type: input.type, parentCode: input.parentCode ?? null, active: true },
+      });
+    })();
+    return code;
+  }
+
+  /** Renames an account. The CODE never changes - that is what "rename anytime" can safely mean. */
+  public renameAccount(code: string, name: string): void {
+    const account = this.getAccount(code);
+    const trimmed = name.trim();
+    if (trimmed === "") throw new RepositoryValidationError("An account needs a name.");
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE chart_accounts SET name = ?, updated_at = ? WHERE code = ?").run(trimmed, now, code);
+      appendAuditEvent(this.db, {
+        action: "ACCOUNT_RENAMED",
+        entityId: code,
+        entityType: "chart_account",
+        ...(account.companyId === null ? {} : { companyId: account.companyId }),
+        occurredAt: now,
+        beforeValues: { name: account.name },
+        afterValues: { name: trimmed },
+      });
+    })();
+  }
+
+  /**
+   * Deactivates or reactivates an account. Never a delete: posted history must keep its account,
+   * and the v9 trigger refuses a delete outright. A control account cannot be switched off - the
+   * engine posts to it whether the user wants it on the list or not.
+   */
+  public setAccountActive(code: string, active: boolean): void {
+    const account = this.getAccount(code);
+    if (account.role !== null && !active) {
+      throw new RepositoryValidationError(
+        `${code} is a built-in control account that the engine posts to, so it cannot be deactivated.`,
+      );
+    }
+    if (account.active === active) return;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE chart_accounts SET active = ?, updated_at = ? WHERE code = ?").run(active ? 1 : 0, now, code);
+      appendAuditEvent(this.db, {
+        action: active ? "ACCOUNT_REACTIVATED" : "ACCOUNT_DEACTIVATED",
+        entityId: code,
+        entityType: "chart_account",
+        ...(account.companyId === null ? {} : { companyId: account.companyId }),
+        occurredAt: now,
+        beforeValues: { active: account.active },
+        afterValues: { active },
+      });
+    })();
   }
 
   private getOriginalJournalEntry(invoiceId: string): JournalEntry {

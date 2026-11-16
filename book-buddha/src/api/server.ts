@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
+import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
 import {
   AccountingRepository,
   AuthenticationError,
@@ -74,6 +75,16 @@ const itemPatchInput = z.object({
   reorderThreshold: z.number().int().nonnegative().nullable().optional(),
 });
 const activeInput = z.object({ active: z.boolean() });
+// Chart of accounts (S2-1). No role, no normal side, no cash-view flag: control accounts are the
+// engine's own and the rest is derived from the class.
+const accountInput = z.object({
+  companyId: id,
+  code: z.string().trim().min(2).max(40),
+  name: name,
+  type: z.enum(ACCOUNT_TYPES),
+  parentCode: id.optional(),
+});
+const accountRenameInput = z.object({ name: name });
 const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
@@ -486,6 +497,38 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
 
   app.delete<{ Params: { id: string } }>("/customers/:id", async (request) => {
     repository.deleteCustomer(request.params.id);
+    return { ok: true };
+  });
+
+  app.get<{ Querystring: { companyId?: string; includeInactive?: string } }>("/accounts", async (request) => {
+    const { companyId, includeInactive } = request.query;
+    return repository.listAccounts({
+      ...(companyId === undefined ? {} : { companyId }),
+      ...(activeOnlyQuery(includeInactive) ? { includeInactive: true } : {}),
+    });
+  });
+
+  app.post("/accounts", async (request, reply) => {
+    const input = parseBody(accountInput, request.body);
+    const code = repository.createAccount({
+      companyId: input.companyId,
+      code: input.code,
+      name: input.name,
+      type: input.type,
+      ...(input.parentCode === undefined ? {} : { parentCode: input.parentCode }),
+    });
+    return reply.code(201).send({ code });
+  });
+
+  app.patch<{ Params: { code: string } }>("/accounts/:code", async (request) => {
+    const input = parseBody(accountRenameInput, request.body);
+    repository.renameAccount(request.params.code, input.name);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { code: string } }>("/accounts/:code/active", async (request) => {
+    const input = parseBody(activeInput, request.body);
+    repository.setAccountActive(request.params.code, input.active);
     return { ok: true };
   });
 
