@@ -3,6 +3,7 @@ import { applyBaselineSchema } from "./schema.js";
 import { applyPurchasingExpensesSchema } from "./purchasing-schema.js";
 import { applyJournalDimensionsSchema } from "./journal-dimensions-schema.js";
 import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
+import { applyAttachmentsSchema } from "./attachments-schema.js";
 
 export interface Migration {
   version: number;
@@ -121,6 +122,14 @@ export const migrations: readonly Migration[] = [
     // purchase bills and expenses; journal entries backfilled from their source invoice.
     // Default (transactional) so a failed gate rolls everything back.
     up: applyProjectDimensionSchema,
+  },
+  {
+    version: 7,
+    name: "attachments",
+    // Additive: one new table (plus its index) for document metadata. The files themselves
+    // live on disk outside the database, so nothing here touches existing rows.
+    // Default (transactional) so a failed create rolls back.
+    up: applyAttachmentsSchema,
   },
 ];
 
