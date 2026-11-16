@@ -30,6 +30,10 @@ import type {
 import type { AccountingBasis } from "../accounting/types.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
+import { RepositoryValidationError } from "./errors.js";
+import { postJournalEntry } from "./ledger.js";
+import { appendAuditEvent } from "./audit-log.js";
+import { reportConditions } from "./report-filters-sql.js";
 import type {
   ExpenseCategoryRecord,
   ExpenseInput,
@@ -589,12 +593,7 @@ export function istDateOf(instant: string | Date = new Date()): string {
   return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
-export class RepositoryValidationError extends Error {
-  public constructor(message: string) {
-    super(message);
-    this.name = "RepositoryValidationError";
-  }
-}
+export { RepositoryValidationError };
 
 interface AuthUserRow {
   readonly id: string;
@@ -1946,34 +1945,8 @@ export class AccountingRepository {
     }));
   }
 
-  /**
-   * The columns are nullable in SQLite (migration v5), so the non-null guarantee for every
-   * NEW entry lives here: businessId and entryDate are required and validated.
-   */
   private insertJournalEntry(entry: JournalEntry, dimensions: { businessId: string; entryDate: string; fairId?: string }): void {
-    if (typeof dimensions.businessId !== "string" || dimensions.businessId.trim() === "") {
-      throw new RepositoryValidationError("A journal entry needs a business.");
-    }
-    // The project is OPTIONAL (nullable column): absent means NULL. When given it must be real.
-    if (dimensions.fairId !== undefined) this.assertFairExists(dimensions.fairId);
-    this.assertIsoDate("Journal entry date", dimensions.entryDate);
-    const now = new Date().toISOString();
-    this.db
-      .prepare(
-        "INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type, business_id, entry_date, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(entry.id, entry.sourceId, entry.description, entry.isReversal ? 1 : 0, now, entry.sourceType ?? "INVOICE", dimensions.businessId, dimensions.entryDate, dimensions.fairId ?? null);
-    const statement = this.db.prepare(
-      "INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES (?, ?, ?, ?)",
-    );
-    for (const line of entry.lines) {
-      statement.run(
-        entry.id,
-        line.account,
-        line.debitPaise,
-        line.creditPaise,
-      );
-    }
+    postJournalEntry(this.db, entry, dimensions);
   }
 
   private invoiceTotal(invoice: Invoice): number {
@@ -2189,22 +2162,8 @@ export class AccountingRepository {
     return row.paid_paise;
   }
 
-  /**
-   * WHERE clause (alias `je` = journal_entries) for a report filter, with bound parameters.
-   * No filter at all yields an empty clause, i.e. consolidated and all dates.
-   */
   private reportConditions(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string }): { where: string; params: string[] } {
-    const conditions: string[] = [];
-    const params: string[] = [];
-    if (filter.businessId !== undefined) { conditions.push("je.business_id = ?"); params.push(filter.businessId); }
-    if (filter.fairId !== undefined) { conditions.push("je.fair_id = ?"); params.push(filter.fairId); }
-    if (filter.fromDate !== undefined) { this.assertIsoDate("From date", filter.fromDate); conditions.push("je.entry_date >= ?"); params.push(filter.fromDate); }
-    if (filter.toDate !== undefined) { this.assertIsoDate("To date", filter.toDate); conditions.push("je.entry_date <= ?"); params.push(filter.toDate); }
-    if (filter.asAtDate !== undefined) { this.assertIsoDate("As-at date", filter.asAtDate); conditions.push("je.entry_date <= ?"); params.push(filter.asAtDate); }
-    if (filter.fromDate !== undefined && filter.toDate !== undefined && filter.fromDate > filter.toDate) {
-      throw new RepositoryValidationError("From date cannot be after the to date.");
-    }
-    return { where: conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`, params };
+    return reportConditions(filter);
   }
 
   private getReportAccountRows(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string } = {}): readonly ReportAccountRow[] {
@@ -3353,11 +3312,7 @@ export class AccountingRepository {
   }
 
   private insertAuditEvent(event: AuditEvent): void {
-    this.db
-      .prepare(
-        "INSERT INTO audit_events (action, entity_id, occurred_at) VALUES (?, ?, ?)",
-      )
-      .run(event.action, event.entityId, event.occurredAt);
+    appendAuditEvent(this.db, event);
   }
 
   private getOriginalJournalEntry(invoiceId: string): JournalEntry {

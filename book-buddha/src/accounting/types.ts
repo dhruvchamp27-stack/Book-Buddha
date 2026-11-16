@@ -1,7 +1,10 @@
-export type AccountCode =
-  | "CASH" | "RECEIVABLES" | "SALES" | "INVENTORY" | "COGS"
-  | "OUTPUT_CGST" | "OUTPUT_SGST" | "OUTPUT_IGST"
-  | "PAYABLES" | "INPUT_CGST" | "INPUT_SGST" | "INPUT_IGST" | "EXPENSE";
+/** The one runtime list of valid account codes. The AccountCode type is derived from it. */
+export const ACCOUNT_CODES = [
+  "CASH", "RECEIVABLES", "SALES", "INVENTORY", "COGS",
+  "OUTPUT_CGST", "OUTPUT_SGST", "OUTPUT_IGST",
+  "PAYABLES", "INPUT_CGST", "INPUT_SGST", "INPUT_IGST", "EXPENSE",
+] as const;
+export type AccountCode = (typeof ACCOUNT_CODES)[number];
 export type InvoiceTaxType = "NONE" | "CGST_SGST" | "IGST";
 /**
  * A company's stored reporting preference ONLY. Posting is ALWAYS accrual regardless of this
