@@ -11,6 +11,7 @@ import {
 import { AUDIT_TRIGGER_NAMES } from "./audit-chain-schema.js";
 import { ACCOUNT_CODES } from "../accounting/types.js";
 import { AccountingRepository } from "./repository.js";
+import { postJournalEntry } from "./ledger.js";
 
 /** A database at the schema just BEFORE the chart of accounts (everything up to v8). */
 function preV9Db(): Database.Database {
@@ -298,5 +299,94 @@ describe("reports are classified by the table, not by a hardcoded list", () => {
     db.exec("INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise) VALUES ('je1', 'ORPHAN', 100, 0)");
     expect(() => repository.getBalanceSheet()).toThrow(/ORPHAN/);
     expect(() => repository.getTrialBalance()).toThrow(/chart_accounts/);
+  });
+});
+
+/**
+ * The posting door (ledger.ts) validates against the DATABASE now, not a static code list.
+ * A static list would reject exactly the accounts the user just created, which is the whole
+ * point of the table.
+ */
+describe("the posting door validates against the chart in the database", () => {
+  const entry = (lines: Array<{ account: string; debitPaise: number; creditPaise: number }>, isReversal = false) => ({
+    id: `je-${Math.random().toString(36).slice(2)}`,
+    sourceId: "src1",
+    description: "Test",
+    isReversal,
+    sourceType: "INVOICE" as const,
+    lines,
+  });
+
+  function world(): { db: Database.Database; repository: AccountingRepository; businessId: string; companyId: string } {
+    const repository = new AccountingRepository();
+    const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+    const businessId = repository.createBusiness({ companyId, name: "Business" });
+    return { db: repository.db, repository, businessId, companyId };
+  }
+
+  it("ACCEPTS a posting to an account created at runtime", () => {
+    const { db, businessId } = world();
+    db.exec("INSERT INTO chart_accounts (code, company_id, name, type, active, created_at, updated_at) VALUES ('WORKSHOPS', NULL, 'Workshops', 'INCOME', 1, 't', 't')");
+    expect(() =>
+      postJournalEntry(db, entry([
+        { account: "CASH", debitPaise: 500, creditPaise: 0 },
+        { account: "WORKSHOPS", debitPaise: 0, creditPaise: 500 },
+      ]), { businessId, entryDate: "2026-01-01" }),
+    ).not.toThrow();
+  });
+
+  it("still refuses an account that is in no chart at all", () => {
+    const { db, businessId } = world();
+    expect(() =>
+      postJournalEntry(db, entry([
+        { account: "CASH", debitPaise: 500, creditPaise: 0 },
+        { account: "INVENTED", debitPaise: 0, creditPaise: 500 },
+      ]), { businessId, entryDate: "2026-01-01" }),
+    ).toThrow(/unknown account "INVENTED"/);
+  });
+
+  it("refuses a NEW posting to a deactivated account", () => {
+    const { db, businessId } = world();
+    db.exec("UPDATE chart_accounts SET active = 0 WHERE code = 'OTHER_INCOME'");
+    expect(() =>
+      postJournalEntry(db, entry([
+        { account: "CASH", debitPaise: 500, creditPaise: 0 },
+        { account: "OTHER_INCOME", debitPaise: 0, creditPaise: 500 },
+      ]), { businessId, entryDate: "2026-01-01" }),
+    ).toThrow(/no longer active/);
+  });
+
+  it("but ALLOWS a reversal on a deactivated account, so cancel-with-reversal cannot be blocked", () => {
+    const { db, businessId } = world();
+    db.exec("UPDATE chart_accounts SET active = 0 WHERE code = 'OTHER_INCOME'");
+    expect(() =>
+      postJournalEntry(db, entry([
+        { account: "OTHER_INCOME", debitPaise: 500, creditPaise: 0 },
+        { account: "CASH", debitPaise: 0, creditPaise: 500 },
+      ], true), { businessId, entryDate: "2026-01-01" }),
+    ).not.toThrow();
+  });
+
+  it("refuses an account owned by a DIFFERENT company", () => {
+    const { db, businessId } = world();
+    db.exec("INSERT INTO companies (id, name, created_at) VALUES ('other-co', 'Other', '2026-01-01')");
+    db.exec("INSERT INTO chart_accounts (code, company_id, name, type, active, created_at, updated_at) VALUES ('THEIRS', 'other-co', 'Theirs', 'INCOME', 1, 't', 't')");
+    expect(() =>
+      postJournalEntry(db, entry([
+        { account: "CASH", debitPaise: 500, creditPaise: 0 },
+        { account: "THEIRS", debitPaise: 0, creditPaise: 500 },
+      ]), { businessId, entryDate: "2026-01-01" }),
+    ).toThrow(/another company/);
+  });
+
+  it("accepts an account owned by the POSTING company", () => {
+    const { db, businessId, companyId } = world();
+    db.prepare("INSERT INTO chart_accounts (code, company_id, name, type, active, created_at, updated_at) VALUES ('OURS', ?, 'Ours', 'INCOME', 1, 't', 't')").run(companyId);
+    expect(() =>
+      postJournalEntry(db, entry([
+        { account: "CASH", debitPaise: 500, creditPaise: 0 },
+        { account: "OURS", debitPaise: 0, creditPaise: 500 },
+      ]), { businessId, entryDate: "2026-01-01" }),
+    ).not.toThrow();
   });
 });

@@ -62,7 +62,15 @@ export interface CreditNote {
 }
 
 export interface JournalLine {
-  readonly account: AccountCode;
+  /**
+   * Any code in `chart_accounts`, which the user can extend at runtime (decision S2-1) - so this
+   * CANNOT be the fixed `AccountCode` union: the union would make the accounts the user just
+   * created unpostable at compile time, which is the whole point of the table. Validity is
+   * enforced where it can be: the posting door (ledger.ts) looks the code up in the chart, and
+   * a BEFORE INSERT trigger backs it up inside the database on every connection.
+   * `AccountCode` stays as the typed set of codes the posting ENGINE itself emits.
+   */
+  readonly account: string;
   readonly debitPaise: number;
   readonly creditPaise: number;
 }

@@ -1,11 +1,16 @@
 import type Database from "better-sqlite3";
-import { ACCOUNT_CODES } from "../accounting/types.js";
 import type { JournalEntry } from "../accounting/types.js";
 import { isValidIsoDate } from "../accounting/recurrence.js";
 import { AccountingError } from "../accounting/engine.js";
 import { RepositoryValidationError } from "./errors.js";
 
-const KNOWN_ACCOUNTS: ReadonlySet<string> = new Set(ACCOUNT_CODES);
+/**
+ * What the door knows about an account, read from chart_accounts (decision S2-1). The door no
+ * longer consults the static ACCOUNT_CODES set: accounts are created at RUNTIME, so a static
+ * list would reject exactly the accounts the user just made. ACCOUNT_CODES remains the typed
+ * union of the codes the POSTING ENGINE emits itself, which is a different and smaller thing.
+ */
+type AccountRow = { code: string; active: number; company_id: string | null };
 
 /**
  * The ONLY door through which journal entries are written (enforced by single-writer.test.ts).
@@ -34,11 +39,33 @@ export function postJournalEntry(
     throw new RepositoryValidationError("Journal entry date must be a real date written as YYYY-MM-DD.");
   }
 
+  // The company this entry belongs to, for scoping accounts that belong to one company.
+  const company = db
+    .prepare("SELECT company_id FROM businesses WHERE id = ?")
+    .get(dims.businessId) as { company_id: string } | undefined;
+  const lookupAccount = db.prepare("SELECT code, active, company_id FROM chart_accounts WHERE code = ?");
+
   let debitTotal = 0;
   let creditTotal = 0;
   for (const line of entry.lines) {
-    if (!KNOWN_ACCOUNTS.has(line.account)) {
+    const account = lookupAccount.get(line.account) as AccountRow | undefined;
+    if (account === undefined) {
       throw new AccountingError(`Journal entry ${entry.id} uses unknown account "${line.account}".`);
+    }
+    // A company-owned account can only be posted to by that company; system accounts
+    // (company_id NULL) are shared by all of them.
+    if (account.company_id !== null && company !== undefined && account.company_id !== company.company_id) {
+      throw new AccountingError(
+        `Journal entry ${entry.id} uses account "${line.account}", which belongs to another company.`,
+      );
+    }
+    // A deactivated account takes no NEW postings. A reversal is exempt: cancelling an old
+    // document must always be possible, even after its account was retired — which is also why
+    // the database trigger checks existence only and leaves this rule to the door.
+    if (account.active === 0 && !entry.isReversal) {
+      throw new AccountingError(
+        `Journal entry ${entry.id} uses account "${line.account}", which is no longer active. Reactivate it, or pick another account.`,
+      );
     }
     const validAmounts = Number.isInteger(line.debitPaise) && Number.isInteger(line.creditPaise)
       && line.debitPaise >= 0 && line.creditPaise >= 0
