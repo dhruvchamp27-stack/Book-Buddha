@@ -31,7 +31,7 @@ import type { AccountingBasis } from "../accounting/types.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
 import { RepositoryValidationError } from "./errors.js";
-import { postJournalEntry } from "./ledger.js";
+import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { reportConditions } from "./report-filters-sql.js";
 import { ACCOUNT_TYPES, SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
@@ -368,6 +368,16 @@ export interface ReportAccountRow {
   readonly debitPaise: number;
   readonly creditPaise: number;
   readonly balancePaise: number;
+}
+
+/** A financial year for one business, and whether it is closed to new postings. */
+export interface FinancialYear {
+  readonly id: string;
+  readonly businessId: string;
+  readonly startsOn: string;
+  readonly endsOn: string;
+  readonly status: "OPEN" | "LOCKED";
+  readonly lockedAt: string | null;
 }
 
 /** An account in the chart. `system` accounts are the engine's own, shared by every company. */
@@ -3416,6 +3426,117 @@ export class AccountingRepository {
 
   private insertAuditEvent(event: AuditEvent): void {
     appendAuditEvent(this.db, event);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Financial years and the period lock (CLAUDE_FINISHING_PLAN.md section 19).
+  // The lock is ENFORCED in the posting door (ledger.ts), which is the only writer of journal
+  // entries. These methods only define the periods and flip their state.
+  // ---------------------------------------------------------------------------
+
+  public listFinancialYears(businessId: string): readonly FinancialYear[] {
+    const rows = this.db
+      .prepare(
+        "SELECT id, business_id, starts_on, ends_on, status, locked_at FROM financial_years WHERE business_id = ? ORDER BY starts_on",
+      )
+      .all(businessId) as Array<{
+      id: string; business_id: string; starts_on: string; ends_on: string;
+      status: "OPEN" | "LOCKED"; locked_at: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      businessId: row.business_id,
+      startsOn: row.starts_on,
+      endsOn: row.ends_on,
+      status: row.status,
+      lockedAt: row.locked_at,
+    }));
+  }
+
+  public createFinancialYear(input: { businessId: string; startsOn: string; endsOn: string; id?: string }): string {
+    this.requireBusiness(input.businessId);
+    for (const [label, date] of [["start", input.startsOn], ["end", input.endsOn]] as const) {
+      if (!isValidIsoDate(date)) {
+        throw new RepositoryValidationError(`A financial year ${label} date must be a real date written as YYYY-MM-DD.`);
+      }
+    }
+    if (input.endsOn < input.startsOn) {
+      throw new RepositoryValidationError("A financial year cannot end before it starts.");
+    }
+    // Overlapping years would make "which year is this date in" ambiguous, and the lock with it.
+    const clash = this.db
+      .prepare(
+        `SELECT starts_on, ends_on FROM financial_years
+          WHERE business_id = ? AND starts_on <= ? AND ends_on >= ? LIMIT 1`,
+      )
+      .get(input.businessId, input.endsOn, input.startsOn) as { starts_on: string; ends_on: string } | undefined;
+    if (clash !== undefined) {
+      throw new RepositoryValidationError(
+        `That period overlaps the financial year ${clash.starts_on} to ${clash.ends_on}.`,
+      );
+    }
+    const id = input.id ?? randomUUID();
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO financial_years (id, business_id, starts_on, ends_on, status, locked_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'OPEN', NULL, ?, ?)",
+        )
+        .run(id, input.businessId, input.startsOn, input.endsOn, now, now);
+      appendAuditEvent(this.db, {
+        action: "FINANCIAL_YEAR_CREATED",
+        entityId: id,
+        entityType: "financial_year",
+        occurredAt: now,
+        afterValues: { businessId: input.businessId, startsOn: input.startsOn, endsOn: input.endsOn, status: "OPEN" },
+      });
+    })();
+    return id;
+  }
+
+  /**
+   * Locks or reopens a year. Reopening is deliberately POSSIBLE but loudly audited: section 19
+   * wants corrections to need controlled permissions, and phase 1 has exactly one Admin, so the
+   * honest implementation is an audited reopen rather than a door that cannot be opened at all.
+   */
+  public setFinancialYearLocked(id: string, locked: boolean, reason?: string): void {
+    const year = this.db
+      .prepare("SELECT id, business_id, starts_on, ends_on, status FROM financial_years WHERE id = ?")
+      .get(id) as { id: string; business_id: string; starts_on: string; ends_on: string; status: "OPEN" | "LOCKED" } | undefined;
+    if (year === undefined) throw new RepositoryValidationError(`Financial year ${id} was not found.`);
+    const wanted = locked ? "LOCKED" : "OPEN";
+    if (year.status === wanted) return;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE financial_years SET status = ?, locked_at = ?, updated_at = ? WHERE id = ?")
+        .run(wanted, locked ? now : null, now, id);
+      appendAuditEvent(this.db, {
+        action: locked ? "FINANCIAL_YEAR_LOCKED" : "FINANCIAL_YEAR_REOPENED",
+        entityId: id,
+        entityType: "financial_year",
+        occurredAt: now,
+        ...(reason === undefined ? {} : { reason }),
+        beforeValues: { status: year.status },
+        afterValues: { status: wanted, startsOn: year.starts_on, endsOn: year.ends_on },
+      });
+    })();
+  }
+
+  /** True when this business could post an entry dated `date` - i.e. no locked year covers it. */
+  public isPeriodOpen(businessId: string, date: string): boolean {
+    try {
+      assertPeriodOpen(this.db, businessId, date);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private requireBusiness(businessId: string): void {
+    if (this.db.prepare("SELECT 1 FROM businesses WHERE id = ?").get(businessId) === undefined) {
+      throw new RepositoryValidationError(`Business ${businessId} was not found.`);
+    }
   }
 
   // ---------------------------------------------------------------------------

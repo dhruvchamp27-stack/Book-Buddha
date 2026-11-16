@@ -13,6 +13,39 @@ import { RepositoryValidationError } from "./errors.js";
 type AccountRow = { code: string; active: number; company_id: string | null };
 
 /**
+ * Once a database is seen to have financial_years it always will, so only the positive answer is
+ * cached (the same pattern audit-log.ts uses for its chain columns). A database migrated later is
+ * simply re-checked. Without this, the door could not be used on a part-migrated database.
+ */
+const financialYearsReady = new WeakSet<Database.Database>();
+
+function hasFinancialYears(db: Database.Database): boolean {
+  if (financialYearsReady.has(db)) return true;
+  const present = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'financial_years'")
+    .get() !== undefined;
+  if (present) financialYearsReady.add(db);
+  return present;
+}
+
+/** Throws when `entryDate` falls inside a LOCKED financial year for this business. */
+export function assertPeriodOpen(db: Database.Database, businessId: string, entryDate: string): void {
+  if (!hasFinancialYears(db)) return;
+  const locked = db
+    .prepare(
+      `SELECT starts_on, ends_on FROM financial_years
+        WHERE business_id = ? AND status = 'LOCKED' AND ? BETWEEN starts_on AND ends_on
+        LIMIT 1`,
+    )
+    .get(businessId, entryDate) as { starts_on: string; ends_on: string } | undefined;
+  if (locked !== undefined) {
+    throw new RepositoryValidationError(
+      `The financial year ${locked.starts_on} to ${locked.ends_on} is locked, so nothing can be posted dated ${entryDate}. Reopen the year, or date the entry in an open period.`,
+    );
+  }
+}
+
+/**
  * The ONLY door through which journal entries are written (enforced by single-writer.test.ts).
  * Asserts, before any write, that the entry balances and every line is well-formed, so no
  * caller can persist an unbalanced journal. The columns are nullable in SQLite (migration v5),
@@ -84,8 +117,12 @@ export function postJournalEntry(
     );
   }
 
-  // EXTENSION POINT (financial-year lock): a later slice rejects the post here when
-  // dims.entryDate falls inside a locked financial year. Not implemented yet.
+  // FINANCIAL-YEAR LOCK. This is the extension point the one-door commit left here, and the door
+  // is the only place a journal entry is written, so no route can post into a closed year.
+  // There is deliberately NO reversal exemption: every reversal in this codebase is dated the day
+  // it happens, never the original document's date, so cancelling a document in a locked year
+  // posts its reversal into the CURRENT open period and is unaffected.
+  assertPeriodOpen(db, dims.businessId, dims.entryDate);
 
   const now = new Date().toISOString();
   db.prepare(

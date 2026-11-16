@@ -6,6 +6,7 @@ import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 import { applyAttachmentsSchema } from "./attachments-schema.js";
 import { applyAuditChainSchema } from "./audit-chain-schema.js";
 import { applyChartOfAccountsSchema } from "./chart-accounts-schema.js";
+import { applyFinancialYearsSchema } from "./financial-years-schema.js";
 
 export interface Migration {
   version: number;
@@ -150,6 +151,13 @@ export const migrations: readonly Migration[] = [
     // rebuild needs PRAGMA foreign_keys = OFF (a no-op inside a transaction), so it manages its own.
     transactional: false,
     up: applyChartOfAccountsSchema,
+  },
+  {
+    version: 10,
+    name: "financial_years",
+    // Additive: one new table (plus its indexes) for financial years and their lock state.
+    // Nothing existing is touched. Default (transactional) so a failed create rolls back.
+    up: applyFinancialYearsSchema,
   },
 ];
 

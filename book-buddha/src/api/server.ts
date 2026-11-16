@@ -85,6 +85,9 @@ const accountInput = z.object({
   parentCode: id.optional(),
 });
 const accountRenameInput = z.object({ name: name });
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be a date written as YYYY-MM-DD");
+const financialYearInput = z.object({ businessId: id, startsOn: isoDate, endsOn: isoDate });
+const lockInput = z.object({ locked: z.boolean(), reason: z.string().trim().min(1).optional() });
 const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
@@ -497,6 +500,24 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
 
   app.delete<{ Params: { id: string } }>("/customers/:id", async (request) => {
     repository.deleteCustomer(request.params.id);
+    return { ok: true };
+  });
+
+  app.get<{ Querystring: { businessId?: string } }>("/financial-years", async (request) => {
+    const businessId = request.query.businessId;
+    if (businessId === undefined) throw new RepositoryValidationError("businessId is required.");
+    return repository.listFinancialYears(businessId);
+  });
+
+  app.post("/financial-years", async (request, reply) => {
+    const input = parseBody(financialYearInput, request.body);
+    const yearId = repository.createFinancialYear(input);
+    return reply.code(201).send({ id: yearId });
+  });
+
+  app.post<{ Params: { id: string } }>("/financial-years/:id/lock", async (request) => {
+    const input = parseBody(lockInput, request.body);
+    repository.setFinancialYearLocked(request.params.id, input.locked, input.reason);
     return { ok: true };
   });
 
