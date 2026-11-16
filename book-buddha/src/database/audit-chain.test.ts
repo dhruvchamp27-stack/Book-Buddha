@@ -344,3 +344,53 @@ describe("append-only triggers", () => {
     expect(() => db.exec("UPDATE journal_entries SET description = 'x'")).toThrow(/immutable/);
   });
 });
+
+/**
+ * The regression guard for the real defect: every test above builds its database by calling
+ * applyAuditChainSchema directly, so all 26 of them passed while the schema was NEVER registered
+ * in the migrations list and the hardening was inert in the shipped app. These tests go through
+ * the ordinary migration path only, exactly as the app bootstrap does.
+ */
+describe("audit hardening is wired into the migration path", () => {
+  const migrated = (): Database.Database => {
+    const db = new Database(":memory:");
+    runMigrations(db);
+    return db;
+  };
+
+  it("runMigrations alone installs the chain columns and every guard trigger", () => {
+    const db = migrated();
+    const cols = (db.prepare("PRAGMA table_info(audit_events)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain("prev_hash");
+    expect(cols).toContain("hash");
+    const installed = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all() as Array<{ name: string }>)
+      .map((t) => t.name);
+    for (const name of AUDIT_TRIGGER_NAMES) expect(installed).toContain(name);
+  });
+
+  it("events appended to a plainly migrated database are chained and verify", () => {
+    const db = migrated();
+    seed(db, 3);
+    expect(verifyAuditChain(db)).toMatchObject({ ok: true, checked: 3 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE hash IS NULL").get()).toEqual({ n: 0 });
+  });
+
+  it("a plainly migrated database refuses to delete or rewrite journal history", () => {
+    const db = migrated();
+    seed(db, 1);
+    // A row trigger needs a row to fire on, and these journal rows have no invoice behind them.
+    db.pragma("foreign_keys = OFF");
+    db.exec(`
+      INSERT INTO journal_entries (id, source_id, description, is_reversal, created_at, source_type, business_id, entry_date)
+        VALUES ('je1', 'inv1', 'Invoice', 0, '2026-01-01', 'INVOICE', 'b1', '2026-01-01');
+      INSERT INTO journal_lines (journal_entry_id, account, debit_paise, credit_paise)
+        VALUES ('je1', 'CASH', 100, 0), ('je1', 'SALES', 0, 100);
+    `);
+    expect(() => db.exec("DELETE FROM audit_events")).toThrow(/append-only/);
+    expect(() => db.exec("UPDATE audit_events SET action = 'forged'")).toThrow(/append-only/);
+    expect(() => db.exec("DELETE FROM journal_entries")).toThrow(/immutable/);
+    expect(() => db.exec("DELETE FROM journal_lines")).toThrow(/immutable/);
+    expect(() => db.exec("UPDATE journal_lines SET debit_paise = 999")).toThrow(/immutable/);
+    expect(() => db.exec("UPDATE journal_entries SET entry_date = '2030-01-01'")).toThrow(/immutable/);
+  });
+});

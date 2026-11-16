@@ -4,6 +4,7 @@ import { applyPurchasingExpensesSchema } from "./purchasing-schema.js";
 import { applyJournalDimensionsSchema } from "./journal-dimensions-schema.js";
 import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 import { applyAttachmentsSchema } from "./attachments-schema.js";
+import { applyAuditChainSchema } from "./audit-chain-schema.js";
 
 export interface Migration {
   version: number;
@@ -130,6 +131,15 @@ export const migrations: readonly Migration[] = [
     // live on disk outside the database, so nothing here touches existing rows.
     // Default (transactional) so a failed create rolls back.
     up: applyAttachmentsSchema,
+  },
+  {
+    version: 8,
+    name: "audit_hardening",
+    // Additive: ALTER TABLE ADD COLUMN for the section-20 audit fields plus the hash-chain
+    // columns, a backfill of the chain over existing rows, and the append-only / immutability
+    // triggers. Never a table rebuild, so no cascade-delete hazard.
+    // Default (transactional) so a failed backfill rolls the whole thing back.
+    up: applyAuditChainSchema,
   },
 ];
 
