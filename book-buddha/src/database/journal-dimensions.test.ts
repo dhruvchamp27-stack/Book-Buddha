@@ -4,6 +4,10 @@ import { migrations, runMigrations } from "./migrations.js";
 
 const upTo4 = migrations.filter((m) => m.version <= 4);
 
+/** Every version after v, derived from the list: 'upgrading a vN database applies the rest'.
+ *  Adding a migration must never require editing a literal here. */
+const versionsAfter = (v: number): number[] => migrations.filter((m) => m.version > v).map((m) => m.version);
+
 /** Every version the app ships, derived from the list: a new migration must not require a test edit.
  *  NOTE: the partial lists below ([1..4], [1..5]) are deliberate historical states and stay literal. */
 const allVersions = migrations.map((m) => m.version);
@@ -88,7 +92,7 @@ describe("migration v5: journal business_id and entry_date", () => {
 
     const entriesBefore = db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get();
     const linesBefore = db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get();
-    expect(runMigrations(db)).toEqual([5, 6]);
+    expect(runMigrations(db)).toEqual(versionsAfter(4));
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()).toEqual(entriesBefore);
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get()).toEqual(linesBefore);
 
@@ -185,7 +189,7 @@ describe("migration v5: journal business_id and entry_date", () => {
     seedParties(db);
     addInvoice(db, "inv1", "bizA", "2026-01-10", "2026-01-10T00:00:00.000Z");
     addEntry(db, "je-inv1", "inv1", "INVOICE");
-    expect(runMigrations(db)).toEqual([5, 6]);
+    expect(runMigrations(db)).toEqual(versionsAfter(4));
     const snapshot = db.prepare("SELECT * FROM journal_entries ORDER BY id").all();
     expect(runMigrations(db)).toEqual([]);
     // Body re-run directly (columns already exist) must not error or change anything.

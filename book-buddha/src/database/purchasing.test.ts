@@ -4,6 +4,10 @@ import { AccountingRepository, RepositoryValidationError } from "./repository.js
 import { migrations, runMigrations } from "./migrations.js";
 import type { Invoice } from "../accounting/types.js";
 
+/** Every version after v, derived from the list: 'upgrading a vN database applies the rest'.
+ *  Adding a migration must never require editing a literal here. */
+const versionsAfter = (v: number): number[] => migrations.filter((m) => m.version > v).map((m) => m.version);
+
 interface World {
   repository: AccountingRepository;
   companyId: string;
@@ -483,7 +487,7 @@ describe("migration v4", () => {
       CREATE TRIGGER no_delete_entries BEFORE DELETE ON journal_entries BEGIN SELECT RAISE(ABORT, 'immutable'); END;
     `);
 
-    expect(runMigrations(db)).toEqual([4, 5, 6]);
+    expect(runMigrations(db)).toEqual(versionsAfter(3));
 
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(db.pragma("foreign_key_check")).toEqual([]);

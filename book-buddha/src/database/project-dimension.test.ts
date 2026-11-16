@@ -5,6 +5,10 @@ import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 
 const upTo5 = migrations.filter((m) => m.version <= 5);
 
+/** Every version after v, derived from the list: 'upgrading a vN database applies the rest'.
+ *  Adding a migration must never require editing a literal here. */
+const versionsAfter = (v: number): number[] => migrations.filter((m) => m.version > v).map((m) => m.version);
+
 /** Every version the app ships, derived from the list: a new migration must not require a test edit.
  *  NOTE: the partial lists below ([1..4], [1..5]) are deliberate historical states and stay literal. */
 const allVersions = migrations.map((m) => m.version);
@@ -84,7 +88,7 @@ describe("migration v6: project (fair) dimension", () => {
     const entriesBefore = db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get();
     const linesBefore = db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get();
 
-    expect(runMigrations(db)).toEqual([6]);
+    expect(runMigrations(db)).toEqual(versionsAfter(5));
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()).toEqual(entriesBefore);
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get()).toEqual(linesBefore);
     expect(ids).toHaveLength(7);
@@ -145,7 +149,7 @@ describe("migration v6: project (fair) dimension", () => {
     seedParties(db);
     addInvoice(db, "inv1", "fairA");
     addInvoiceEntries(db, "inv1", "1");
-    expect(runMigrations(db)).toEqual([6]);
+    expect(runMigrations(db)).toEqual(versionsAfter(5));
     const snapshot = db.prepare("SELECT * FROM journal_entries ORDER BY id").all();
     expect(runMigrations(db)).toEqual([]);
     expect(() => migrations.find((m) => m.version === 6)?.up(db)).not.toThrow();
