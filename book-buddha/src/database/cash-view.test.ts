@@ -358,7 +358,7 @@ describe("cash view: documents paid at once and reversals", () => {
   });
 });
 
-describe("cash view: credit notes (current behaviour, pinned; owner decision pending)", () => {
+describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirmed)", () => {
   // The uniform rule folds a credit note's lines into its invoice's lines. No refund is modelled.
   function creditNote(w: World, id: string): void {
     w.repository.saveCreditNote({
@@ -368,7 +368,19 @@ describe("cash view: credit notes (current behaviour, pinned; owner decision pen
     w.repository.finalizeCreditNote(id);
   }
 
-  it("a note raised before collection is recognised pro rata with later collections (against the ORIGINAL invoice total)", () => {
+  /**
+   * S2-2: a credit note RE-BASES the remainder. The denominator is what the customer is actually
+   * being asked to pay - the invoice LESS its credit notes - not the original bill.
+   *
+   * FIGURES CHANGED HERE by that decision (owner to confirm):
+   *   income    400000 -> 500000
+   *   expenses  240000 -> 300000
+   *   GST        72000 ->  90000
+   * The invoice is 1,180,000 with a 236,000 note, so 944,000 is owed; 590,000 of that is 62.5%,
+   * and 62.5% of the net lines (800,000 / 480,000 / 144,000) gives the new figures. The old
+   * denominator was the original 1,180,000, making the share 50%.
+   */
+  it("a note before collection re-bases the remainder: later collections measure against what is OWED", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();
@@ -376,12 +388,50 @@ describe("cash view: credit notes (current behaviour, pinned; owner decision pen
       ownerInvoice(w, "INV-1", "2026-01-10");
       creditNote(w, "CN-1"); // 2 units back: SALES -200000, GST -36000, COGS -120000
       at("2026-01-20T06:00:00.000Z");
-      w.repository.recordPayment("INV-1", 590000); // half of the original 1,180,000
+      w.repository.recordPayment("INV-1", 590000); // 62.5% of the 944,000 now owed
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       expect(accrual).toMatchObject({ totalIncomePaise: 800000, totalExpensesPaise: 480000, gstOnSalesPaise: 144000 });
       const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
-      // Half of the net-of-note lines. Gross stays the cash actually received, so it no longer equals net + GST.
-      expect(cash).toMatchObject({ totalIncomePaise: 400000, totalExpensesPaise: 240000, gstOnSalesPaise: 72000, grossSalesPaise: 590000 });
+      // Gross stays the cash actually received, so it no longer equals net + GST.
+      expect(cash).toMatchObject({ totalIncomePaise: 500000, totalExpensesPaise: 300000, gstOnSalesPaise: 90000, grossSalesPaise: 590000 });
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  /**
+   * The property that makes the re-basing right, and the one the old denominator could never
+   * satisfy: once the customer has paid everything they owe, the cash view must equal the accrual
+   * view. Against the original bill, settling the net 944,000 of a 1,180,000 invoice gave only
+   * 80% of the net lines - 640,000 of income against an accrual 800,000 - and the gap never
+   * closed, no matter how much was collected.
+   */
+  it("CONVERGES: settling the re-based balance in full lands exactly on the accrual figures", () => {
+    vi.useFakeTimers();
+    at("2026-01-10T06:00:00.000Z");
+    const w = world();
+    try {
+      ownerInvoice(w, "INV-1", "2026-01-10");
+      creditNote(w, "CN-1");
+      at("2026-01-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-1", 590000);
+      at("2026-02-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-1", 354000); // the rest of the 944,000 owed
+      // Nothing is left to pay, and nothing further may be paid.
+      expect(() => w.repository.recordPayment("INV-1", 1)).toThrow(/outstanding balance of 0 paise/);
+
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(cash.totalIncomePaise).toBe(accrual.totalIncomePaise);
+      expect(cash.totalExpensesPaise).toBe(accrual.totalExpensesPaise);
+      expect(cash.gstOnSalesPaise).toBe(accrual.gstOnSalesPaise);
+      expect(cash.netProfitPaise).toBe(accrual.netProfitPaise);
+      // And the recognition is split across the two collection months, never dated to the note.
+      const jan = w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
+      const feb = w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" });
+      expect(jan.totalIncomePaise + feb.totalIncomePaise).toBe(accrual.totalIncomePaise);
+      expect(jan.totalIncomePaise).toBe(500000);
+      expect(feb.totalIncomePaise).toBe(300000);
     } finally {
       w.repository.close();
     }

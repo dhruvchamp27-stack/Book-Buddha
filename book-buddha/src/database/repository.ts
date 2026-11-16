@@ -1910,7 +1910,24 @@ export class AccountingRepository {
     const businessParams = [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.fairId === undefined ? [] : [filter.fairId])];
     const documents: Array<{ type: "INVOICE" | "PURCHASE_BILL" | "EXPENSE"; id: string; paidAtOnce: boolean; totalPaise: () => number }> = [];
     for (const row of this.db.prepare(`SELECT id, payment_account FROM invoices WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
-      documents.push({ type: "INVOICE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.invoiceTotal(this.getInvoice(row.id)) });
+      // Decision S2-2: a credit note RE-BASES the remainder. The denominator is what the customer
+      // is actually being asked to pay - the invoice less its credit notes - not the original
+      // bill. Against the original bill the cash view never converges on the accrual figure: a
+      // fully settled, part-credited invoice recognised only (net lines x net/original), always
+      // short. Re-based, paying the net amount in full recognises the net lines exactly.
+      //
+      // This is only safe because a credit note can no longer exceed what is still unpaid (R3),
+      // so a note can never invalidate a payment already recognised in a closed month - which is
+      // precisely what S1-6 forbids.
+      documents.push({
+        type: "INVOICE",
+        id: row.id,
+        paidAtOnce: row.payment_account === "CASH",
+        totalPaise: () => {
+          const invoice = this.getInvoice(row.id);
+          return this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice);
+        },
+      });
     }
     for (const row of this.db.prepare(`SELECT id, payment_account FROM purchase_bills WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
       documents.push({ type: "PURCHASE_BILL", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.getPurchaseBill(row.id).totalPaise });
