@@ -4,6 +4,10 @@ import { migrations, runMigrations } from "./migrations.js";
 
 const upTo4 = migrations.filter((m) => m.version <= 4);
 
+/** Every version the app ships, derived from the list: a new migration must not require a test edit.
+ *  NOTE: the partial lists below ([1..4], [1..5]) are deliberate historical states and stay literal. */
+const allVersions = migrations.map((m) => m.version);
+
 /** A database at schema v4 (before journal_entries had business_id / entry_date). */
 function dbAtV4(): Database.Database {
   const db = new Database(":memory:");
@@ -51,7 +55,7 @@ function columns(db: Database.Database): string[] {
 describe("migration v5: journal business_id and entry_date", () => {
   it("runs clean on a fresh database and adds both columns", () => {
     const db = new Database(":memory:");
-    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(runMigrations(db)).toEqual(allVersions);
     expect(columns(db)).toEqual(expect.arrayContaining(["business_id", "entry_date"]));
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()).toEqual({ n: 0 });
   });

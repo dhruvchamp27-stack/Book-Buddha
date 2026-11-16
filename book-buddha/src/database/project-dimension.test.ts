@@ -4,6 +4,10 @@ import { migrations, runMigrations } from "./migrations.js";
 import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 
 const upTo5 = migrations.filter((m) => m.version <= 5);
+
+/** Every version the app ships, derived from the list: a new migration must not require a test edit.
+ *  NOTE: the partial lists below ([1..4], [1..5]) are deliberate historical states and stay literal. */
+const allVersions = migrations.map((m) => m.version);
 const TABLES = ["journal_entries", "stock_movements", "purchase_bills", "expenses"];
 
 /** A database at schema v5 (before any record had a fair_id on the journal/stock/bill/expense tables). */
@@ -67,7 +71,7 @@ function versions(db: Database.Database): number[] {
 describe("migration v6: project (fair) dimension", () => {
   it("runs clean on a fresh database and adds fair_id to all four tables", () => {
     const db = new Database(":memory:");
-    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(runMigrations(db)).toEqual(allVersions);
     for (const table of TABLES) expect(columns(db, table), table).toContain("fair_id");
     expect(db.prepare("SELECT COUNT(*) AS n FROM journal_entries").get()).toEqual({ n: 0 });
   });
@@ -183,7 +187,7 @@ describe("migration v6: project (fair) dimension", () => {
     db.prepare("INSERT INTO purchase_bills (id, business_id, supplier_id, number, bill_date, payment_account, status, created_at) VALUES ('bill1', 'biz', 'sup', 'B9', '2026-02-14', 'PAYABLES', 'FINALIZED', '2026-02-15T00:00:00.000Z')").run();
     addEntry(db, "je-bill-bill1", "bill1", "PURCHASE_BILL");
     runMigrations(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions(db)).toEqual(allVersions);
 
     // Slice 8b onwards: bills legitimately carry a fair, and so do their journal entries.
     db.exec("UPDATE purchase_bills SET fair_id = 'fairA' WHERE id = 'bill1'");

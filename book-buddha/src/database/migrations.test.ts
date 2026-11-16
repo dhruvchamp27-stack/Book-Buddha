@@ -6,19 +6,23 @@ import { applyBaselineSchema } from "./schema.js";
 const versions = (db: Database.Database) =>
   (db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>).map((r) => r.version);
 
+/** Every version the app ships, derived from the list itself: adding a migration must never
+ *  require editing a literal in a test. */
+const allVersions = migrations.map((m) => m.version);
+
 describe("migrations", () => {
   it("fresh DB migrates to latest and records all versions", () => {
     const db = new Database(":memory:");
     runMigrations(db);
-    expect(versions(db)).toEqual(migrations.map((m) => m.version));
+    expect(versions(db)).toEqual(allVersions);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'invoices'").get()).toBeDefined();
   });
 
   it("running twice is a no-op", () => {
     const db = new Database(":memory:");
-    expect(runMigrations(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(runMigrations(db)).toEqual(allVersions);
     expect(runMigrations(db)).toEqual([]);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions(db)).toEqual(allVersions);
   });
 
   it("migration v2 creates the auth tables", () => {
@@ -38,7 +42,7 @@ describe("migrations", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'schema_migrations'").get()).toBeUndefined();
     runMigrations(db);
     expect(db.prepare("SELECT name FROM companies WHERE id = 'c1'").get()).toEqual({ name: "Old Co" });
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions(db)).toEqual(allVersions);
   });
 
   it("runs migrations in version order, logs them, and rolls back a failing one", () => {
