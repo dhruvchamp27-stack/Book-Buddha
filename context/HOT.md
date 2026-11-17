@@ -1,35 +1,35 @@
 # HOT — Book Buddha
 
 ## Last session
-2026-11-17 (session 8), branch `autonomous/book-buddha-finish`, tip `6ad504c`. **R5 DONE, R7b
-DONE, R8 ONE QUARTER DONE.** Rulings **S8-1..S8-4**. **EVERY commit here is unpushed — count with
+2026-11-17 (session 8), branch `autonomous/book-buddha-finish`, tip `f4773ab`. **R5 DONE, R7b
+PARTIAL, R8 ONE OF FOUR.** Rulings **S8-1..S8-4**. **EVERY commit here is unpushed — count with
 `git log --oneline @{u}..HEAD | wc -l`; only the owner's terminal can push.**
-Gates: **486/486 vitest, 41 files, tsc clean (unpiped), vite build clean, web tsc clean.**
+Gates: **487/487 vitest, 41 files, tsc clean (unpiped), vite build clean, web tsc clean.**
 
 ## What session 8 did
 1. **`e945a7f`** — deleted the "Offline-first accounting" tag (3 sites). Screenshotted.
-2. **`a89f7fc` + `9ede5e4` — R5-rem.** Retained earnings split at the FY boundary, **added as a
-   new `retainedEarnings` field, NOT replacing the derived row** (chart-accounts.test pins that
-   row). One cut at the FY start; the upper bound mirrors the sheet's own, so the two parts
-   partition exactly. No business / no FY / uncovered date → `split: null` + a plain reason.
-   On screen with a Year-close card. Live proof: 15,000 = 3,000 b/f + 12,000 for the year.
+2. **`a89f7fc` + `9ede5e4` — R5-rem.** Retained earnings split at the FY boundary, **a new
+   `retainedEarnings` field, NOT replacing the derived row** (chart-accounts.test pins it). One
+   cut at the FY start, upper bound mirrors the sheet's, so the parts partition exactly. No
+   business / no FY / uncovered date → `split: null` + a reason. Live: 15,000 = 3,000 + 12,000.
 3. **`0797270` — R7b wiring.** `reports-sales.ts` + `reports-transactions.ts` had NO caller
-   outside their tests; 9 repository methods + 9 routes now reach them. **`GeneralLedgerRow.date`
-   → `postedAt` (S8-3)**; the ledger shows `entryDate`.
+   outside their tests; 9 methods + 9 routes reach them. **`.date` → `postedAt` (S8-3)**.
 4. **`a2758de` + `1af0dc2` — R7b ageing.** `/reports/receivables-ageing`, `/payables-ageing`,
    0-30/31-60/61-90/90+, off the SAME open-items query. `getReceivables`/`getPayables` gained
    businessId/party/asAtDate and no longer age off the wall clock (**S8-2**).
-5. **`6ad504c` — R8 payment cancellation, migration v17.** `cancelled_at` on `payments` +
-   `supplier_payments`; reversal = the posted entry's lines FLIPPED, dated today. **Closed a real
-   dead end:** a paid invoice refused cancellation and the payment could not be undone. **S8-1.**
+5. **`6ad504c` + `f4773ab` — R8 payment cancellation, migration v17.** `cancelled_at` on
+   `payments` + `supplier_payments`; reversal = the posted entry's lines FLIPPED, dated today.
+   **Closed a real dead end** (a paid invoice refused cancellation and the payment could not be
+   undone) and then two holes it opened: **SALES could end on a DEBIT balance**, and the supplier
+   statement kept counting a cancelled payment. **S8-1.** Proved live on a real v16→v17 upgrade.
 
 ## NEXT STEP — in this order
 1. **Finish R8:** bill discount (header-level, own migration **v18**) · supplier refunds ·
    **purchase returns are BLOCKED on S7-2** — they take stock out and a movement still cannot be
    reversed or entered negative. Put S7-2 to the owner first.
-2. **R7b leftovers:** `/reports/fair-sales` and `/reports/sales-by-item` still ignore credit
-   notes, so fair-sales says 60,000 where the new `/reports/sales-by-fair` says 40,000 —
-   **two routes, two answers.** Also `getSupplierStatement` exists with no customer equivalent.
+2. **R7b leftovers:** `/reports/fair-sales` + `/reports/sales-by-item` ignore credit notes —
+   fair-sales says 60,000 where `/reports/sales-by-fair` says 40,000: **two routes, two
+   answers.** No customer equivalent of `getSupplierStatement`.
 3. **R10** import-export · R11 backup · R12 banking · R13 cash flow · R14 archive.
 
 ## Owner action / carried
