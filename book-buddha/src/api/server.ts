@@ -96,6 +96,17 @@ const openingBalanceInput = z.object({
     .min(1),
 });
 const openingBalanceReverseInput = z.object({ reversedOn: isoDate });
+const openingCustomerBalanceInput = z.object({
+  businessId: id,
+  customerId: id,
+  asAt: isoDate,
+  amountPaise: z.number().int().positive(),
+  incomePaise: z.number().int().nonnegative().default(0),
+  incomeAccount: id.optional(),
+});
+const openingSupplierBalanceInput = z.object({ businessId: id, supplierId: id, asAt: isoDate, amountPaise: z.number().int().positive() });
+const openingReceiptInput = z.object({ amountPaise: z.number().int().positive(), receivedOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]) });
+const openingSettlementInput = z.object({ amountPaise: z.number().int().positive(), paidOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]) });
 const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
@@ -564,6 +575,65 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   app.post<{ Params: { id: string } }>("/opening-balances/:id/reverse", async (request) => {
     const input = parseBody(openingBalanceReverseInput, request.body);
     return { journalEntry: repository.reverseOpeningBalances({ id: request.params.id, reversedOn: input.reversedOn }) };
+  });
+
+  /**
+   * Opening customer balances (R4b): one entry dated `asAt`. `incomePaise` is the part that is income
+   * earned before the books began (0 = a balance-sheet movement only, S5-2); `incomeAccount` is
+   * required exactly when it is above zero.
+   */
+  app.post("/opening-customer-balances", async (request, reply) => {
+    const input = parseBody(openingCustomerBalanceInput, request.body);
+    const balanceId = repository.saveOpeningCustomerBalance({
+      id: randomUUID(),
+      businessId: input.businessId,
+      customerId: input.customerId,
+      asAt: input.asAt,
+      amountPaise: input.amountPaise,
+      incomePaise: input.incomePaise,
+      ...(input.incomeAccount === undefined ? {} : { incomeAccount: input.incomeAccount }),
+    });
+    return reply.code(201).send({ id: balanceId });
+  });
+
+  app.get<{ Querystring: { businessId?: string } }>("/opening-customer-balances", async (request) => {
+    const businessId = request.query.businessId;
+    if (businessId === undefined) throw new RepositoryValidationError("businessId is required.");
+    return repository.listOpeningCustomerBalances(businessId);
+  });
+
+  app.post<{ Params: { id: string } }>("/opening-customer-balances/:id/receipts", async (request, reply) => {
+    const input = parseBody(openingReceiptInput, request.body);
+    repository.recordOpeningBalanceReceipt({ id: randomUUID(), openingCustomerBalanceId: request.params.id, ...input });
+    return reply.code(201).send({ ok: true });
+  });
+
+  /** Correction is by reversal only; refused once any money has been collected against the balance. */
+  app.post<{ Params: { id: string } }>("/opening-customer-balances/:id/reverse", async (request) => {
+    const input = parseBody(openingBalanceReverseInput, request.body);
+    return { journalEntry: repository.reverseOpeningCustomerBalance({ id: request.params.id, reversedOn: input.reversedOn }) };
+  });
+
+  app.post("/opening-supplier-balances", async (request, reply) => {
+    const input = parseBody(openingSupplierBalanceInput, request.body);
+    return reply.code(201).send({ id: repository.saveOpeningSupplierBalance({ id: randomUUID(), ...input }) });
+  });
+
+  app.get<{ Querystring: { businessId?: string } }>("/opening-supplier-balances", async (request) => {
+    const businessId = request.query.businessId;
+    if (businessId === undefined) throw new RepositoryValidationError("businessId is required.");
+    return repository.listOpeningSupplierBalances(businessId);
+  });
+
+  app.post<{ Params: { id: string } }>("/opening-supplier-balances/:id/settlements", async (request, reply) => {
+    const input = parseBody(openingSettlementInput, request.body);
+    repository.recordOpeningBalanceSettlement({ id: randomUUID(), openingSupplierBalanceId: request.params.id, ...input });
+    return reply.code(201).send({ ok: true });
+  });
+
+  app.post<{ Params: { id: string } }>("/opening-supplier-balances/:id/reverse", async (request) => {
+    const input = parseBody(openingBalanceReverseInput, request.body);
+    return { journalEntry: repository.reverseOpeningSupplierBalance({ id: request.params.id, reversedOn: input.reversedOn }) };
   });
 
   app.get<{ Querystring: { companyId?: string; includeInactive?: string } }>("/accounts", async (request) => {

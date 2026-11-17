@@ -56,7 +56,9 @@ describe("v13 seeding from a database built to v12", () => {
     const triggersBefore = objectsSql("trigger");
 
     const ran = runMigrations(db, migrations);
-    expect(ran).toEqual([13]);
+    // DERIVED, never a literal: this test builds to v12, so everything above v12 runs. A literal
+    // [13] went red the moment v14 was registered, and said nothing about v13.
+    expect(ran).toEqual(migrations.filter((m) => m.version > 12).map((m) => m.version));
 
     const after = chart();
     for (const row of before) expect(after.find((r) => r.code === row.code)).toEqual(row);

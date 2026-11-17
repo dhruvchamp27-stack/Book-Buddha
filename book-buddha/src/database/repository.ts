@@ -433,7 +433,7 @@ export interface CashRecognitionRow {
   /** A chart_accounts code, extensible at runtime - NOT a fixed union. */
   readonly account: string;
   readonly amountPaise: number;
-  readonly documentType: "INVOICE" | "PURCHASE_BILL" | "EXPENSE";
+  readonly documentType: "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "OPENING_BALANCE";
   readonly documentId: string;
 }
 
@@ -467,7 +467,61 @@ export interface GeneralLedgerRow {
   readonly creditPaise: number;
 }
 
+/** One open item of a customer: an invoice or an opening balance. See getOpenCustomerItems. */
+export interface OpenCustomerItem {
+  readonly documentId: string;
+  readonly kind: "INVOICE" | "OPENING";
+  readonly date: string;
+  readonly totalPaise: number;
+  /** Payments, applied credit and credit notes (invoice), or receipts (opening balance). */
+  readonly settledPaise: number;
+  readonly outstandingPaise: number;
+  readonly customerId: string;
+  readonly businessId: string;
+}
+
+/** The supplier mirror of OpenCustomerItem. See getOpenSupplierItems. */
+export interface OpenSupplierItem {
+  readonly documentId: string;
+  readonly kind: "BILL" | "EXPENSE" | "OPENING";
+  readonly date: string;
+  readonly totalPaise: number;
+  readonly settledPaise: number;
+  readonly outstandingPaise: number;
+  readonly supplierId: string;
+  readonly businessId: string;
+}
+
+export interface OpeningCustomerBalanceRecord {
+  readonly id: string;
+  readonly businessId: string;
+  readonly customerId: string;
+  readonly asAt: string;
+  readonly amountPaise: number;
+  /** The part of the balance that is income earned before the books began (S5-2). 0 = balance sheet only. */
+  readonly incomePaise: number;
+  readonly incomeAccount: string | null;
+  readonly journalEntryId: string;
+  readonly reversedAt: string | null;
+  readonly createdAt: string;
+  readonly receivedPaise: number;
+}
+
+export interface OpeningSupplierBalanceRecord {
+  readonly id: string;
+  readonly businessId: string;
+  readonly supplierId: string;
+  readonly asAt: string;
+  readonly amountPaise: number;
+  readonly journalEntryId: string;
+  readonly reversedAt: string | null;
+  readonly createdAt: string;
+  readonly paidPaise: number;
+}
+
 export interface ReceivableRow {
+  /** INVOICE, or OPENING for an opening customer balance (then invoiceId is the opening balance's id). */
+  readonly kind: "INVOICE" | "OPENING";
   readonly invoiceId: string;
   readonly invoiceNumber: string;
   readonly customerId: string;
@@ -2000,61 +2054,22 @@ export class AccountingRepository {
   }
 
   public getReceivables(): readonly ReceivableRow[] {
-    const rows = this.db
-      .prepare(
-        `SELECT i.id, i.number, i.customer_id, COALESCE(i.invoice_date, i.created_at) AS invoice_date,
-                i.tax_rate_basis_points,
-                (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
-                  + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
-                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id), 0)
-                  + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
-         FROM invoices i
-         JOIN invoice_lines il ON il.invoice_id = i.id
-         WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES'
-         GROUP BY i.id
-         ORDER BY i.created_at`,
-      )
-      .all() as Array<{
-        id: string; number: string; customer_id: string; invoice_date: string;
-        tax_rate_basis_points: number; total_paise: number; paid_paise: number;
-      }>;
-    // Credit notes, read from the POSTED journal exactly as invoiceCreditedPaise does, so the
-    // list and the payment cap can never disagree. Recomputing from the note lines would drift
-    // the moment a note's tax is clamped. SAME DEFECT as recordPayment's cap: without this, an
-    // invoice that has been fully credited still appeared on the receivables list as owed.
-    const creditedByInvoice = new Map<string, number>();
-    for (
-      const note of this.db
-        .prepare(
-          `SELECT je.source_id AS invoice_id,
-                  COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS credited
-             FROM journal_lines jl
-             JOIN journal_entries je ON je.id = jl.journal_entry_id
-             JOIN invoices i ON i.id = je.source_id
-            WHERE je.id LIKE 'je-credit-note-%' AND jl.account = i.payment_account
-            GROUP BY je.source_id`,
-        )
-        .all() as Array<{ invoice_id: string; credited: number }>
-    ) {
-      creditedByInvoice.set(note.invoice_id, note.credited);
-    }
+    // One definition of "what a customer still owes": the shared open-items query, which reads
+    // invoices (less payments, applied credit and credit notes from the POSTED journal) and
+    // opening balances alike. This method only reshapes its rows.
     const now = Date.now();
-    return rows
-      .map((row) => {
-        const creditedPaise = creditedByInvoice.get(row.id) ?? 0;
-        return {
-          invoiceId: row.id,
-          invoiceNumber: row.number,
-          customerId: row.customer_id,
-          invoiceDate: row.invoice_date,
-          totalPaise: row.total_paise,
-          paidPaise: row.paid_paise,
-          creditedPaise,
-          outstandingPaise: row.total_paise - creditedPaise - row.paid_paise,
-          ageDays: Math.max(0, Math.floor((now - Date.parse(row.invoice_date)) / 86400000)),
-        };
-      })
-      .filter((row) => row.outstandingPaise > 0);
+    return this.openCustomerItemRows({}).map((item) => ({
+      kind: item.kind,
+      invoiceId: item.documentId,
+      invoiceNumber: item.number,
+      customerId: item.customerId,
+      invoiceDate: item.date,
+      totalPaise: item.totalPaise,
+      paidPaise: item.paidPaise,
+      creditedPaise: item.creditedPaise,
+      outstandingPaise: item.outstandingPaise,
+      ageDays: Math.max(0, Math.floor((now - Date.parse(item.date)) / 86400000)),
+    }));
   }
 
   public getFairSales(fairId?: string): readonly FairSalesRow[] {
@@ -2653,6 +2668,63 @@ export class AccountingRepository {
           invoiceCollections.push({ date: event.date, amountPaise: event.amountPaise });
         }
         cashPaise += event.amountPaise;
+      }
+    }
+
+    // Opening CUSTOMER balances (S5-2, R4b). An opening balance of Y carrying income X (0 <= X <= Y)
+    // recognises X x collected / Y on the CASH basis, on each RECEIPT'S date (S1-6). X = 0 recognises
+    // nothing: the sale predates the books and the collection is a balance-sheet movement only.
+    //
+    // It uses allocateProportionally, the SAME cumulative allocator every invoice uses, so the shares
+    // telescope and the last receipt trues up to X exactly - there is deliberately no second formula
+    // here (a parallel one is how S3-4 and S3-5 happened).
+    //
+    // The opening entry's own income line is NOT passed through on its own date: this block is the
+    // only thing that visits it. It is matched by the EXACT journal-entry id the balance row
+    // carries, never by prefix or by source id alone (a general opening set can share a source id
+    // with a sub-ledger balance), so nothing else under OPENING_BALANCE can leak in.
+    // Opening balances belong to no fair, so a per-fair view has none to show.
+    if (filter.fairId === undefined) {
+      const receiptsOf = new Map<string, Array<{ amountPaise: number; date: string }>>();
+      for (const r of this.db.prepare(
+        "SELECT opening_customer_balance_id AS id, amount_paise, received_on FROM opening_balance_receipts ORDER BY received_on, rowid",
+      ).all() as Array<{ id: string; amount_paise: number; received_on: string }>) {
+        const list = receiptsOf.get(r.id);
+        const entry = { amountPaise: r.amount_paise, date: r.received_on };
+        if (list === undefined) receiptsOf.set(r.id, [entry]); else list.push(entry);
+      }
+      for (const b of this.db.prepare(
+        `SELECT id, amount_paise, journal_entry_id FROM opening_customer_balances
+          WHERE reversed_at IS NULL AND income_paise > 0${filter.businessId === undefined ? "" : " AND business_id = ?"}
+          ORDER BY created_at, rowid`,
+      ).all(...(filter.businessId === undefined ? [] : [filter.businessId])) as Array<{ id: string; amount_paise: number; journal_entry_id: string }>) {
+        // Performance lines only, found by CLASS (the equity plug is not income), of the one entry.
+        const performance = sumByAccount(
+          (byDocument.get(`OPENING_BALANCE|${b.id}`) ?? []).filter((row) => {
+            const type = classes.get(row.account)?.type;
+            return row.entry_id === b.journal_entry_id && (type === "INCOME" || type === "EXPENSE");
+          }),
+        ).filter((line) => line.amountPaise !== 0);
+        if (performance.length === 0) continue;
+        let collectedPaise = 0;
+        for (const receipt of receiptsOf.get(b.id) ?? []) {
+          const afterPaise = Math.min(collectedPaise + receipt.amountPaise, b.amount_paise);
+          if (afterPaise <= collectedPaise) continue;
+          const shares = allocateProportionally({
+            lineAmountsPaise: performance.map((line) => line.amountPaise),
+            totalPaise: b.amount_paise,
+            paidBeforePaise: collectedPaise,
+            paidAfterPaise: afterPaise,
+          });
+          collectedPaise = afterPaise;
+          if (!inPeriod(receipt.date)) continue;
+          performance.forEach((line, index) => {
+            const share = shares[index] as number;
+            if (share === 0) return;
+            recognitions.push({ date: receipt.date, account: line.account, amountPaise: share, documentType: "OPENING_BALANCE", documentId: b.id });
+            if (classes.get(line.account)?.type === "INCOME") invoiceCollections.push({ date: receipt.date, amountPaise: share });
+          });
+        }
       }
     }
     return { recognitions, invoiceCollections };
@@ -4050,27 +4122,19 @@ export class AccountingRepository {
   // ---- purchasing reports
 
   public getPayables(): readonly PayableRow[] {
+    // The supplier mirror of getReceivables: reshapes the shared open-items rows.
     const now = Date.now();
-    const rows: PayableRow[] = [];
-    for (const bill of this.listPurchaseBills({ status: "FINALIZED" })) {
-      if (bill.paymentAccount !== "PAYABLES") continue;
-      rows.push({
-        documentType: "BILL", documentId: bill.id, documentNumber: bill.number, supplierId: bill.supplierId,
-        documentDate: bill.billDate, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise,
-        outstandingPaise: bill.totalPaise - bill.paidPaise,
-        ageDays: Math.max(0, Math.floor((now - Date.parse(bill.billDate)) / 86400000)),
-      });
-    }
-    for (const expense of this.listExpenses({ status: "FINALIZED" })) {
-      if (expense.paymentAccount !== "PAYABLES" || expense.supplierId === null) continue;
-      rows.push({
-        documentType: "EXPENSE", documentId: expense.id, documentNumber: expense.number, supplierId: expense.supplierId,
-        documentDate: expense.expenseDate, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise,
-        outstandingPaise: expense.totalPaise - expense.paidPaise,
-        ageDays: Math.max(0, Math.floor((now - Date.parse(expense.expenseDate)) / 86400000)),
-      });
-    }
-    return rows.filter((row) => row.outstandingPaise > 0);
+    return this.openSupplierItemRows({}).map((item) => ({
+      documentType: item.kind,
+      documentId: item.documentId,
+      documentNumber: item.number,
+      supplierId: item.supplierId,
+      documentDate: item.date,
+      totalPaise: item.totalPaise,
+      paidPaise: item.settledPaise,
+      outstandingPaise: item.outstandingPaise,
+      ageDays: Math.max(0, Math.floor((now - Date.parse(item.date)) / 86400000)),
+    }));
   }
 
   public getSupplierStatement(supplierId: string): SupplierStatement {
@@ -4565,6 +4629,583 @@ export class AccountingRepository {
         balancingLine: plug === undefined ? null : asLine(plug),
       };
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Opening customer and supplier balances (R4b). Each is a DOCUMENT with its own sub-ledger row and
+  // ONE posted entry dated as-at; the general opening Trial Balance (above) refuses the control
+  // accounts these feed. Corrected by reversal only. Receipts and settlements post through their
+  // own tables because payments.payment_account is still CHECK IN ('CASH').
+  // ---------------------------------------------------------------------------
+
+  /** The chart row an opening income account must be: active, this company's or a system account, and INCOME. */
+  private requireOpeningIncomeAccount(code: string, companyId: string): void {
+    const account = this.db
+      .prepare("SELECT code, company_id, type, active FROM chart_accounts WHERE code = ?")
+      .get(code) as { code: string; company_id: string | null; type: AccountType; active: number } | undefined;
+    if (account === undefined) throw new RepositoryValidationError(`Account ${code} does not exist in the chart of accounts.`);
+    if (account.active === 0) throw new RepositoryValidationError(`Account ${code} is not active. Reactivate it, or pick another account.`);
+    if (account.company_id !== null && account.company_id !== companyId) {
+      throw new RepositoryValidationError(`Account ${code} belongs to another company.`);
+    }
+    // The CLASS decides, never a list of codes: an income account the user created works the same.
+    if (account.type !== "INCOME") {
+      throw new RepositoryValidationError(`Account ${code} is not an income account, so it cannot hold the income behind an opening balance.`);
+    }
+  }
+
+  public saveOpeningCustomerBalance(input: {
+    id: string;
+    businessId: string;
+    customerId: string;
+    asAt: string;
+    amountPaise: number;
+    incomePaise: number;
+    incomeAccount?: string;
+  }): string {
+    const { companyId } = this.requireBusinessCompany(input.businessId);
+    this.assertIsoDate("The opening balance date", input.asAt);
+    if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+      throw new RepositoryValidationError("An opening customer balance must be a whole number of paise above zero.");
+    }
+    if (!Number.isInteger(input.incomePaise) || input.incomePaise < 0) {
+      throw new RepositoryValidationError("The income behind an opening balance must be a whole number of paise, zero or more.");
+    }
+    if (input.incomePaise > input.amountPaise) {
+      throw new RepositoryValidationError(
+        `The income behind an opening balance cannot exceed the balance itself (${input.incomePaise} paise of income against ${input.amountPaise} paise owed).`,
+      );
+    }
+    if (input.incomePaise > 0 && input.incomeAccount === undefined) {
+      throw new RepositoryValidationError("An income account is required when part of the balance is income.");
+    }
+    if (input.incomePaise === 0 && input.incomeAccount !== undefined) {
+      throw new RepositoryValidationError("Leave the income account empty when no income is behind the balance.");
+    }
+    const customer = this.db.prepare("SELECT company_id FROM customers WHERE id = ?").get(input.customerId) as { company_id: string } | undefined;
+    if (customer === undefined) throw new RepositoryValidationError(`Customer ${input.customerId} was not found.`);
+    if (customer.company_id !== companyId) {
+      throw new RepositoryValidationError("That customer belongs to another company.");
+    }
+    if (input.incomeAccount !== undefined) this.requireOpeningIncomeAccount(input.incomeAccount, companyId);
+    if (this.db.prepare("SELECT 1 FROM opening_customer_balances WHERE id = ?").get(input.id) !== undefined) {
+      throw new RepositoryValidationError(`Opening customer balance ${input.id} already exists.`);
+    }
+    const live = this.db
+      .prepare("SELECT id FROM opening_customer_balances WHERE business_id = ? AND customer_id = ? AND reversed_at IS NULL")
+      .get(input.businessId, input.customerId) as { id: string } | undefined;
+    if (live !== undefined) {
+      throw new RepositoryValidationError(
+        `This customer already has an opening balance (${live.id}). Reverse it first, then enter the corrected one.`,
+      );
+    }
+
+    const journalEntryId = `je-opening-customer-${input.id}`;
+    const equityPaise = input.amountPaise - input.incomePaise;
+    const lines: JournalEntry["lines"] = [
+      { account: "RECEIVABLES", debitPaise: input.amountPaise, creditPaise: 0 },
+      // The income sits behind the receivable HERE, on the document itself, and nowhere else: it is
+      // not typed into the general opening Trial Balance as well, where the two could disagree.
+      ...(input.incomePaise > 0 && input.incomeAccount !== undefined
+        ? [{ account: input.incomeAccount, debitPaise: 0, creditPaise: input.incomePaise }]
+        : []),
+      ...(equityPaise > 0 ? [{ account: OPENING_BALANCE_EQUITY_CODE, debitPaise: 0, creditPaise: equityPaise }] : []),
+    ];
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.insertJournalEntry(
+        {
+          id: journalEntryId,
+          sourceId: input.id,
+          sourceType: "OPENING_BALANCE",
+          description: `Opening customer balance as at ${input.asAt}`,
+          isReversal: false,
+          lines,
+        },
+        { businessId: input.businessId, entryDate: input.asAt },
+      );
+      this.db
+        .prepare(
+          `INSERT INTO opening_customer_balances
+             (id, business_id, customer_id, as_at, amount_paise, income_paise, income_account, journal_entry_id, reversed_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(input.id, input.businessId, input.customerId, input.asAt, input.amountPaise, input.incomePaise, input.incomeAccount ?? null, journalEntryId, now);
+      appendAuditEvent(this.db, {
+        action: "OPENING_CUSTOMER_BALANCE_SAVED",
+        entityId: input.id,
+        entityType: "opening_customer_balances",
+        occurredAt: now,
+        afterValues: {
+          businessId: input.businessId, customerId: input.customerId, asAt: input.asAt,
+          amountPaise: input.amountPaise, incomePaise: input.incomePaise, incomeAccount: input.incomeAccount ?? null,
+        },
+      });
+    })();
+    return input.id;
+  }
+
+  public reverseOpeningCustomerBalance(input: { id: string; reversedOn: string }): JournalEntry {
+    const header = this.db
+      .prepare("SELECT id, business_id, as_at, journal_entry_id, reversed_at FROM opening_customer_balances WHERE id = ?")
+      .get(input.id) as { id: string; business_id: string; as_at: string; journal_entry_id: string; reversed_at: string | null } | undefined;
+    if (header === undefined) throw new RepositoryValidationError(`Opening customer balance ${input.id} was not found.`);
+    if (header.reversed_at !== null) {
+      throw new RepositoryValidationError(`Opening customer balance ${input.id} has already been reversed on ${header.reversed_at}.`);
+    }
+    this.assertIsoDate("The reversal date", input.reversedOn);
+    if (input.reversedOn < header.as_at) {
+      throw new RepositoryValidationError(`The reversal date cannot be before the opening balance date ${header.as_at}.`);
+    }
+    // Once money has been collected, reversing the balance would leave the receipts with nothing to
+    // settle and the cash view with income it had already recognised. Nothing is edited or deleted:
+    // the way to correct it is to reverse the receipts' effect first, which this slice does not offer.
+    if (this.db.prepare("SELECT 1 FROM opening_balance_receipts WHERE opening_customer_balance_id = ?").get(input.id) !== undefined) {
+      throw new RepositoryValidationError(`Opening customer balance ${input.id} has receipts recorded against it, so it can no longer be reversed.`);
+    }
+    return this.db.transaction(() => {
+      const reversal = this.reverseOpeningEntry(header.journal_entry_id, `je-opening-customer-reversal-${header.id}`, header.id, `Reversal of opening customer balance as at ${header.as_at}`, header.business_id, input.reversedOn);
+      this.db.prepare("UPDATE opening_customer_balances SET reversed_at = ? WHERE id = ?").run(input.reversedOn, header.id);
+      appendAuditEvent(this.db, {
+        action: "OPENING_CUSTOMER_BALANCE_REVERSED",
+        entityId: header.id,
+        entityType: "opening_customer_balances",
+        occurredAt: new Date().toISOString(),
+        beforeValues: { reversedAt: null },
+        afterValues: { reversedAt: input.reversedOn },
+      });
+      return reversal;
+    })();
+  }
+
+  /** Negates every line of a posted opening entry, dated `reversedOn`, through the one posting door. */
+  private reverseOpeningEntry(
+    journalEntryId: string, reversalId: string, sourceId: string, description: string, businessId: string, reversedOn: string,
+  ): JournalEntry {
+    const lines = this.db
+      .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
+      .all(journalEntryId) as Array<{ account: string; debit_paise: number; credit_paise: number }>;
+    const reversal: JournalEntry = {
+      id: reversalId,
+      sourceId,
+      sourceType: "OPENING_BALANCE",
+      description,
+      isReversal: true,
+      lines: lines.map((l) => ({ account: l.account, debitPaise: l.credit_paise, creditPaise: l.debit_paise })),
+    };
+    this.insertJournalEntry(reversal, { businessId, entryDate: reversedOn });
+    return reversal;
+  }
+
+  public listOpeningCustomerBalances(businessId: string): readonly OpeningCustomerBalanceRecord[] {
+    this.requireBusiness(businessId);
+    return (
+      this.db
+        .prepare(
+          `SELECT id, business_id, customer_id, as_at, amount_paise, income_paise, income_account, journal_entry_id, reversed_at, created_at,
+                  COALESCE((SELECT SUM(r.amount_paise) FROM opening_balance_receipts r WHERE r.opening_customer_balance_id = b.id), 0) AS received_paise
+             FROM opening_customer_balances b WHERE business_id = ? ORDER BY created_at, rowid`,
+        )
+        .all(businessId) as Array<{
+        id: string; business_id: string; customer_id: string; as_at: string; amount_paise: number; income_paise: number;
+        income_account: string | null; journal_entry_id: string; reversed_at: string | null; created_at: string; received_paise: number;
+      }>
+    ).map((r) => ({
+      id: r.id, businessId: r.business_id, customerId: r.customer_id, asAt: r.as_at, amountPaise: r.amount_paise,
+      incomePaise: r.income_paise, incomeAccount: r.income_account, journalEntryId: r.journal_entry_id,
+      reversedAt: r.reversed_at, createdAt: r.created_at, receivedPaise: r.received_paise,
+    }));
+  }
+
+  /** Dr CASH|BANK / Cr RECEIVABLES, dated `receivedOn`. The cash view recognises income from this row. */
+  public recordOpeningBalanceReceipt(input: {
+    id: string;
+    openingCustomerBalanceId: string;
+    amountPaise: number;
+    receivedOn: string;
+    paymentAccount: "CASH" | "BANK";
+  }): JournalEntry {
+    return this.db.transaction(() => {
+      const balance = this.db
+        .prepare("SELECT id, business_id, as_at, amount_paise, reversed_at FROM opening_customer_balances WHERE id = ?")
+        .get(input.openingCustomerBalanceId) as { id: string; business_id: string; as_at: string; amount_paise: number; reversed_at: string | null } | undefined;
+      if (balance === undefined) throw new RepositoryValidationError(`Opening customer balance ${input.openingCustomerBalanceId} was not found.`);
+      if (balance.reversed_at !== null) throw new RepositoryValidationError("A reversed opening balance cannot be collected.");
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("A receipt must be a whole number of paise above zero.");
+      }
+      if (input.paymentAccount !== "CASH" && input.paymentAccount !== "BANK") {
+        throw new RepositoryValidationError("A receipt is paid into CASH or BANK.");
+      }
+      this.assertIsoDate("The receipt date", input.receivedOn);
+      if (input.receivedOn < balance.as_at) {
+        throw new RepositoryValidationError(`A receipt cannot predate the opening balance (${balance.as_at}).`);
+      }
+      if (this.db.prepare("SELECT 1 FROM opening_balance_receipts WHERE id = ?").get(input.id) !== undefined) {
+        throw new RepositoryValidationError(`Receipt ${input.id} already exists.`);
+      }
+      const received = (this.db
+        .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM opening_balance_receipts WHERE opening_customer_balance_id = ?")
+        .get(balance.id) as { total: number }).total;
+      const outstanding = balance.amount_paise - received;
+      if (input.amountPaise > outstanding) {
+        throw new RepositoryValidationError(
+          `Only ${outstanding} paise is outstanding on this opening balance; a receipt of ${input.amountPaise} paise exceeds it.`,
+        );
+      }
+      const entry: JournalEntry = {
+        id: `je-opening-receipt-${input.id}`,
+        sourceId: balance.id,
+        sourceType: "OPENING_BALANCE",
+        description: `Receipt against opening customer balance ${balance.id}`,
+        isReversal: false,
+        lines: [
+          { account: input.paymentAccount, debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: "RECEIVABLES", debitPaise: 0, creditPaise: input.amountPaise },
+        ],
+      };
+      const now = new Date().toISOString();
+      this.insertJournalEntry(entry, { businessId: balance.business_id, entryDate: input.receivedOn });
+      this.db
+        .prepare(
+          "INSERT INTO opening_balance_receipts (id, opening_customer_balance_id, amount_paise, received_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(input.id, balance.id, input.amountPaise, input.receivedOn, input.paymentAccount, now);
+      appendAuditEvent(this.db, {
+        action: "OPENING_BALANCE_RECEIPT_RECORDED",
+        entityId: input.id,
+        entityType: "opening_balance_receipts",
+        occurredAt: now,
+        afterValues: { openingCustomerBalanceId: balance.id, amountPaise: input.amountPaise, receivedOn: input.receivedOn, paymentAccount: input.paymentAccount },
+      });
+      return entry;
+    })();
+  }
+
+  public saveOpeningSupplierBalance(input: {
+    id: string;
+    businessId: string;
+    supplierId: string;
+    asAt: string;
+    amountPaise: number;
+  }): string {
+    const { companyId } = this.requireBusinessCompany(input.businessId);
+    this.assertIsoDate("The opening balance date", input.asAt);
+    if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+      throw new RepositoryValidationError("An opening supplier balance must be a whole number of paise above zero.");
+    }
+    const supplier = this.db.prepare("SELECT company_id FROM suppliers WHERE id = ?").get(input.supplierId) as { company_id: string } | undefined;
+    if (supplier === undefined) throw new RepositoryValidationError(`Supplier ${input.supplierId} was not found.`);
+    if (supplier.company_id !== companyId) throw new RepositoryValidationError("That supplier belongs to another company.");
+    if (this.db.prepare("SELECT 1 FROM opening_supplier_balances WHERE id = ?").get(input.id) !== undefined) {
+      throw new RepositoryValidationError(`Opening supplier balance ${input.id} already exists.`);
+    }
+    const live = this.db
+      .prepare("SELECT id FROM opening_supplier_balances WHERE business_id = ? AND supplier_id = ? AND reversed_at IS NULL")
+      .get(input.businessId, input.supplierId) as { id: string } | undefined;
+    if (live !== undefined) {
+      throw new RepositoryValidationError(
+        `This supplier already has an opening balance (${live.id}). Reverse it first, then enter the corrected one.`,
+      );
+    }
+    const journalEntryId = `je-opening-supplier-${input.id}`;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.insertJournalEntry(
+        {
+          id: journalEntryId,
+          sourceId: input.id,
+          sourceType: "OPENING_BALANCE",
+          description: `Opening supplier balance as at ${input.asAt}`,
+          isReversal: false,
+          lines: [
+            { account: OPENING_BALANCE_EQUITY_CODE, debitPaise: input.amountPaise, creditPaise: 0 },
+            { account: "PAYABLES", debitPaise: 0, creditPaise: input.amountPaise },
+          ],
+        },
+        { businessId: input.businessId, entryDate: input.asAt },
+      );
+      this.db
+        .prepare(
+          "INSERT INTO opening_supplier_balances (id, business_id, supplier_id, as_at, amount_paise, journal_entry_id, reversed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+        )
+        .run(input.id, input.businessId, input.supplierId, input.asAt, input.amountPaise, journalEntryId, now);
+      appendAuditEvent(this.db, {
+        action: "OPENING_SUPPLIER_BALANCE_SAVED",
+        entityId: input.id,
+        entityType: "opening_supplier_balances",
+        occurredAt: now,
+        afterValues: { businessId: input.businessId, supplierId: input.supplierId, asAt: input.asAt, amountPaise: input.amountPaise },
+      });
+    })();
+    return input.id;
+  }
+
+  public reverseOpeningSupplierBalance(input: { id: string; reversedOn: string }): JournalEntry {
+    const header = this.db
+      .prepare("SELECT id, business_id, as_at, journal_entry_id, reversed_at FROM opening_supplier_balances WHERE id = ?")
+      .get(input.id) as { id: string; business_id: string; as_at: string; journal_entry_id: string; reversed_at: string | null } | undefined;
+    if (header === undefined) throw new RepositoryValidationError(`Opening supplier balance ${input.id} was not found.`);
+    if (header.reversed_at !== null) {
+      throw new RepositoryValidationError(`Opening supplier balance ${input.id} has already been reversed on ${header.reversed_at}.`);
+    }
+    this.assertIsoDate("The reversal date", input.reversedOn);
+    if (input.reversedOn < header.as_at) {
+      throw new RepositoryValidationError(`The reversal date cannot be before the opening balance date ${header.as_at}.`);
+    }
+    if (this.db.prepare("SELECT 1 FROM opening_balance_settlements WHERE opening_supplier_balance_id = ?").get(input.id) !== undefined) {
+      throw new RepositoryValidationError(`Opening supplier balance ${input.id} has settlements recorded against it, so it can no longer be reversed.`);
+    }
+    return this.db.transaction(() => {
+      const reversal = this.reverseOpeningEntry(header.journal_entry_id, `je-opening-supplier-reversal-${header.id}`, header.id, `Reversal of opening supplier balance as at ${header.as_at}`, header.business_id, input.reversedOn);
+      this.db.prepare("UPDATE opening_supplier_balances SET reversed_at = ? WHERE id = ?").run(input.reversedOn, header.id);
+      appendAuditEvent(this.db, {
+        action: "OPENING_SUPPLIER_BALANCE_REVERSED",
+        entityId: header.id,
+        entityType: "opening_supplier_balances",
+        occurredAt: new Date().toISOString(),
+        beforeValues: { reversedAt: null },
+        afterValues: { reversedAt: input.reversedOn },
+      });
+      return reversal;
+    })();
+  }
+
+  public listOpeningSupplierBalances(businessId: string): readonly OpeningSupplierBalanceRecord[] {
+    this.requireBusiness(businessId);
+    return (
+      this.db
+        .prepare(
+          `SELECT id, business_id, supplier_id, as_at, amount_paise, journal_entry_id, reversed_at, created_at,
+                  COALESCE((SELECT SUM(s.amount_paise) FROM opening_balance_settlements s WHERE s.opening_supplier_balance_id = b.id), 0) AS paid_paise
+             FROM opening_supplier_balances b WHERE business_id = ? ORDER BY created_at, rowid`,
+        )
+        .all(businessId) as Array<{
+        id: string; business_id: string; supplier_id: string; as_at: string; amount_paise: number;
+        journal_entry_id: string; reversed_at: string | null; created_at: string; paid_paise: number;
+      }>
+    ).map((r) => ({
+      id: r.id, businessId: r.business_id, supplierId: r.supplier_id, asAt: r.as_at, amountPaise: r.amount_paise,
+      journalEntryId: r.journal_entry_id, reversedAt: r.reversed_at, createdAt: r.created_at, paidPaise: r.paid_paise,
+    }));
+  }
+
+  /** Dr PAYABLES / Cr CASH|BANK, dated `paidOn`. Paying off an opening balance is never an expense. */
+  public recordOpeningBalanceSettlement(input: {
+    id: string;
+    openingSupplierBalanceId: string;
+    amountPaise: number;
+    paidOn: string;
+    paymentAccount: "CASH" | "BANK";
+  }): JournalEntry {
+    return this.db.transaction(() => {
+      const balance = this.db
+        .prepare("SELECT id, business_id, as_at, amount_paise, reversed_at FROM opening_supplier_balances WHERE id = ?")
+        .get(input.openingSupplierBalanceId) as { id: string; business_id: string; as_at: string; amount_paise: number; reversed_at: string | null } | undefined;
+      if (balance === undefined) throw new RepositoryValidationError(`Opening supplier balance ${input.openingSupplierBalanceId} was not found.`);
+      if (balance.reversed_at !== null) throw new RepositoryValidationError("A reversed opening balance cannot be paid.");
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("A settlement must be a whole number of paise above zero.");
+      }
+      if (input.paymentAccount !== "CASH" && input.paymentAccount !== "BANK") {
+        throw new RepositoryValidationError("A settlement is paid from CASH or BANK.");
+      }
+      this.assertIsoDate("The payment date", input.paidOn);
+      if (input.paidOn < balance.as_at) {
+        throw new RepositoryValidationError(`A settlement cannot predate the opening balance (${balance.as_at}).`);
+      }
+      if (this.db.prepare("SELECT 1 FROM opening_balance_settlements WHERE id = ?").get(input.id) !== undefined) {
+        throw new RepositoryValidationError(`Settlement ${input.id} already exists.`);
+      }
+      const paid = (this.db
+        .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM opening_balance_settlements WHERE opening_supplier_balance_id = ?")
+        .get(balance.id) as { total: number }).total;
+      const outstanding = balance.amount_paise - paid;
+      if (input.amountPaise > outstanding) {
+        throw new RepositoryValidationError(
+          `Only ${outstanding} paise is outstanding on this opening balance; a settlement of ${input.amountPaise} paise exceeds it.`,
+        );
+      }
+      const entry: JournalEntry = {
+        id: `je-opening-settlement-${input.id}`,
+        sourceId: balance.id,
+        sourceType: "OPENING_BALANCE",
+        description: `Payment against opening supplier balance ${balance.id}`,
+        isReversal: false,
+        lines: [
+          { account: "PAYABLES", debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: input.paymentAccount, debitPaise: 0, creditPaise: input.amountPaise },
+        ],
+      };
+      const now = new Date().toISOString();
+      this.insertJournalEntry(entry, { businessId: balance.business_id, entryDate: input.paidOn });
+      this.db
+        .prepare(
+          "INSERT INTO opening_balance_settlements (id, opening_supplier_balance_id, amount_paise, paid_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(input.id, balance.id, input.amountPaise, input.paidOn, input.paymentAccount, now);
+      appendAuditEvent(this.db, {
+        action: "OPENING_BALANCE_SETTLEMENT_RECORDED",
+        entityId: input.id,
+        entityType: "opening_balance_settlements",
+        occurredAt: now,
+        afterValues: { openingSupplierBalanceId: balance.id, amountPaise: input.amountPaise, paidOn: input.paidOn, paymentAccount: input.paymentAccount },
+      });
+      return entry;
+    })();
+  }
+
+  /**
+   * THE SHARED OPEN-ITEMS QUERY - the single definition of "what a customer still owes".
+   *
+   * Returns a business's (or everyone's) open items, invoices AND opening balances together, as
+   * uniform rows. getReceivables reads it, and R7's ageing, customer statements and customer-balance
+   * detail reports must read it too rather than re-deriving settlement from `payments`, which would
+   * let a report and the ledger disagree. Only items with something outstanding are returned.
+   */
+  public getOpenCustomerItems(filter: { businessId?: string; customerId?: string } = {}): readonly OpenCustomerItem[] {
+    return this.openCustomerItemRows(filter).map((row) => ({
+      documentId: row.documentId,
+      kind: row.kind,
+      date: row.date,
+      totalPaise: row.totalPaise,
+      settledPaise: row.settledPaise,
+      outstandingPaise: row.outstandingPaise,
+      customerId: row.customerId,
+      businessId: row.businessId,
+    }));
+  }
+
+  /** The same rows with the invoice-only detail getReceivables still shows. One query, two shapes. */
+  private openCustomerItemRows(filter: { businessId?: string; customerId?: string }): Array<OpenCustomerItem & {
+    readonly number: string; readonly paidPaise: number; readonly creditedPaise: number;
+  }> {
+    const where = (alias: string): { sql: string; params: string[] } => ({
+      sql: (filter.businessId === undefined ? "" : ` AND ${alias}.business_id = ?`) + (filter.customerId === undefined ? "" : ` AND ${alias}.customer_id = ?`),
+      params: [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.customerId === undefined ? [] : [filter.customerId])],
+    });
+    const invoiceWhere = where("i");
+    const rows = this.db
+      .prepare(
+        `SELECT i.id, i.number, i.business_id, i.customer_id, COALESCE(i.invoice_date, i.created_at) AS invoice_date,
+                i.tax_rate_basis_points,
+                (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
+                  + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
+                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id), 0)
+                  + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
+           FROM invoices i
+           JOIN invoice_lines il ON il.invoice_id = i.id
+           WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES'${invoiceWhere.sql}
+           GROUP BY i.id
+           ORDER BY i.created_at`,
+      )
+      .all(...invoiceWhere.params) as Array<{
+        id: string; number: string; business_id: string; customer_id: string; invoice_date: string;
+        tax_rate_basis_points: number; total_paise: number; paid_paise: number;
+      }>;
+    // Credit notes, read from the POSTED journal exactly as invoiceCreditedPaise does, so the
+    // list and the payment cap can never disagree. Recomputing from the note lines would drift
+    // the moment a note's tax is clamped. SAME DEFECT as recordPayment's cap: without this, an
+    // invoice that has been fully credited still appeared on the receivables list as owed.
+    const creditedByInvoice = new Map<string, number>();
+    for (
+      const note of this.db
+        .prepare(
+          `SELECT je.source_id AS invoice_id,
+                  COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS credited
+             FROM journal_lines jl
+             JOIN journal_entries je ON je.id = jl.journal_entry_id
+             JOIN invoices i ON i.id = je.source_id
+            WHERE je.id LIKE 'je-credit-note-%' AND jl.account = i.payment_account
+            GROUP BY je.source_id`,
+        )
+        .all() as Array<{ invoice_id: string; credited: number }>
+    ) {
+      creditedByInvoice.set(note.invoice_id, note.credited);
+    }
+    const items: Array<OpenCustomerItem & { readonly number: string; readonly paidPaise: number; readonly creditedPaise: number }> = [];
+    for (const row of rows) {
+      const creditedPaise = creditedByInvoice.get(row.id) ?? 0;
+      items.push({
+        documentId: row.id, kind: "INVOICE", date: row.invoice_date, totalPaise: row.total_paise,
+        settledPaise: row.paid_paise + creditedPaise, outstandingPaise: row.total_paise - creditedPaise - row.paid_paise,
+        customerId: row.customer_id, businessId: row.business_id,
+        number: row.number, paidPaise: row.paid_paise, creditedPaise,
+      });
+    }
+    const openingWhere = where("b");
+    for (
+      const b of this.db
+        .prepare(
+          `SELECT b.id, b.business_id, b.customer_id, b.as_at, b.amount_paise,
+                  COALESCE((SELECT SUM(r.amount_paise) FROM opening_balance_receipts r WHERE r.opening_customer_balance_id = b.id), 0) AS received_paise
+             FROM opening_customer_balances b
+            WHERE b.reversed_at IS NULL${openingWhere.sql}
+            ORDER BY b.created_at, b.rowid`,
+        )
+        .all(...openingWhere.params) as Array<{
+        id: string; business_id: string; customer_id: string; as_at: string; amount_paise: number; received_paise: number;
+      }>
+    ) {
+      items.push({
+        documentId: b.id, kind: "OPENING", date: b.as_at, totalPaise: b.amount_paise, settledPaise: b.received_paise,
+        outstandingPaise: b.amount_paise - b.received_paise, customerId: b.customer_id, businessId: b.business_id,
+        number: "Opening balance", paidPaise: b.received_paise, creditedPaise: 0,
+      });
+    }
+    return items.filter((item) => item.outstandingPaise > 0);
+  }
+
+  /** The supplier mirror of getOpenCustomerItems: bills, expenses on credit, and opening balances. */
+  public getOpenSupplierItems(filter: { businessId?: string; supplierId?: string } = {}): readonly OpenSupplierItem[] {
+    return this.openSupplierItemRows(filter).map((row) => ({
+      documentId: row.documentId,
+      kind: row.kind,
+      date: row.date,
+      totalPaise: row.totalPaise,
+      settledPaise: row.settledPaise,
+      outstandingPaise: row.outstandingPaise,
+      supplierId: row.supplierId,
+      businessId: row.businessId,
+    }));
+  }
+
+  private openSupplierItemRows(filter: { businessId?: string; supplierId?: string }): Array<OpenSupplierItem & { readonly number: string }> {
+    const items: Array<OpenSupplierItem & { readonly number: string }> = [];
+    for (const bill of this.listPurchaseBills({ status: "FINALIZED" })) {
+      if (bill.paymentAccount !== "PAYABLES") continue;
+      items.push({
+        documentId: bill.id, kind: "BILL", date: bill.billDate, totalPaise: bill.totalPaise, settledPaise: bill.paidPaise,
+        outstandingPaise: bill.totalPaise - bill.paidPaise, supplierId: bill.supplierId, businessId: bill.businessId, number: bill.number,
+      });
+    }
+    for (const expense of this.listExpenses({ status: "FINALIZED" })) {
+      if (expense.paymentAccount !== "PAYABLES" || expense.supplierId === null) continue;
+      items.push({
+        documentId: expense.id, kind: "EXPENSE", date: expense.expenseDate, totalPaise: expense.totalPaise, settledPaise: expense.paidPaise,
+        outstandingPaise: expense.totalPaise - expense.paidPaise, supplierId: expense.supplierId, businessId: expense.businessId, number: expense.number,
+      });
+    }
+    for (
+      const b of this.db
+        .prepare(
+          `SELECT b.id, b.business_id, b.supplier_id, b.as_at, b.amount_paise,
+                  COALESCE((SELECT SUM(s.amount_paise) FROM opening_balance_settlements s WHERE s.opening_supplier_balance_id = b.id), 0) AS paid_paise
+             FROM opening_supplier_balances b WHERE b.reversed_at IS NULL ORDER BY b.created_at, b.rowid`,
+        )
+        .all() as Array<{ id: string; business_id: string; supplier_id: string; as_at: string; amount_paise: number; paid_paise: number }>
+    ) {
+      items.push({
+        documentId: b.id, kind: "OPENING", date: b.as_at, totalPaise: b.amount_paise, settledPaise: b.paid_paise,
+        outstandingPaise: b.amount_paise - b.paid_paise, supplierId: b.supplier_id, businessId: b.business_id, number: "Opening balance",
+      });
+    }
+    return items.filter(
+      (item) =>
+        item.outstandingPaise > 0 &&
+        (filter.businessId === undefined || item.businessId === filter.businessId) &&
+        (filter.supplierId === undefined || item.supplierId === filter.supplierId),
+    );
   }
 
   private requireBusiness(businessId: string): void {

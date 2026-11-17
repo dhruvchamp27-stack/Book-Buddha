@@ -143,7 +143,7 @@ export interface SupplierPaymentInput {
 }
 
 export interface PayableRow {
-  readonly documentType: "BILL" | "EXPENSE";
+  readonly documentType: "BILL" | "EXPENSE" | "OPENING";
   readonly documentId: string;
   readonly documentNumber: string;
   readonly supplierId: string;

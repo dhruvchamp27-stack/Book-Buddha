@@ -230,6 +230,11 @@ describe("opening balances: income lines in the P&L", () => {
     // opening date, on any date, or in any window. The ACCRUAL P&L, which reads the ledger directly,
     // shows all of it. If a future slice makes the cash view recognise opening income (S5-2), this
     // test is expected to fail and must be updated deliberately.
+    // R4b (checked, NOT changed): S5-2 is honoured for opening CUSTOMER balances, which carry their
+    // own income figure and recognise it on each receipt (opening-sub-ledger.test.ts). That does not
+    // touch THIS case: income typed into the GENERAL opening Trial Balance still belongs to no
+    // document the cash walk visits, so it is still dropped - deliberately, so the two can never
+    // double-count the same sale. This pin therefore stands exactly as written.
     const cash = r.getProfitAndLoss({ businessId, basis: "CASH" });
     const accrual = r.getProfitAndLoss({ businessId, basis: "ACCRUAL" });
     expect(cash.income).toEqual([]);

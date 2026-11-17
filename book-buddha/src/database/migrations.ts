@@ -9,6 +9,7 @@ import { applyChartOfAccountsSchema } from "./chart-accounts-schema.js";
 import { applyFinancialYearsSchema } from "./financial-years-schema.js";
 import { applyCreditDischargeSchema, applyCustomerCreditsSchema } from "./customer-credits-schema.js";
 import { applyOpeningBalancesSchema } from "./opening-balances-schema.js";
+import { applyOpeningSubLedgerSchema } from "./opening-sub-ledger-schema.js";
 
 export interface Migration {
   version: number;
@@ -191,6 +192,16 @@ export const migrations: readonly Migration[] = [
     // untouched (STOCK_ADJUSTMENT is an EXPENSE with no role), so no table rebuild is needed and
     // this can stay transactional.
     up: applyOpeningBalancesSchema,
+  },
+  {
+    version: 14,
+    name: "opening_sub_ledger",
+    // Additive: the opening CUSTOMER and SUPPLIER balances, and the two tables they are settled
+    // through. Their own settlement tables on purpose - payments.payment_account is still
+    // CHECK IN ('CASH'), so BANK is unusable there; credit-note refunds already dodge it the same
+    // way. An opening customer balance carries the income figure behind it (S5-2), which is what
+    // the cash view recognises proportionately on each receipt. Default (transactional).
+    up: applyOpeningSubLedgerSchema,
   },
 ];
 
