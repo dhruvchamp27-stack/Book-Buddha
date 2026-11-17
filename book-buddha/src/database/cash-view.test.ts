@@ -459,17 +459,18 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
   });
 
   /**
-   * OPEN, PINNED, AWAITING THE OWNER'S RULING. When the credit note is itself the settling
-   * event - it exactly equals what was left unpaid - no payment follows it, so the COGS behind
-   * the goods the customer KEPT is never recognised on the cash basis. Here 200,000 of COGS is
-   * stranded: cash expenses 400,000 against an accrual 600,000.
+   * S4-3, RULED BY THE OWNER 2026-11-17. AMENDS S2-2. When the credit note is itself the
+   * settling event - it exactly equals what was left unpaid - no payment follows it, so the COGS
+   * behind the goods the customer KEPT used to be stranded: cash expenses 400,000 against an
+   * accrual 600,000.
    *
-   * There is nowhere obviously right to put it: S2-2 rules out the note's own date, S1-6 rules
-   * out rewriting January, and no later cash exists to attach it to. So the cash view CONVERGES
-   * only when a payment follows the last note, and this test pins what happens when none does
-   * rather than pretending otherwise.
+   * The owner ruled that a note which CLEARS what is owed is a settlement event. S2-2 still holds
+   * for the note's own lines - the returned goods never hit the cash P&L on the note date - but
+   * the lines the customer KEPT are now fully settled, so their remaining recognition lands in
+   * the note's month. S1-6 is untouched: January is not rewritten. The consequence the owner
+   * accepted is visible below - February shows a 200,000 expense on a day no money moved.
    */
-  it("does NOT converge when the note itself settles the invoice (open question)", () => {
+  it("ACCEPTANCE settling note: a note that clears the balance trues up in its own month (S4-3)", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();
@@ -498,12 +499,20 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
       expect(accrual).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 600000 });
-      // Income agrees; COGS does not, and 200,000 is stranded. This is the gap to rule on.
+      // THE POINT: the cash view now CONVERGES on accrual once nothing is owed, whether the
+      // last settling event was a payment or a note.
       expect(cash.totalIncomePaise).toBe(1000000);
-      expect(cash.totalExpensesPaise).toBe(400000);
-      expect(accrual.totalExpensesPaise - cash.totalExpensesPaise).toBe(200000);
-      // Not a rounding artefact and not recoverable by paying more: nothing is owed.
+      expect(cash.totalExpensesPaise).toBe(600000);
+      expect(cash.totalExpensesPaise).toBe(accrual.totalExpensesPaise);
+      // Nothing is owed, so no later cash could ever have closed the gap.
       expect(() => w.repository.recordPayment("INV-T", 1)).toThrow(/outstanding balance of 0 paise/);
+
+      const period = (fromDate: string, toDate: string) => w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate });
+      // January is byte-for-byte what it was before the note: S1-6 is not bent to pay for S4-3.
+      expect(period("2026-01-01", "2026-01-31")).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 400000 });
+      // February carries the true-up alone - 200,000 of cost, and no income, on a day no money
+      // moved. The note's OWN lines still recognise nothing, which is S2-2 intact.
+      expect(period("2026-02-01", "2026-02-28")).toMatchObject({ totalIncomePaise: 0, totalExpensesPaise: 200000 });
     } finally {
       w.repository.close();
     }

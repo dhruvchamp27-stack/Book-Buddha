@@ -2075,6 +2075,28 @@ export class AccountingRepository {
         if (event.kind === "NOTE") {
           for (const line of event.lines) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
           balancePaise -= event.inclusivePaise;
+          // S4-3 (owner, 2026-11-17; AMENDS S2-2): a note that CLEARS what is owed is itself a
+          // settlement event. S2-2 still governs the note's own lines - the returned goods never
+          // hit the cash P&L on the note date - but once nothing is owed, the lines the customer
+          // KEPT are fully settled and no later cash can ever recognise them. Without this the
+          // cash view simply never reached accrual: a 10,000 of goods costing 6,000 plus 5,000 of
+          // freight, paid 10,000 and then waived, left 200,000 paise of COGS stranded for good.
+          //
+          // The true-up is (lines as they now stand, less what is already recognised) PER
+          // ACCOUNT, which is what makes it safe: an account the earlier payments over-recognised
+          // - the share attributed to a line this note has just waived - comes out negative and
+          // corrects itself, so no account is left overstated. S1-6 holds, because the entry is
+          // dated at the NOTE, never back in the month already reported.
+          if (balancePaise - cashPaise === 0) {
+            for (const account of [...current.keys()].sort()) {
+              const trueUp = (current.get(account) ?? 0) - (recognised.get(account) ?? 0);
+              if (trueUp === 0) continue;
+              recognised.set(account, current.get(account) ?? 0);
+              if (inPeriod(event.date)) {
+                recognitions.push({ date: event.date, account, amountPaise: trueUp, documentType: doc.type, documentId: doc.id });
+              }
+            }
+          }
           openSegment();
           continue;
         }
