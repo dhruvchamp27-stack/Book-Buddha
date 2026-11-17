@@ -922,7 +922,23 @@ describe("payment dates: a payment can be entered after the fact with its real d
  *   April
  *   Totals   - income 10,000, cost 6,000, which is exactly the accrual position.
  */
-describe("cash view: a note that is PART offset and PART refundable (figures unconfirmed)", () => {
+/**
+ * OWNER-CONFIRMED 2026-11-17 (S5-9): January income 14,000 / COGS 5,600; February income 0 /
+ * COGS 400; March income -1,500; April income -2,500.
+ *
+ * POLICY HE CONFIRMED WITH IT: allocation is ACCOUNT-WIDE and proportional, NOT line by line.
+ * The walk does not remember that one rupee was goods and another freight; at a payment every
+ * income account moves by the same fraction and every cost account by the same fraction. The
+ * figures above are therefore one fraction applied per account, not a goods/freight split.
+ *
+ * THREE FIGURES THAT ARE EASILY CONFUSED HERE, all Rs 14,000 or Rs 10,000:
+ *   - Rs 10,000 is the REVISED INVOICE VALUE after the full Rs 5,000 note (15,000 - 5,000).
+ *   - Rs 14,000 is the bill net of only the part of the note that CAME OFF IT (15,000 - 1,000);
+ *     the other Rs 4,000 is a liability, recognised when it is refunded, not at the note.
+ *   - Rs 14,000 is ALSO the cash income already recognised in January. Same number, different
+ *     thing - which is exactly why the February true-up reads as zero.
+ */
+describe("cash view: a note that is PART offset and PART refundable (CONFIRMED S5-9)", () => {
   it("divides the note pro rata and still converges on accrual", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");

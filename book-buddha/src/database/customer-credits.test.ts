@@ -370,7 +370,13 @@ describe("applying a credit note to a later invoice", () => {
     return { repository, businessId, otherBusinessId, customerId, otherCustomerId, itemId, invoice, note };
   }
 
-  it("ACCEPTANCE apply (figures unconfirmed): Rs 400 of credit settles Rs 400 of the next invoice", () => {
+  /**
+   * OWNER-CONFIRMED 2026-11-17 (S5-9). He reviewed the full event sequence, the journal entries,
+   * the monthly cash figures and the year-to-date reconciliation in R3-WORKINGS.md, and accepted:
+   * March nets to zero (minus 400 on invoice A, plus 400 on invoice B), and the remaining Rs 600
+   * is recognised WHEN COLLECTED - which is the April step at the end of this test.
+   */
+  it("ACCEPTANCE apply (CONFIRMED S5-9): Rs 400 of credit settles Rs 400 of the next invoice", () => {
     const w = world();
     try {
       const period = (fromDate: string, toDate: string) =>
@@ -416,6 +422,18 @@ describe("applying a credit note to a later invoice", () => {
       expect(receivable?.outstandingPaise).toBe(60000);
       // January untouched throughout: S1-6.
       expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(100000);
+
+      // S5-9, the owner's explicit condition: the remaining Rs 600 is recognised WHEN COLLECTED.
+      // Until it is, cash (1,000) is deliberately BELOW accrual (1,600) - this scenario is not a
+      // convergence test on its own. Collecting it closes the gap exactly.
+      vi.setSystemTime(new Date("2026-04-10T06:00:00.000Z"));
+      w.repository.recordPayment("B", 60000, "2026-04-10");
+      expect(period("2026-04-01", "2026-04-30").totalIncomePaise).toBe(60000);
+      expect(w.repository.getProfitAndLoss({ basis: "CASH" }).totalIncomePaise).toBe(160000);
+      expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(160000);
+      // And the earlier months still do not move.
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(100000);
+      expect(period("2026-03-01", "2026-03-31").totalIncomePaise).toBe(0);
     } finally {
       w.repository.close();
     }
