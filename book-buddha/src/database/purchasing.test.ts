@@ -740,7 +740,8 @@ describe("accrual-always credit purchases (cash-basis company)", () => {
         repository.close();
       }
     }
-  });
+  }, 30_000); // 60 rounds x a fresh migrated database: deterministic but slow, and it timed out
+  // under vitest's 5s default whenever another suite ran concurrently. Not flakiness.
 
   it("keeps the accrual path unchanged for PAYABLES bills and expenses", () => {
     const world = setup("ACCRUAL");
