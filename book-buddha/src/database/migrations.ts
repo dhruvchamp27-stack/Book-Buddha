@@ -7,6 +7,7 @@ import { applyAttachmentsSchema } from "./attachments-schema.js";
 import { applyAuditChainSchema } from "./audit-chain-schema.js";
 import { applyChartOfAccountsSchema } from "./chart-accounts-schema.js";
 import { applyFinancialYearsSchema } from "./financial-years-schema.js";
+import { applyCreditDischargeSchema, applyCustomerCreditsSchema } from "./customer-credits-schema.js";
 
 export interface Migration {
   version: number;
@@ -158,6 +159,26 @@ export const migrations: readonly Migration[] = [
     // Additive: one new table (plus its indexes) for financial years and their lock state.
     // Nothing existing is touched. Default (transactional) so a failed create rolls back.
     up: applyFinancialYearsSchema,
+  },
+  {
+    version: 11,
+    name: "customer_credits",
+    // Rebuilds chart_accounts to widen the `role` CHECK so CUSTOMER_CREDITS can exist (S4-1),
+    // and seeds the accounts added since v9 - CUSTOMER_CREDITS and UNCATEGORIZED_INCOME (S4-4).
+    // The rebuild must drop and replay EVERY trigger whose body mentions chart_accounts,
+    // including journal_lines_account_exists which lives on another table: SQLite re-parses
+    // triggers during ALTER TABLE ... RENAME and the rename fails otherwise. Like v9 it needs
+    // PRAGMA foreign_keys = OFF, a no-op inside a transaction, so it manages its own.
+    transactional: false,
+    up: applyCustomerCreditsSchema,
+  },
+  {
+    version: 12,
+    name: "credit_discharge",
+    // Additive: the two tables a credit note is discharged through - refunds and applications
+    // against a later invoice (S4-5) - plus credit_notes.refundable_paise, which persists how
+    // much of a note was NOT set against an open balance. Default (transactional).
+    up: applyCreditDischargeSchema,
   },
 ];
 

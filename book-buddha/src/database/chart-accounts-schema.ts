@@ -35,11 +35,28 @@ export type AccountType = (typeof ACCOUNT_TYPES)[number];
  * `gstOnSalesPaise` (OUTPUT_GST) and the cash view, which excludes the money and settlement
  * accounts - CASH, BANK, RECEIVABLES, PAYABLES - and includes everything else.
  */
-export const ACCOUNT_ROLES = ["CASH", "BANK", "RECEIVABLES", "PAYABLES", "INVENTORY", "OUTPUT_GST", "INPUT_GST"] as const;
+/**
+ * FROZEN AT v9 - do not add to this list, ever. `applyChartOfAccountsSchema` builds the role
+ * CHECK from it, and it reads the constant LIVE. Widening it would give every fresh database the
+ * newer CHECK at v9 while an already-migrated one kept the old CHECK, so a later migration's
+ * "has it been widened yet?" guard would be true on fresh databases and false only on the
+ * owner's. The rebuild would then run for the first time on real data, having never once run in
+ * a test. This is exactly the trap the ACCOUNTS constant set for migration v4. New roles go in
+ * ACCOUNT_ROLES below and are applied by the migration that widens the CHECK.
+ */
+const V9_ACCOUNT_ROLES = ["CASH", "BANK", "RECEIVABLES", "PAYABLES", "INVENTORY", "OUTPUT_GST", "INPUT_GST"] as const;
+
+/** The live list: what the role CHECK should be TODAY. v11 widened it to carry CUSTOMER_CREDITS. */
+export const ACCOUNT_ROLES = [...V9_ACCOUNT_ROLES, "CUSTOMER_CREDITS"] as const;
 export type AccountRole = (typeof ACCOUNT_ROLES)[number];
 
-/** Roles whose lines are settlement, not performance: excluded from the cash view. */
-export const SETTLEMENT_ROLES = ["CASH", "BANK", "RECEIVABLES", "PAYABLES"] as const;
+/**
+ * Roles whose lines are settlement, not performance: excluded from the cash view. CUSTOMER_CREDITS
+ * belongs here for the same reason RECEIVABLES does - it records who owes whom, not what was
+ * earned. Leaving it out would also corrupt a credit note's own tax-inclusive value in the walk,
+ * which is measured as the negated sum of the note's NON-settlement lines.
+ */
+export const SETTLEMENT_ROLES = ["CASH", "BANK", "RECEIVABLES", "PAYABLES", "CUSTOMER_CREDITS"] as const;
 
 export interface SeedAccount {
   readonly code: string;
@@ -53,7 +70,7 @@ export interface SeedAccount {
  * UNCATEGORIZED is seeded as an EXPENSE: it is the landing account for an uncategorised bank
  * debit, and the overwhelming majority of those are costs. ASSUMPTION - flagged to the owner.
  */
-export const SEED_ACCOUNTS: readonly SeedAccount[] = [
+const V9_SEED_ACCOUNTS: readonly SeedAccount[] = [
   // Assets
   { code: "CASH", name: "Cash", type: "ASSET", role: "CASH" },
   { code: "BANK", name: "Bank", type: "ASSET", role: "BANK" },
@@ -81,6 +98,23 @@ export const SEED_ACCOUNTS: readonly SeedAccount[] = [
   { code: "COGS", name: "Cost of Goods Sold", type: "EXPENSE" },
   { code: "EXPENSE", name: "Expenses", type: "EXPENSE" },
   { code: "UNCATEGORIZED", name: "Uncategorised", type: "EXPENSE" },
+];
+
+/**
+ * The live chart: what should exist TODAY. FROZEN v9 list above, plus everything later migrations
+ * add. v11 adds two accounts:
+ *
+ * - CUSTOMER_CREDITS - money owed BACK to a customer, created when a credit note is worth more
+ *   than the invoice still owes (S4-1). It is a liability, and it is discharged either by
+ *   refunding cash or by setting the credit against the customer's next invoice (S4-5).
+ * - UNCATEGORIZED_INCOME - the owner's S4-4 ruling. UNCATEGORIZED keeps its code (codes are
+ *   immutable under S2-1) and becomes explicitly the EXPENSE side; an uncategorised bank RECEIPT
+ *   now has somewhere of its own to land instead of reading as a negative expense.
+ */
+export const SEED_ACCOUNTS: readonly SeedAccount[] = [
+  ...V9_SEED_ACCOUNTS.map((a) => (a.code === "UNCATEGORIZED" ? { ...a, name: "Uncategorised Expense" } : a)),
+  { code: "CUSTOMER_CREDITS", name: "Customer Credits", type: "LIABILITY", role: "CUSTOMER_CREDITS" },
+  { code: "UNCATEGORIZED_INCOME", name: "Uncategorised Income", type: "INCOME" },
 ];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [
@@ -157,7 +191,7 @@ function createTable(db: Database.Database): void {
       company_id TEXT REFERENCES companies(id),
       name TEXT NOT NULL,
       type TEXT NOT NULL CHECK(type IN (${ACCOUNT_TYPES.map((t) => `'${t}'`).join(", ")})),
-      role TEXT CHECK(role IN (${ACCOUNT_ROLES.map((r) => `'${r}'`).join(", ")})),
+      role TEXT CHECK(role IN (${V9_ACCOUNT_ROLES.map((r) => `'${r}'`).join(", ")})),
       parent_code TEXT REFERENCES chart_accounts(code),
       active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
       created_at TEXT NOT NULL,
@@ -175,7 +209,9 @@ function seed(db: Database.Database): void {
   const insert = db.prepare(
     "INSERT OR IGNORE INTO chart_accounts (code, company_id, name, type, role, parent_code, active, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?)",
   );
-  for (const account of SEED_ACCOUNTS) {
+  // The FROZEN v9 list: see V9_ACCOUNT_ROLES. Accounts added after v9 are seeded by the
+  // migration that added them, so a fresh database and the owner's take the same path.
+  for (const account of V9_SEED_ACCOUNTS) {
     insert.run(account.code, account.name, account.type, account.role ?? null, now, now);
   }
 }
