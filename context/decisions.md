@@ -7,6 +7,36 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S8-4 (2026-11-17) — ASSISTANT FINDING, NOT FIXED: a credit note has no date of its own, so a
+  return cannot be back-dated.** `CreditNote` (`src/accounting/types.ts`) carries no date field, so
+  its journal entry is dated the day it is FINALIZED. A return against a May invoice therefore
+  lands in today's month, and a return that belongs in a closed period cannot be entered there at
+  all. Found while wiring the sales reports: a date-filtered sales report nets off a credit note
+  that the filter should have excluded. **Pinned in a test** (`reports-wiring.test.ts`) with the
+  reason rather than changed — giving credit notes a date is a schema change, not report wiring.
+- **S8-3 (2026-11-17) — `GeneralLedgerRow.date` IS NOW `postedAt`; the ledger presents
+  `entryDate`.** The carry-over from S5-7 is settled. The field held the POSTING timestamp while
+  being called "date" and rendered as one, so a back-dated entry appeared under today — visible on
+  screen with four invoices dated 2025-03 to 2026-06 all showing 11/17/2026. **Renamed rather than
+  redefined**, so the compiler found every reader; the only one was the ledger table. `entryDate`,
+  the transaction date, already existed beside it.
+- **S8-2 (2026-11-17) — THE AGEING REPORTS' `asAtDate` AGES, IT DOES NOT RECONSTRUCT.** A document
+  dated after the as-at date is excluded, but **settlement is counted as it stands today**. So the
+  report answers "how old is what is still owed, counted from this date", NOT "what was owed on
+  that date": an invoice raised in March and paid last week reads as settled even when asked as at
+  April. A true as-at position needs the open-items query to date settlements too. **Stated on the
+  type**, not implied away. Also: the exclusion applies **only when a date was asked for** — with
+  none, an invoice dated tomorrow is still owed now, and dropping it would hide a real debt.
+- **S8-1 (2026-11-17) — R8 AS BUILT: cancelling a payment corrects ACCRUAL today but rewrites the
+  CASH view's ORIGINAL period. THE ASSISTANT'S CHOICE, OPEN TO REVERSAL — a decision for the
+  owner.** `cancelPayment` marks the row, leaves the original entry exactly as posted and posts a
+  reversing entry dated TODAY, so accrual is corrected in the current period and the old one is
+  untouched. But the **cash view is DERIVED from the documents, not posted**: a cancelled receipt
+  simply stops being recognised, so the cash P&L of the month the money came in changes
+  retrospectively — and **the financial-year lock does not protect it, because nothing is posted
+  for the lock to refuse**. Proved live: May's cash profit went 100,000 → 0 on cancellation while
+  accrual stayed 100,000. **Pinned in a test, deliberately not changed.**
+
 - **S7-2 (2026-11-17) — ASSISTANT FINDING, NOT FIXED: a stock movement cannot be reversed,
   deleted or entered negative, and R4c makes that hurt more.** The only public operations are
   `addStockMovement` and `listStockMovements`; there is no reversal and quantity must be positive

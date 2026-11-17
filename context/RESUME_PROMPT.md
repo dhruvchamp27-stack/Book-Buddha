@@ -139,7 +139,10 @@ the test files separately before changing any signature.** `repository.ts` line 
 - Max 2 agents; **NEVER both in `repository.ts`.** The orchestrator owns `migrations.ts`, assigns
   versions, and **alone runs the full suite** (S5-5). **Review what agents hand back — read the
   code, do not take the report on trust.**
-- **Advisor = Fable. Discuss the plan BEFORE building and again before declaring done.** In session
+- **Advisor = Fable. Discuss the plan BEFORE building and again before declaring done.** Use 
+Sonnet for code writing and development and opus the main agent does all the testings i.e. opus. Use Haiku with CBM to update and search files and docs.
+
+In session
   7 it caught the backfill route that no test had ever executed, the workings document claiming
   invented figures were the owner's real data, and the missing fair-tag test.
 - Stage by **explicit path**, never `git add -A`. One commit = one idea. **Put the honest limits in
