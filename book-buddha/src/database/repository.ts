@@ -1461,6 +1461,9 @@ export class AccountingRepository {
       }
       const invoice = this.getInvoice(note.invoiceId);
       const row = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
+      // Validated as a real date, not merely string-compared: "garbage" sorts after every ISO
+      // date, so it would clear the check below and land straight in entryDate.
+      this.assertIsoDate("Refund date", input.refundedOn);
       const noteDate = istDateOf(row.created_at);
       if (input.refundedOn < noteDate) {
         throw new RepositoryValidationError(`A refund cannot predate its credit note (${noteDate}).`);
@@ -1545,6 +1548,7 @@ export class AccountingRepository {
         throw new RepositoryValidationError("A credit can only be applied to an invoice in the same business.");
       }
       const row = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
+      this.assertIsoDate("Application date", input.appliedOn);
       const noteDate = istDateOf(row.created_at);
       if (input.appliedOn < noteDate) {
         throw new RepositoryValidationError(`A credit cannot be applied before its credit note (${noteDate}).`);

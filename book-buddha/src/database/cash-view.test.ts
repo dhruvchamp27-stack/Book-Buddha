@@ -358,7 +358,7 @@ describe("cash view: documents paid at once and reversals", () => {
   });
 });
 
-describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirmed)", () => {
+describe("cash view: credit notes re-base the remainder (S2-2, S4-3, S4-6; figures CONFIRMED)", () => {
   // The uniform rule folds a credit note's lines into its invoice's lines. No refund is modelled.
   function creditNote(w: World, id: string): void {
     w.repository.saveCreditNote({
@@ -896,6 +896,161 @@ describe("payment dates: a payment can be entered after the fact with its real d
       expect((await post("/invoices/INV-1/payments", { amountPaise: 1000 })).statusCode).toBe(201);
     } finally {
       await app.close();
+      w.repository.close();
+    }
+  });
+});
+
+/**
+ * THE SPLIT NOTE - the one shape every other test misses. S4-6 covers a note that is wholly
+ * refundable, S4-3 one that is wholly offset; this is a note that is BOTH, which is the only
+ * case that exercises the pro-rata division of a note's lines between what came off the bill
+ * and what is owed back. That division is the assistant's modelling choice, so the figures here
+ * are UNCONFIRMED until the owner works them by hand.
+ *
+ * Invoice Rs 15,000 - goods Rs 10,000 costing Rs 6,000, plus freight Rs 5,000 carrying no cost.
+ * Rs 14,000 collected in January. In February the freight is credited: only Rs 1,000 was still
+ * owed, so Rs 1,000 comes off the bill and Rs 4,000 becomes money owed back, refunded in two
+ * parts across March and April.
+ *
+ * Worked by hand:
+ *   January  - 14/15 of everything: income 14,000, cost 5,600.
+ *   February - the note clears the Rs 1,000 still owed, so S4-3 trues up. Income does not move
+ *              (the Rs 1,000 offset cancels the Rs 1,000 of income it had already recognised),
+ *              but the cost of the goods the customer KEPT lands: +400.
+ *   March +   - the refunds give back 4/5 of a Rs 5,000 freight line: income -4,000 in total.
+ *   April
+ *   Totals   - income 10,000, cost 6,000, which is exactly the accrual position.
+ */
+describe("cash view: a note that is PART offset and PART refundable (figures unconfirmed)", () => {
+  it("divides the note pro rata and still converges on accrual", () => {
+    vi.useFakeTimers();
+    at("2026-01-10T06:00:00.000Z");
+    const w = world();
+    try {
+      const period = (fromDate: string, toDate: string) =>
+        w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate });
+
+      w.repository.saveDraft({
+        id: "INV-S", number: "INV-S", businessId: w.businessId, customerId: w.customerId,
+        invoiceDate: "2026-01-10", paymentAccount: "RECEIVABLES", status: "DRAFT",
+        taxType: "NONE", taxRateBasisPoints: 0,
+        lines: [
+          { itemId: w.goodsId, description: "Goods", quantity: 10, unitPricePaise: 100000 },
+          { itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 500000 },
+        ],
+      });
+      w.repository.finalizeInvoice("INV-S");
+
+      at("2026-01-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-S", 1400000, "2026-01-20");
+      // 14/15 of the invoice: income 1,400,000 and cost 560,000.
+      expect(period("2026-01-01", "2026-01-31")).toMatchObject({ totalIncomePaise: 1400000, totalExpensesPaise: 560000 });
+
+      at("2026-02-10T06:00:00.000Z");
+      w.repository.saveCreditNote({
+        id: "CN-S", invoiceId: "INV-S", number: "CN-S", reason: "Freight waived", status: "DRAFT",
+        lines: [{ itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 500000 }],
+      });
+      w.repository.finalizeCreditNote("CN-S");
+
+      // THE SPLIT: only 100,000 was still owed, so that much comes off the bill and 400,000 is
+      // owed back. This is the assertion the other tests cannot make.
+      expect(w.repository.getCreditNoteBalance("CN-S")).toMatchObject({ refundablePaise: 400000, outstandingPaise: 400000 });
+
+      // February: the note clears the balance, so S4-3 trues up the cost of the goods KEPT.
+      // Income does not move - the offset exactly cancels the income already recognised for it.
+      expect(period("2026-02-01", "2026-02-28")).toMatchObject({ totalIncomePaise: 0, totalExpensesPaise: 40000 });
+      // January is untouched by the note, which is S1-6.
+      expect(period("2026-01-01", "2026-01-31")).toMatchObject({ totalIncomePaise: 1400000, totalExpensesPaise: 560000 });
+
+      // The refund goes back in two parts, so the cumulative ladder has to telescope.
+      at("2026-03-05T06:00:00.000Z");
+      w.repository.recordCreditNoteRefund({ id: "RF-1", creditNoteId: "CN-S", amountPaise: 150000, refundedOn: "2026-03-05", paymentAccount: "CASH" });
+      at("2026-04-05T06:00:00.000Z");
+      w.repository.recordCreditNoteRefund({ id: "RF-2", creditNoteId: "CN-S", amountPaise: 250000, refundedOn: "2026-04-05", paymentAccount: "BANK" });
+
+      // 4/5 of the 500,000 freight line handed back, split across the two refund months.
+      const march = period("2026-03-01", "2026-03-31");
+      const april = period("2026-04-01", "2026-04-30");
+      expect(march.totalIncomePaise + april.totalIncomePaise).toBe(-400000);
+      expect(march.totalExpensesPaise).toBe(0);
+      expect(april.totalExpensesPaise).toBe(0);
+      // January STILL untouched after both refunds.
+      expect(period("2026-01-01", "2026-01-31")).toMatchObject({ totalIncomePaise: 1400000, totalExpensesPaise: 560000 });
+
+      // And the whole thing converges on accrual: income 10,000, cost 6,000.
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(accrual).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 600000 });
+      expect(cash.totalIncomePaise).toBe(1000000);
+      expect(cash.totalExpensesPaise).toBe(600000);
+      // Gross is the cash that actually stayed: 1,400,000 collected less 400,000 given back.
+      expect(cash.grossSalesPaise).toBe(1000000);
+      expect(cash.grossSalesPaise).toBe(cash.totalIncomePaise + cash.gstOnSalesPaise);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("does the same with GST and real stock behind the returned line", () => {
+    vi.useFakeTimers();
+    at("2026-01-10T06:00:00.000Z");
+    const w = world();
+    try {
+      // The owner's invoice: 1,000,000 taxable + 180,000 GST, cost 600,000 for 10 units.
+      ownerInvoice(w, "INV-G", "2026-01-10");
+      at("2026-01-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-G", 1100000, "2026-01-20"); // leaves 80,000 owed
+
+      at("2026-02-10T06:00:00.000Z");
+      // 2 units back: 200,000 taxable + 36,000 GST = 236,000, of which only 80,000 can come off
+      // the bill. 156,000 is owed back.
+      w.repository.saveCreditNote({
+        id: "CN-G", invoiceId: "INV-G", number: "CN-G", reason: "Return", status: "DRAFT",
+        lines: [{ itemId: w.goodsId, description: "Goods", quantity: 2, unitPricePaise: 100000 }],
+      });
+      w.repository.finalizeCreditNote("CN-G");
+      expect(w.repository.getCreditNoteBalance("CN-G")).toMatchObject({ refundablePaise: 156000 });
+
+      at("2026-03-05T06:00:00.000Z");
+      w.repository.recordCreditNoteRefund({ id: "RF-G", creditNoteId: "CN-G", amountPaise: 156000, refundedOn: "2026-03-05", paymentAccount: "CASH" });
+
+      // Fully settled and fully refunded, so cash must equal accrual on every total - including
+      // GST, which the stock entry and the tax clamp both have a chance to knock off.
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(accrual).toMatchObject({ totalIncomePaise: 800000, gstOnSalesPaise: 144000, totalExpensesPaise: 480000 });
+      expect(cash.totalIncomePaise).toBe(800000);
+      expect(cash.gstOnSalesPaise).toBe(144000);
+      expect(cash.totalExpensesPaise).toBe(480000);
+      expect(cash.grossSalesPaise).toBe(cash.totalIncomePaise + cash.gstOnSalesPaise);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses a refund or an application whose date is not a real date", () => {
+    vi.useFakeTimers();
+    at("2026-01-10T06:00:00.000Z");
+    const w = world();
+    try {
+      ownerInvoice(w, "INV-D", "2026-01-10");
+      at("2026-01-20T06:00:00.000Z");
+      w.repository.recordPayment("INV-D", 1180000, "2026-01-20");
+      at("2026-02-10T06:00:00.000Z");
+      w.repository.saveCreditNote({
+        id: "CN-D", invoiceId: "INV-D", number: "CN-D", reason: "Return", status: "DRAFT",
+        lines: [{ itemId: w.goodsId, description: "Goods", quantity: 2, unitPricePaise: 100000 }],
+      });
+      w.repository.finalizeCreditNote("CN-D");
+      // "garbage" sorts after every ISO date, so a plain string comparison would wave it
+      // through and put it straight into the journal entry's date.
+      expect(() => w.repository.recordCreditNoteRefund({ id: "RF-D", creditNoteId: "CN-D", amountPaise: 1000, refundedOn: "garbage", paymentAccount: "CASH" }))
+        .toThrow(/Refund date/);
+      expect(() => w.repository.recordCreditNoteRefund({ id: "RF-D2", creditNoteId: "CN-D", amountPaise: 1000, refundedOn: "2026-13-45", paymentAccount: "CASH" }))
+        .toThrow(/Refund date/);
+    } finally {
       w.repository.close();
     }
   });
