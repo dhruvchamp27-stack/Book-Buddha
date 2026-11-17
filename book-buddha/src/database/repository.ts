@@ -52,6 +52,7 @@ import type {
 } from "./purchasing-types.js";
 export type * from "./purchasing-types.js";
 import { hashPassword, passwordPolicyProblem, verifyPassword } from "../auth/password.js";
+import { generateRecoveryCode, normaliseRecoveryCode } from "../auth/recovery-code.js";
 import {
   generateSessionToken,
   hashToken,
@@ -696,6 +697,8 @@ interface AuthUserRow {
   readonly password_hash: string;
   readonly failed_attempts: number;
   readonly locked_until: string | null;
+  /** Null on an admin created before migration v16; see recoverPassword (S6-3). */
+  readonly recovery_code_hash: string | null;
 }
 
 /** Auth failures that need a specific HTTP status (401 bad credentials/session, 409 not set up, 423 locked). */
@@ -4220,20 +4223,75 @@ export class AccountingRepository {
     return { configured: true, locked: false };
   }
 
-  public setupAdmin(input: { password: string; email?: string; googleSub?: string; nowIso?: string }): { userId: string } {
+  /**
+   * Creates the one admin account and fixes its recovery code (S6-3).
+   *
+   * The raw code is returned HERE AND NOWHERE ELSE — only its hash is stored, and
+   * it is deliberately kept out of the audit event, because an audit row the owner
+   * can read is not a secret. If it is not written down at this moment it cannot be
+   * recovered, only replaced by `mintRecoveryCode` from a signed-in session.
+   */
+  public setupAdmin(input: { password: string; email?: string; googleSub?: string; nowIso?: string }): {
+    userId: string;
+    recoveryCode: string;
+  } {
     if (this.isAdminConfigured()) throw new RepositoryValidationError("An admin account already exists.");
     this.assertPasswordPolicy(input.password);
     const now = input.nowIso ?? new Date().toISOString();
     const userId = randomUUID();
+    const recoveryCode = generateRecoveryCode();
     this.db.transaction(() => {
       this.db
         .prepare(
-          "INSERT INTO auth_users (id, role, email, google_sub, password_hash, created_at, updated_at) VALUES (?, 'ADMIN', ?, ?, ?, ?, ?)",
+          "INSERT INTO auth_users (id, role, email, google_sub, password_hash, recovery_code_hash, created_at, updated_at) VALUES (?, 'ADMIN', ?, ?, ?, ?, ?, ?)",
         )
-        .run(userId, input.email ?? null, input.googleSub ?? null, hashPassword(input.password), now, now);
+        .run(
+          userId,
+          input.email ?? null,
+          input.googleSub ?? null,
+          hashPassword(input.password),
+          hashToken(normaliseRecoveryCode(recoveryCode)),
+          now,
+          now,
+        );
+      // Exactly one audit event, as before. Adding a second here would shift every
+      // audit-chain sequence assertion in the suite.
       this.insertAuditEvent({ action: "auth.admin_created", entityId: userId, occurredAt: now });
     })();
-    return { userId };
+    return { userId, recoveryCode };
+  }
+
+  /**
+   * Issues a fresh recovery code for a signed-in admin, replacing any previous one.
+   *
+   * This is the only way a database set up BEFORE v16 can get a code at all, since
+   * its `recovery_code_hash` is NULL and no code for it was ever shown to anyone.
+   *
+   * It demands the current password as well as a valid session, exactly as
+   * `changePassword` does, so that a stolen token alone cannot mint a credential
+   * that outlives the session it was stolen from.
+   */
+  public mintRecoveryCode(input: { token: string; currentPassword: string; nowIso?: string }): {
+    recoveryCode: string;
+  } {
+    const now = input.nowIso ?? new Date().toISOString();
+    const session = this.validateSession(input.token, now);
+    if (session === null) throw new AuthenticationError("Your session has expired. Please sign in again.", 401);
+    const user = this.getAdminRow();
+    if (user === undefined || user.id !== session.userId) {
+      throw new AuthenticationError("Your session has expired. Please sign in again.", 401);
+    }
+    if (!verifyPassword(input.currentPassword, user.password_hash as string)) {
+      throw new AuthenticationError("Incorrect password.", 401);
+    }
+    const recoveryCode = generateRecoveryCode();
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE auth_users SET recovery_code_hash = ?, updated_at = ? WHERE id = ?")
+        .run(hashToken(normaliseRecoveryCode(recoveryCode)), now, user.id);
+      this.insertAuditEvent({ action: "auth.recovery_code_issued", entityId: user.id as string, occurredAt: now });
+    })();
+    return { recoveryCode };
   }
 
   public login(password: string, nowIso = new Date().toISOString()): { token: string; sessionId: string; expiresAt: string } {
@@ -4349,29 +4407,60 @@ export class AccountingRepository {
    * verification needs network + the frontend and is DEFERRED to the later UI
    * slice. Until then the /auth/recover route must not be exposed beyond localhost.
    */
-  public recoverPassword(input: { googleSub?: string; email?: string; newPassword: string; nowIso?: string }): void {
+  /**
+   * Resets a forgotten admin password against the recovery code (S6-3).
+   *
+   * This endpoint is reachable WITHOUT a session — it has to be, or it could not
+   * help the one person it exists for — so the code is the entire trust boundary.
+   * The old behaviour, resetting on a bare `email` or `google_sub` match with no
+   * secret at all, is gone: anyone who knew the owner's email address could take
+   * the books over.
+   *
+   * A row whose `recovery_code_hash` is NULL REFUSES. That is an admin created
+   * before v16, for whom no code was ever shown to anyone; falling back to the old
+   * match for those rows would leave the hole open on exactly the database that
+   * matters. Such an owner signs in and calls `mintRecoveryCode` instead.
+   *
+   * Using the code BURNS it: a new one is issued in the same transaction as the
+   * reset and returned once, so a code read over someone's shoulder cannot be
+   * replayed, and the owner is never left without a way back in.
+   */
+  public recoverPassword(input: { recoveryCode: string; newPassword: string; nowIso?: string }): {
+    recoveryCode: string;
+  } {
     const now = input.nowIso ?? new Date().toISOString();
     const user = this.getAdminRow();
     if (user === undefined) throw new AuthenticationError("No admin account is set up yet.", 409);
-    const matches =
-      input.googleSub !== undefined && user.google_sub !== null
-        ? input.googleSub === user.google_sub
-        : input.email !== undefined && user.email !== null && input.email.toLowerCase() === user.email.toLowerCase();
-    if (!matches) throw new AuthenticationError("The identity does not match the admin account.", 401);
+    const storedHash = user.recovery_code_hash as string | null;
+    if (storedHash === null || storedHash === undefined) {
+      throw new AuthenticationError(
+        "This workspace has no recovery code. Sign in and create one before you need it.",
+        409,
+      );
+    }
+    if (hashToken(normaliseRecoveryCode(input.recoveryCode)) !== storedHash) {
+      throw new AuthenticationError("That recovery code is not correct.", 401);
+    }
     this.assertPasswordPolicy(input.newPassword);
     const newHash = hashPassword(input.newPassword);
+    const recoveryCode = generateRecoveryCode();
     this.db.transaction(() => {
       this.db
-        .prepare("UPDATE auth_users SET password_hash = ?, failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?")
-        .run(newHash, now, user.id);
+        .prepare(
+          "UPDATE auth_users SET password_hash = ?, recovery_code_hash = ?, failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run(newHash, hashToken(normaliseRecoveryCode(recoveryCode)), now, user.id);
       this.db.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(now, user.id);
       this.insertAuditEvent({ action: "auth.password_recovered", entityId: user.id, occurredAt: now });
     })();
+    return { recoveryCode };
   }
 
   private getAdminRow(): AuthUserRow | undefined {
     return this.db
-      .prepare("SELECT id, email, google_sub, password_hash, failed_attempts, locked_until FROM auth_users ORDER BY created_at, rowid LIMIT 1")
+      .prepare(
+        "SELECT id, email, google_sub, password_hash, failed_attempts, locked_until, recovery_code_hash FROM auth_users ORDER BY created_at, rowid LIMIT 1",
+      )
       .get() as AuthUserRow | undefined;
   }
 

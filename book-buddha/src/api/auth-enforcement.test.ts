@@ -35,6 +35,9 @@ const MUST_BE_PROTECTED = [
   "POST /invoices/:invoiceId/payments",
   "GET /reports/trial-balance",
   "POST /auth/change-password",
+  // Minting a recovery code must never be public: it would hand out a permanent
+  // credential to anyone who asked (S6-3).
+  "POST /auth/recovery-code",
 ] as const;
 
 /** Fills route parameters so the path still MATCHES the route and reaches the hook. */
@@ -356,21 +359,21 @@ describe("API authentication is enforced on every financial route", () => {
       const unconfigured = await app.inject({
         method: "POST",
         url: "/auth/recover",
-        payload: { email: "owner@example.com", newPassword: "Secret123" },
+        payload: { recoveryCode: "ABCDE-ABCDE-ABCDE-ABCDE-ABCDE-ABCDE", newPassword: "Secret123" },
       });
       expect(unconfigured.statusCode).toBe(409);
       expect(unconfigured.json<{ error: string }>().error).toBe("No admin account is set up yet.");
       expect(unconfigured.json<{ error: string }>().error).not.toBe(AUTH_HOOK_MESSAGES.notSetUp);
 
       await setUpAdmin(app);
-      const wrongIdentity = await app.inject({
+      const wrongCode = await app.inject({
         method: "POST",
         url: "/auth/recover",
-        payload: { email: "someone-else@example.com", newPassword: "Secret123" },
+        payload: { recoveryCode: "ABCDE-ABCDE-ABCDE-ABCDE-ABCDE-ABCDE", newPassword: "Secret123" },
       });
-      expect(wrongIdentity.statusCode).toBe(401);
-      expect(wrongIdentity.json<{ error: string }>().error).toBe("The identity does not match the admin account.");
-      expect(wrongIdentity.json<{ error: string }>().error).not.toBe(AUTH_HOOK_MESSAGES.noToken);
+      expect(wrongCode.statusCode).toBe(401);
+      expect(wrongCode.json<{ error: string }>().error).toBe("That recovery code is not correct.");
+      expect(wrongCode.json<{ error: string }>().error).not.toBe(AUTH_HOOK_MESSAGES.noToken);
     } finally {
       await app.close();
       repository.close();

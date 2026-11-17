@@ -104,20 +104,31 @@ describe("auth repository", () => {
     expect(auditActions(repo)).toContain("auth.password_changed");
   });
 
-  it("recoverPassword by googleSub resets password, lockout and sessions; rejects a mismatch", () => {
-    const repo = setup({ googleSub: "google-123", email: "a@example.com" });
+  // Rewritten for S6-3. These two tests used to prove that a matching googleSub or
+  // email was ENOUGH to reset the password. That was the defect, so the behaviour
+  // they pinned is gone; what survives is everything else they checked — the reset
+  // clears the lockout, revokes live sessions and writes its audit event.
+  it("recoverPassword resets password, lockout and sessions when the recovery code is right", () => {
+    const repo = new AccountingRepository(":memory:");
+    const { recoveryCode } = repo.setupAdmin({ password: PW, googleSub: "google-123", email: "a@example.com", nowIso: T0 });
     const { token } = repo.login(PW, at(0));
     for (let i = 1; i <= 5; i++) expect(() => repo.login("Wrong1234", at(i))).toThrow();
-    expect(() => repo.recoverPassword({ googleSub: "other", newPassword: "Recovered789", nowIso: at(6) })).toThrow(/does not match/);
-    repo.recoverPassword({ googleSub: "google-123", newPassword: "Recovered789", nowIso: at(7) });
+    expect(() => repo.recoverPassword({ recoveryCode: "WRONG-CODE", newPassword: "Recovered789", nowIso: at(6) })).toThrow(
+      /not correct/,
+    );
+    repo.recoverPassword({ recoveryCode, newPassword: "Recovered789", nowIso: at(7) });
     expect(repo.validateSession(token, at(8))).toBeNull();
     expect(repo.login("Recovered789", at(9)).token).toBeTruthy();
     expect(auditActions(repo)).toContain("auth.password_recovered");
   });
 
-  it("recoverPassword falls back to email when no google_sub is stored", () => {
-    const repo = setup({ email: "a@example.com" });
-    repo.recoverPassword({ email: "A@Example.com", newPassword: "Recovered789", nowIso: at(1) });
-    expect(repo.login("Recovered789", at(2)).token).toBeTruthy();
+  it("a matching email or googleSub is no longer enough to reset the password", () => {
+    const repo = setup({ googleSub: "google-123", email: "a@example.com" });
+    // The old signature does not type-check any more, so this goes through a cast:
+    // the point is what the RUNTIME does if such a payload ever reaches it.
+    const legacy = repo.recoverPassword.bind(repo) as unknown as (input: Record<string, string>) => unknown;
+    expect(() => legacy({ googleSub: "google-123", newPassword: "Stolen789" })).toThrow();
+    expect(() => legacy({ email: "a@example.com", newPassword: "Stolen789" })).toThrow();
+    expect(repo.login(PW, at(3)).token).toBeTruthy();
   });
 });

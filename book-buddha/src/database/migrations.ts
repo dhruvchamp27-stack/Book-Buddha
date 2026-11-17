@@ -11,6 +11,7 @@ import { applyCreditDischargeSchema, applyCustomerCreditsSchema } from "./custom
 import { applyOpeningBalancesSchema } from "./opening-balances-schema.js";
 import { applyOpeningSubLedgerSchema } from "./opening-sub-ledger-schema.js";
 import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
+import { applyRecoveryCodeSchema } from "./recovery-code-schema.js";
 
 export interface Migration {
   version: number;
@@ -214,6 +215,16 @@ export const migrations: readonly Migration[] = [
     // a fresh database at an EARLIER version, this migration's guard would then skip, and its
     // first real run would be on the owner's database. Default (transactional).
     up: applyInterFairClearingSchema,
+  },
+  {
+    version: 16,
+    name: "recovery_code",
+    // Additive: one nullable column on auth_users holding the HASH of the admin's recovery code
+    // (S6-3). Closes the hole where an email match alone could reset the password. No table is
+    // rebuilt, so no trigger needs replaying, and nothing is backfilled — an admin created before
+    // v16 keeps a NULL, and recovery on such a row refuses rather than falling back to the old
+    // email match. Default (transactional).
+    up: applyRecoveryCodeSchema,
   },
 ];
 

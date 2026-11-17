@@ -305,13 +305,14 @@ const authSetupInput = z.object({
 });
 const authLoginInput = z.object({ password: z.string().min(1) });
 const authChangePasswordInput = z.object({ currentPassword: z.string().min(1), newPassword: z.string().min(1) });
+// Recovery is by recovery code only (S6-3). The old googleSub/email identity match
+// is gone: it was no secret at all, and it reset the password of anyone whose email
+// address was known.
 const authRecoverInput = z.object({
-  googleSub: z.string().trim().min(1).optional(),
-  email: z.string().email().optional(),
+  recoveryCode: z.string().trim().min(1),
   newPassword: z.string().min(1),
-}).refine((value) => value.googleSub !== undefined || value.email !== undefined, {
-  message: "Provide googleSub or email.",
 });
+const authRecoveryCodeInput = z.object({ currentPassword: z.string().min(1) });
 
 const reportDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date written as YYYY-MM-DD.");
 /** Period reports (P&L, General Ledger): optional business and date range. */
@@ -513,7 +514,9 @@ export function buildApi(
       ...(input.email === undefined ? {} : { email: input.email }),
       ...(input.googleSub === undefined ? {} : { googleSub: input.googleSub }),
     });
-    return reply.code(201).send({ id: result.userId });
+    // The recovery code is returned here and never again: only its hash is stored.
+    // The caller must show it to the owner to write down.
+    return reply.code(201).send({ id: result.userId, recoveryCode: result.recoveryCode });
   });
 
   app.post("/auth/login", { config: { public: true } }, async (request) => {
@@ -543,15 +546,28 @@ export function buildApi(
     return { ok: true };
   });
 
-  // Caller must have verified the Google identity already (see recoverPassword).
+  // Public of necessity: someone who has forgotten the password has no session to
+  // prove anything with, so the recovery code is the whole trust boundary (S6-3).
+  // Using a code burns it; the replacement comes back once, here.
   app.post("/auth/recover", { config: { public: true } }, async (request) => {
     const input = parseBody(authRecoverInput, request.body);
-    repository.recoverPassword({
+    const result = repository.recoverPassword({
+      recoveryCode: input.recoveryCode,
       newPassword: input.newPassword,
-      ...(input.googleSub === undefined ? {} : { googleSub: input.googleSub }),
-      ...(input.email === undefined ? {} : { email: input.email }),
     });
-    return { ok: true };
+    return { ok: true, recoveryCode: result.recoveryCode };
+  });
+
+  // NOT public: minting a recovery code needs a live session AND the current
+  // password, so a stolen token alone cannot create a credential that outlives it.
+  // This is also the only way a workspace set up before v16 can obtain a code.
+  app.post("/auth/recovery-code", async (request) => {
+    const input = parseBody(authRecoveryCodeInput, request.body);
+    const result = repository.mintRecoveryCode({
+      token: bearerToken(request.headers.authorization),
+      currentPassword: input.currentPassword,
+    });
+    return { recoveryCode: result.recoveryCode };
   });
 
   app.get("/companies", async () => repository.listCompanies());

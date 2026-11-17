@@ -30,7 +30,7 @@ interface AuthStatus {
  */
 const POLICY_HINT = "At least 8 characters, including a letter and a number.";
 
-type Phase = "checking" | "setup" | "login" | "ready";
+type Phase = "checking" | "setup" | "login" | "code" | "ready";
 
 async function readError(response: Response, fallback: string): Promise<string> {
   try {
@@ -48,6 +48,8 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Held only long enough to show it once. It is never stored anywhere.
+  const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
 
   const check = useCallback(async (): Promise<void> => {
     try {
@@ -74,6 +76,7 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
       event.preventDefault();
       setBusy(true);
       setError(null);
+      let issuedCode: string | null = null;
       try {
         if (phase === "setup") {
           if (password !== confirmPassword) {
@@ -89,6 +92,9 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
             setError(await readError(created, "Could not create the administrator."));
             return;
           }
+          // Shown once and never again — only its hash is stored (S6-3).
+          const body = (await created.json()) as { recoveryCode?: string };
+          issuedCode = body.recoveryCode ?? null;
         }
 
         const signedIn = await fetch("/api/auth/login", {
@@ -111,6 +117,13 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
         setAuthToken(body.token);
         setPassword("");
         setConfirmPassword("");
+        // A code was just issued, so it has to be put in front of the owner before
+        // the page opens. It cannot be retrieved later.
+        if (issuedCode !== null) {
+          setRecoveryCode(issuedCode);
+          setPhase("code");
+          return;
+        }
         setPhase("ready");
       } catch {
         setError("Could not reach Book Buddha. Is the API running on port 3000?");
@@ -122,6 +135,46 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
   );
 
   if (phase === "ready") return <>{children}</>;
+
+  if (phase === "code" && recoveryCode !== null) {
+    return (
+      <main className="shell">
+        <header className="header">
+          <div>
+            <p className="eyebrow">Offline-first accounting</p>
+            <h1>Book Buddha</h1>
+          </div>
+        </header>
+        <section className="card">
+          <p className="eyebrow">Write this down</p>
+          <h3>Your recovery code</h3>
+          <p className="muted">
+            This is the only thing that can reset your password if you forget it. It is shown once
+            and cannot be retrieved later, because Book Buddha keeps only a scrambled copy. Write it
+            on paper and keep it away from this PC.
+          </p>
+          <p className="journal">
+            <strong style={{ fontFamily: "monospace", fontSize: "1.15rem", letterSpacing: "0.05em" }}>
+              {recoveryCode}
+            </strong>
+          </p>
+          <p className="danger">
+            If you lose both the password and this code, the books in this workspace cannot be opened
+            again.
+          </p>
+          <button
+            className="primary"
+            onClick={() => {
+              setRecoveryCode(null);
+              setPhase("ready");
+            }}
+          >
+            I have written it down
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   const isSetup = phase === "setup";
   return (

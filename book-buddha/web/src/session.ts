@@ -8,7 +8,7 @@
  * Deliberately NOT persisted. Nothing is written to localStorage or sessionStorage,
  * so a page refresh signs you out and the gate asks for the password again, and a
  * shared or borrowed browser is never left holding a live session. That is the
- * owner's choice for this proof-of-concept page (S6-1); the trade-off is that a
+ * owner's choice for this proof-of-concept page (S6-2); the trade-off is that a
  * refresh mid-task means signing in again.
  */
 let bearer: string | null = null;
