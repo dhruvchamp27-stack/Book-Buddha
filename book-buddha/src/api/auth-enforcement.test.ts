@@ -374,6 +374,77 @@ describe("API authentication is enforced on every financial route", () => {
       expect(wrongCode.statusCode).toBe(401);
       expect(wrongCode.json<{ error: string }>().error).toBe("That recovery code is not correct.");
       expect(wrongCode.json<{ error: string }>().error).not.toBe(AUTH_HOOK_MESSAGES.noToken);
+
+      // THE ORIGINAL ATTACK, pinned where it actually lived — over HTTP, with the
+      // hook on. Knowing the owner's email address used to be enough to reset the
+      // password. The route must now refuse the old payload outright.
+      const byEmail = await app.inject({
+        method: "POST",
+        url: "/auth/recover",
+        payload: { email: "owner@example.com", newPassword: "Stolen7890" },
+      });
+      expect(byEmail.statusCode).toBe(400);
+      const byGoogle = await app.inject({
+        method: "POST",
+        url: "/auth/recover",
+        payload: { googleSub: "google-123", newPassword: "Stolen7890" },
+      });
+      expect(byGoogle.statusCode).toBe(400);
+      // And the password is untouched: the original one still signs in.
+      expect(await signIn(app)).toMatch(/\S/);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("mints a recovery code only for a signed-in admin who proves the password", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      await setUpAdmin(app);
+      const token = await signIn(app);
+      const headers = { authorization: `Bearer ${token}` };
+
+      // No token at all: refused by the hook, before the handler is reached.
+      const anonymous = await app.inject({
+        method: "POST",
+        url: "/auth/recovery-code",
+        payload: { currentPassword: PASSWORD },
+      });
+      expect(anonymous.statusCode).toBe(401);
+      expect(anonymous.json<{ error: string }>().error).toBe(AUTH_HOOK_MESSAGES.noToken);
+
+      // A valid token but the wrong password: refused by the handler, so a stolen
+      // token alone cannot mint a credential that outlives the session it came from.
+      const wrongPassword = await app.inject({
+        method: "POST",
+        url: "/auth/recovery-code",
+        headers,
+        payload: { currentPassword: "NotThePassword1" },
+      });
+      expect(wrongPassword.statusCode).toBe(401);
+      expect(wrongPassword.json<{ error: string }>().error).not.toBe(AUTH_HOOK_MESSAGES.noToken);
+
+      // Token and password together: a code comes back, and it genuinely recovers.
+      const minted = await app.inject({
+        method: "POST",
+        url: "/auth/recovery-code",
+        headers,
+        payload: { currentPassword: PASSWORD },
+      });
+      expect(minted.statusCode).toBe(200);
+      const { recoveryCode } = minted.json<{ recoveryCode: string }>();
+      expect(recoveryCode).toMatch(/\S/);
+
+      const recovered = await app.inject({
+        method: "POST",
+        url: "/auth/recover",
+        payload: { recoveryCode, newPassword: "Recovered789" },
+      });
+      expect(recovered.statusCode).toBe(200);
+      const after = await app.inject({ method: "POST", url: "/auth/login", payload: { password: "Recovered789" } });
+      expect(after.statusCode).toBe(200);
     } finally {
       await app.close();
       repository.close();

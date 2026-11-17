@@ -50,6 +50,9 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
   const [busy, setBusy] = useState(false);
   // Held only long enough to show it once. It is never stored anywhere.
   const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
+  // Where acknowledging the code leads. "ready" once signed in; "login" when the
+  // account was created but the sign-in after it did not succeed.
+  const [afterCode, setAfterCode] = useState<"ready" | "login">("ready");
 
   const check = useCallback(async (): Promise<void> => {
     try {
@@ -92,9 +95,18 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
             setError(await readError(created, "Could not create the administrator."));
             return;
           }
-          // Shown once and never again — only its hash is stored (S6-3).
+          // Shown once and never again — only its hash is stored (S6-3). Held in
+          // state IMMEDIATELY, before the sign-in that follows: if that sign-in
+          // fails, the account still exists and this is the only copy of its code
+          // in existence, so it must not be lost with the failed request.
           const body = (await created.json()) as { recoveryCode?: string };
           issuedCode = body.recoveryCode ?? null;
+          if (issuedCode !== null) {
+            setRecoveryCode(issuedCode);
+            // Until the sign-in below succeeds, acknowledging leads to the sign-in
+            // form, not into the page.
+            setAfterCode("login");
+          }
         }
 
         const signedIn = await fetch("/api/auth/login", {
@@ -107,11 +119,15 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
           // A wrong password may have just locked the account; re-read the status
           // so the lock and its expiry are shown rather than a bare refusal.
           await check();
+          // If an account was just created, its code exists only here. Show it even
+          // though the sign-in failed, or it is gone for good.
+          if (issuedCode !== null) setPhase("code");
           return;
         }
         const body = (await signedIn.json()) as { token?: string };
         if (body.token === undefined) {
           setError("Book Buddha did not return a session token.");
+          if (issuedCode !== null) setPhase("code");
           return;
         }
         setAuthToken(body.token);
@@ -120,7 +136,7 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
         // A code was just issued, so it has to be put in front of the owner before
         // the page opens. It cannot be retrieved later.
         if (issuedCode !== null) {
-          setRecoveryCode(issuedCode);
+          setAfterCode("ready");
           setPhase("code");
           return;
         }
@@ -162,11 +178,18 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
             If you lose both the password and this code, the books in this workspace cannot be opened
             again.
           </p>
+          {afterCode === "login" && (
+            <p className="danger">
+              Your workspace was created, but signing in afterwards did not work
+              {error === null ? "" : `: ${error}`}. Write the code down first — you will be asked to
+              sign in next.
+            </p>
+          )}
           <button
             className="primary"
             onClick={() => {
               setRecoveryCode(null);
-              setPhase("ready");
+              setPhase(afterCode);
             }}
           >
             I have written it down

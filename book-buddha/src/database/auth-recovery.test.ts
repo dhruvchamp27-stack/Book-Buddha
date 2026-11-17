@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import { generateRecoveryCode, normaliseRecoveryCode } from "../auth/recovery-code.js";
-import { runMigrations } from "./migrations.js";
+import { migrations, runMigrations, type Migration } from "./migrations.js";
+import { applyRecoveryCodeSchema } from "./recovery-code-schema.js";
 import Database from "better-sqlite3";
 
 const T0 = "2026-03-01T10:00:00.000Z";
@@ -142,36 +143,75 @@ describe("password recovery requires the recovery code (S6-3)", () => {
 });
 
 describe("migration v16", () => {
-  it("adds the recovery-code column to a v15 database that already has an admin", () => {
-    // Scoped to v16 alone, deliberately: asserting the whole chain's version set
-    // here would go red the moment v17 lands and would say nothing useful.
+  // Scoped to v16 alone, deliberately: asserting the whole chain's version set here
+  // would go red the moment v17 lands and would say nothing useful.
+  const upTo = (version: number): Migration[] => migrations.filter((m) => m.version <= version);
+  const columns = (db: Database.Database): string[] =>
+    (db.prepare("PRAGMA table_info(auth_users)").all() as Array<{ name: string }>).map((c) => c.name);
+
+  /** A v15 database carrying an admin and a live session, written by raw SQL. */
+  function fifteenWithAdmin(): Database.Database {
     const db = new Database(":memory:");
-    const upToFifteen = runMigrations(db).filter((version) => version <= 15);
-    expect(upToFifteen).toContain(15);
+    expect(runMigrations(db, upTo(15))).toContain(15);
+    expect(columns(db)).not.toContain("recovery_code_hash");
+    db.prepare(
+      "INSERT INTO auth_users (id, role, email, google_sub, password_hash, created_at, updated_at) VALUES ('u1', 'ADMIN', 'owner@example.com', NULL, 'stored-hash', ?, ?)",
+    ).run(T0, T0);
+    db.prepare(
+      "INSERT INTO auth_sessions (id, user_id, token_hash, created_at, last_seen_at, expires_at) VALUES ('s1', 'u1', 'token-hash', ?, ?, ?)",
+    ).run(T0, T0, at(60));
+    return db;
+  }
 
-    const hasColumn = (): boolean =>
-      (db.prepare("PRAGMA table_info(auth_users)").all() as Array<{ name: string }>).some(
-        (c) => c.name === "recovery_code_hash",
-      );
-    expect(hasColumn()).toBe(true);
+  it("adds the column to a real v15 database and leaves the existing admin alone", () => {
+    const db = fifteenWithAdmin();
+    const before = db.prepare("SELECT * FROM auth_users WHERE id = 'u1'").get() as Record<string, unknown>;
 
-    // Idempotent: running the migration again over a database that already has the
-    // column must not throw or duplicate it.
-    const columnsBefore = (db.prepare("PRAGMA table_info(auth_users)").all() as unknown[]).length;
-    runMigrations(db);
-    expect((db.prepare("PRAGMA table_info(auth_users)").all() as unknown[]).length).toBe(columnsBefore);
+    expect(runMigrations(db, upTo(16))).toEqual([16]);
+    expect(columns(db)).toContain("recovery_code_hash");
+
+    const after = db.prepare("SELECT * FROM auth_users WHERE id = 'u1'").get() as Record<string, unknown>;
+    // The admin that crossed the boundary keeps every value it had...
+    for (const key of Object.keys(before)) expect(after[key]).toEqual(before[key]);
+    // ...and gets NO recovery code, because none was ever shown to anyone.
+    expect(after["recovery_code_hash"]).toBeNull();
+    // The session open across the migration is untouched and unrevoked.
+    const session = db.prepare("SELECT revoked_at AS r, token_hash AS t FROM auth_sessions WHERE id = 's1'").get() as {
+      r: string | null;
+      t: string;
+    };
+    expect(session.r).toBeNull();
+    expect(session.t).toBe("token-hash");
     db.close();
   });
 
-  it("leaves an existing admin and its live session untouched", () => {
+  it("is idempotent when applied straight onto a database that already has the column", () => {
+    const db = fifteenWithAdmin();
+    runMigrations(db, upTo(16));
+    const before = columns(db);
+
+    // Called DIRECTLY, bypassing schema_migrations, so the guard inside the
+    // migration is genuinely re-entered rather than skipped by the version ledger.
+    expect(() => applyRecoveryCodeSchema(db)).not.toThrow();
+    applyRecoveryCodeSchema(db);
+    expect(columns(db)).toEqual(before);
+    expect(columns(db).filter((c) => c === "recovery_code_hash")).toHaveLength(1);
+    db.close();
+  });
+
+  it("refuses recovery on a database that crossed v15 to v16 without a code", () => {
+    const db = fifteenWithAdmin();
+    runMigrations(db, upTo(16));
+    db.close();
+
+    // Same situation through the repository: an admin that predates v16 cannot
+    // recover until a code is minted, and must not fall back to the email match.
     const repo = new AccountingRepository(":memory:");
-    repo.setupAdmin({ password: PW, nowIso: T0 });
-    const { token } = repo.login(PW, at(0));
-    // Re-running migrations over a live database must not disturb the admin row or
-    // revoke the session that is open against it.
-    runMigrations(repo.db);
-    expect(repo.validateSession(token, at(1))).not.toBeNull();
-    expect(repo.login(PW, at(2)).token).toBeTruthy();
+    repo.setupAdmin({ password: PW, email: "owner@example.com", nowIso: T0 });
+    repo.db.prepare("UPDATE auth_users SET recovery_code_hash = NULL").run();
+    expect(() => repo.recoverPassword({ recoveryCode: generateRecoveryCode(), newPassword: "Stolen789" })).toThrow(
+      /no recovery code/i,
+    );
     repo.close();
   });
 });
