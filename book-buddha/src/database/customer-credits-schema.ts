@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { ACCOUNT_ROLES, ACCOUNT_TYPES, V11_SEED_ACCOUNTS } from "./chart-accounts-schema.js";
+import { ACCOUNT_ROLES, ACCOUNT_TYPES, V9_SEED_ACCOUNTS, V11_SEED_ACCOUNTS } from "./chart-accounts-schema.js";
 
 /**
  * v11 and v12 - the credit-discharge slice (S4-1, S4-4, S4-5).
@@ -152,11 +152,22 @@ function seedAccountsAddedSinceV9(db: Database.Database): void {
   // S4-4: UNCATEGORIZED keeps its code (codes are immutable, S2-1) and becomes explicitly the
   // expense side now that UNCATEGORIZED_INCOME exists. Only `name` changes, which the
   // chart_accounts_no_reclass trigger permits - it guards code, type and role.
-  db.prepare("UPDATE chart_accounts SET name = ?, updated_at = ? WHERE code = 'UNCATEGORIZED' AND name <> ?").run(
-    "Uncategorised Expense",
-    now,
-    "Uncategorised Expense",
-  );
+  //
+  // S5-10 (owner ruled): rename ONLY while the name is still the v9 default. An owner who has
+  // renamed this account keeps his name. The first version of this matched `name <> target`, so it
+  // overwrote ANY name - a silent, traceless loss of something the owner chose. Both names are
+  // DERIVED from the frozen lists, never retyped here, so they cannot drift apart from the seeds.
+  // Idempotent by construction: after the rename the name no longer equals the v9 default, so a
+  // re-run matches nothing.
+  const defaultName = V9_SEED_ACCOUNTS.find((a) => a.code === "UNCATEGORIZED")?.name;
+  const renamedTo = V11_SEED_ACCOUNTS.find((a) => a.code === "UNCATEGORIZED")?.name;
+  if (defaultName !== undefined && renamedTo !== undefined && defaultName !== renamedTo) {
+    db.prepare("UPDATE chart_accounts SET name = ?, updated_at = ? WHERE code = 'UNCATEGORIZED' AND name = ?").run(
+      renamedTo,
+      now,
+      defaultName,
+    );
+  }
 }
 
 /**

@@ -70,7 +70,7 @@ export interface SeedAccount {
  * UNCATEGORIZED is seeded as an EXPENSE: it is the landing account for an uncategorised bank
  * debit, and the overwhelming majority of those are costs. ASSUMPTION - flagged to the owner.
  */
-const V9_SEED_ACCOUNTS: readonly SeedAccount[] = [
+export const V9_SEED_ACCOUNTS: readonly SeedAccount[] = [
   // Assets
   { code: "CASH", name: "Cash", type: "ASSET", role: "CASH" },
   { code: "BANK", name: "Bank", type: "ASSET", role: "BANK" },

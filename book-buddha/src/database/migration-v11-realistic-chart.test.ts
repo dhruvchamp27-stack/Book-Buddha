@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrations, runMigrations } from "./migrations.js";
-import { CHART_ACCOUNTS_TRIGGER_NAMES } from "./chart-accounts-schema.js";
+import { CHART_ACCOUNTS_TRIGGER_NAMES, V9_SEED_ACCOUNTS, V11_SEED_ACCOUNTS } from "./chart-accounts-schema.js";
 import { applyCustomerCreditsSchema } from "./customer-credits-schema.js";
 
 /**
@@ -227,7 +227,14 @@ describe("v11 rebuild over a realistic chart", () => {
 });
 
 describe("v11 over an owner-edited chart", () => {
-  it("PINS: a renamed UNCATEGORIZED is silently overwritten with 'Uncategorised Expense'", () => {
+  /**
+   * S5-10, OWNER RULED: v11 renames UNCATEGORIZED only while the name is still the v9 default.
+   * A name the owner chose himself must survive the migration untouched.
+   *
+   * This pin previously held the OPPOSITE behaviour - any name was overwritten without a trace -
+   * and was deliberately inverted when the owner ruled. Both directions are tested below.
+   */
+  it("S5-10: a renamed UNCATEGORIZED keeps the owner's name, untouched", () => {
     runMigrations(db, at(10));
     db.prepare("UPDATE chart_accounts SET name = 'Misc Spend', updated_at = '2025-01-01T00:00:00.000Z' WHERE code = 'UNCATEGORIZED'").run();
     expect(tableSql("chart_accounts")).not.toContain("'CUSTOMER_CREDITS'");
@@ -235,13 +242,29 @@ describe("v11 over an owner-edited chart", () => {
     runMigrations(db, migrations);
 
     const row = chart().find((r) => r.code === "UNCATEGORIZED");
-    // FINDING (not fixed, owner decision): the owner's chosen name is discarded without a trace,
-    // and updated_at is bumped. If this assertion ever fails because the name survives, someone
-    // fixed the finding - update this pin deliberately.
-    expect(row?.name).toBe("Uncategorised Expense");
-    expect(row?.updated_at).not.toBe("2025-01-01T00:00:00.000Z");
-    // Class and role were never at risk.
+    // The owner's name survives, and updated_at is NOT bumped: the row was never written at all.
+    expect(row?.name).toBe("Misc Spend");
+    expect(row?.updated_at).toBe("2025-01-01T00:00:00.000Z");
     expect(row).toMatchObject({ type: "EXPENSE", role: null });
+    // Re-running changes nothing either.
+    runMigrations(db, migrations);
+    expect(chart().find((r) => r.code === "UNCATEGORIZED")).toEqual(row);
+  });
+
+  it("S5-10: an UNCATEGORIZED still carrying the v9 default name IS renamed, once", () => {
+    runMigrations(db, at(10));
+    const before = chart().find((r) => r.code === "UNCATEGORIZED");
+    // The v9 seed name, derived rather than retyped, is what v11 looks for.
+    expect(before?.name).toBe(V9_SEED_ACCOUNTS.find((a) => a.code === "UNCATEGORIZED")?.name);
+
+    runMigrations(db, migrations);
+
+    const renamed = chart().find((r) => r.code === "UNCATEGORIZED");
+    expect(renamed?.name).toBe(V11_SEED_ACCOUNTS.find((a) => a.code === "UNCATEGORIZED")?.name);
+    expect(renamed?.updated_at).not.toBe(before?.updated_at);
+    // Idempotent: a second run leaves the renamed row exactly as it is.
+    runMigrations(db, migrations);
+    expect(chart().find((r) => r.code === "UNCATEGORIZED")).toEqual(renamed);
   });
 
   it("rolls back cleanly when a user account already uses a code v11 must seed", () => {
