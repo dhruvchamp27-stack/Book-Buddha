@@ -309,3 +309,180 @@ describe("refunding a credit note", () => {
     }
   });
 });
+
+/**
+ * S4-5: setting a credit note against a LATER invoice instead of refunding it. Per S1-6 the
+ * reduction is recognised when the credit is USED.
+ *
+ * FIGURES UNCONFIRMED. The owner ruled that this route ships in R3 but gave no worked example,
+ * so the arithmetic below is the assistant's and needs his nod before it counts as acceptance.
+ */
+describe("applying a credit note to a later invoice", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function world() {
+    const repository = new AccountingRepository();
+    const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+    const businessId = repository.createBusiness({ companyId, name: "Business" });
+    const otherBusinessId = repository.createBusiness({ companyId, name: "Other business" });
+    const customerId = repository.createCustomer({ companyId, name: "Customer" });
+    const otherCustomerId = repository.createCustomer({ companyId, name: "Other customer" });
+    const itemId = repository.createItem({ companyId, name: "Item", unit: "each", trackStock: false });
+    const invoice = (
+      id: string,
+      totalPaise: number,
+      invoiceDate: string,
+      options: { customerId?: string; businessId?: string } = {},
+    ): void => {
+      repository.saveDraft({
+        id,
+        number: `INV-${id}`,
+        businessId: options.businessId ?? businessId,
+        customerId: options.customerId ?? customerId,
+        invoiceDate,
+        status: "DRAFT",
+        paymentAccount: "RECEIVABLES",
+        taxType: "NONE",
+        taxRateBasisPoints: 0,
+        lines: [{ itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
+      });
+      repository.finalizeInvoice(id);
+    };
+    const note = (id: string, invoiceId: string, taxablePaise: number): void => {
+      repository.saveCreditNote({
+        id,
+        invoiceId,
+        number: `CN-${id}`,
+        reason: "Return",
+        status: "DRAFT",
+        lines: [{ itemId, description: "Returned", quantity: 1, unitPricePaise: taxablePaise }],
+      });
+      repository.finalizeCreditNote(id);
+    };
+    return { repository, businessId, otherBusinessId, customerId, otherCustomerId, itemId, invoice, note };
+  }
+
+  it("ACCEPTANCE apply (figures unconfirmed): Rs 400 of credit settles Rs 400 of the next invoice", () => {
+    const w = world();
+    try {
+      const period = (fromDate: string, toDate: string) =>
+        w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate });
+
+      // January: invoice A for Rs 1,000, collected in full.
+      vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
+      w.invoice("A", 100000, "2026-01-10");
+      w.repository.recordPayment("A", 100000, "2026-01-20");
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(100000);
+
+      // February: Rs 400 of it comes back. Nothing is owed, so the whole Rs 400 is owed BACK.
+      vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+      w.note("cn1", "A", 40000);
+      expect(w.repository.getCreditNoteBalance("cn1").outstandingPaise).toBe(40000);
+      // February recognises nothing: the goods are back but no money has moved.
+      expect(period("2026-02-01", "2026-02-28").totalIncomePaise).toBe(0);
+
+      // March: invoice B for Rs 1,000 to the same customer, and the credit is set against it.
+      vi.setSystemTime(new Date("2026-03-01T06:00:00.000Z"));
+      w.invoice("B", 100000, "2026-03-01");
+      w.repository.applyCreditNote({
+        id: "ap1",
+        creditNoteId: "cn1",
+        invoiceId: "B",
+        amountPaise: 40000,
+        appliedOn: "2026-03-05",
+      });
+
+      // MARCH nets to nothing: -400 comes off invoice A, +400 is recognised on invoice B, and
+      // not a rupee moved. That is the point of the route - the customer paid for B with the
+      // credit from A.
+      const march = period("2026-03-01", "2026-03-31");
+      expect(march.totalIncomePaise).toBe(0);
+      // Both halves really happened, rather than both being absent.
+      const marchRows = w.repository.deriveCashView({ fromDate: "2026-03-01", toDate: "2026-03-31" }).recognitions;
+      expect(marchRows.filter((r) => r.documentId === "A").reduce((t, r) => t + r.amountPaise, 0)).toBe(-40000);
+      expect(marchRows.filter((r) => r.documentId === "B").reduce((t, r) => t + r.amountPaise, 0)).toBe(40000);
+
+      // The credit is spent, and invoice B still owes Rs 600.
+      expect(w.repository.getCreditNoteBalance("cn1").outstandingPaise).toBe(0);
+      const receivable = w.repository.getReceivables().find((r) => r.invoiceId === "B");
+      expect(receivable?.outstandingPaise).toBe(60000);
+      // January untouched throughout: S1-6.
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(100000);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("settles the target invoice for every purpose, not just the receivables list", () => {
+    const w = world();
+    try {
+      vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
+      w.invoice("A", 100000, "2026-01-10");
+      w.repository.recordPayment("A", 100000, "2026-01-20");
+      vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+      w.note("cn1", "A", 100000);
+      w.invoice("B", 100000, "2026-02-01");
+      w.repository.applyCreditNote({
+        id: "ap1",
+        creditNoteId: "cn1",
+        invoiceId: "B",
+        amountPaise: 100000,
+        appliedOn: "2026-02-11",
+      });
+
+      // Fully settled by credit: no further payment, and it cannot be cancelled either. Counting
+      // only the payments table would have let this invoice be cancelled while the credit stood.
+      expect(() => w.repository.recordPayment("B", 1, "2026-02-12")).toThrow(/outstanding balance of 0 paise/);
+      expect(() => w.repository.cancelInvoice("B")).toThrow(/payments or applied credits/);
+      expect(w.repository.getReceivables().filter((r) => r.invoiceId === "B")).toHaveLength(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses the applications that would quietly move money between accounts", () => {
+    const w = world();
+    try {
+      vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
+      w.invoice("A", 100000, "2026-01-10");
+      w.repository.recordPayment("A", 100000, "2026-01-20");
+      vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+      w.note("cn1", "A", 100000);
+      w.invoice("B", 100000, "2026-02-01");
+      w.invoice("C", 100000, "2026-02-01", { customerId: w.otherCustomerId });
+      w.invoice("D", 100000, "2026-02-01", { businessId: w.otherBusinessId });
+
+      const apply = (invoiceId: string, amountPaise: number, appliedOn: string) =>
+        w.repository.applyCreditNote({
+          id: `ap-${invoiceId}-${amountPaise}`,
+          creditNoteId: "cn1",
+          invoiceId,
+          amountPaise,
+          appliedOn,
+        });
+
+      expect(() => apply("C", 50000, "2026-02-11")).toThrow(/same customer/);
+      expect(() => apply("D", 50000, "2026-02-11")).toThrow(/same business/);
+      expect(() => apply("A", 50000, "2026-02-11")).toThrow(/its own invoice/);
+      expect(() => apply("B", 100001, "2026-02-11")).toThrow(/100000 paise left to give back/);
+      expect(() => apply("B", 50000, "2026-01-01")).toThrow(/before its credit note/);
+      expect(() => apply("B", 0, "2026-02-11")).toThrow(/whole number of paise above zero/);
+
+      // And a credit cannot be applied before the invoice it settles exists.
+      w.invoice("E", 100000, "2026-06-01");
+      expect(() => apply("E", 50000, "2026-02-11")).toThrow(/before the invoice it settles/);
+
+      // A target that owes less than the credit is refused rather than pushed past settled.
+      w.repository.recordPayment("B", 90000, "2026-02-11");
+      expect(() => apply("B", 50000, "2026-02-12")).toThrow(/only owes 10000 paise/);
+    } finally {
+      w.repository.close();
+    }
+  });
+});

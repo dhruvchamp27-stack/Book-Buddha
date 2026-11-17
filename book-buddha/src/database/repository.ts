@@ -1364,7 +1364,7 @@ export class AccountingRepository {
       const outstandingPaise =
         invoice.paymentAccount === "CASH"
           ? noteInclusivePaise
-          : Math.max(0, this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice) - this.getPaidAmount(invoice.id));
+          : Math.max(0, this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice) - this.invoiceSettledPaise(invoice.id));
       const offsetPaise = Math.min(noteInclusivePaise, outstandingPaise);
       const refundablePaise = noteInclusivePaise - offsetPaise;
       const settlementLines: Array<JournalEntry["lines"][number]> = [];
@@ -1498,6 +1498,101 @@ export class AccountingRepository {
     })();
   }
 
+  /**
+   * Set a credit note against a LATER invoice instead of refunding it (S4-5).
+   *
+   * Dr CUSTOMER_CREDITS / Cr RECEIVABLES on the application's own date. For the target invoice
+   * this is a settlement exactly like cash, which is why invoiceSettledPaise counts it: it caps
+   * further payments, it keeps the invoice off the receivables list, and it blocks cancellation.
+   * Per S1-6 the reduction is recognised when the credit is USED, not when the note was raised.
+   */
+  public applyCreditNote(input: {
+    id: string;
+    creditNoteId: string;
+    invoiceId: string;
+    amountPaise: number;
+    appliedOn: string;
+  }): JournalEntry {
+    return this.db.transaction(() => {
+      const note = this.getCreditNote(input.creditNoteId);
+      if (note.status !== "FINALIZED") {
+        throw new RepositoryValidationError("Only a finalized credit note can be applied.");
+      }
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("An applied credit must be a whole number of paise above zero.");
+      }
+      if (input.invoiceId === note.invoiceId) {
+        throw new RepositoryValidationError(
+          "A credit note cannot be applied to its own invoice: whatever it could take off that bill it already has.",
+        );
+      }
+      const source = this.getInvoice(note.invoiceId);
+      const target = this.getInvoice(input.invoiceId);
+      if (target.status !== "FINALIZED") {
+        throw new RepositoryValidationError("A credit can only be applied to a finalized invoice.");
+      }
+      if (target.paymentAccount !== "RECEIVABLES") {
+        throw new RepositoryValidationError("A credit can only be applied to a receivable invoice.");
+      }
+      // The credit belongs to one customer; applying it to another would move money between two
+      // people's accounts with nothing to show for it.
+      if (target.customerId !== source.customerId) {
+        throw new RepositoryValidationError("A credit can only be applied to an invoice for the same customer.");
+      }
+      // Entry dimensions are per entry, so a cross-business application would credit one
+      // business's receivables against another's liability and misstate both in a filtered report.
+      if (target.businessId !== source.businessId) {
+        throw new RepositoryValidationError("A credit can only be applied to an invoice in the same business.");
+      }
+      const row = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
+      const noteDate = istDateOf(row.created_at);
+      if (input.appliedOn < noteDate) {
+        throw new RepositoryValidationError(`A credit cannot be applied before its credit note (${noteDate}).`);
+      }
+      const targetDate = target.invoiceDate ?? noteDate;
+      if (input.appliedOn < targetDate) {
+        throw new RepositoryValidationError(`A credit cannot be applied before the invoice it settles (${targetDate}).`);
+      }
+      const balance = this.getCreditNoteBalance(note.id);
+      if (input.amountPaise > balance.outstandingPaise) {
+        throw new RepositoryValidationError(
+          `Credit note ${note.number} has ${balance.outstandingPaise} paise left to give back; applying ${input.amountPaise} paise exceeds it.`,
+        );
+      }
+      const targetOutstandingPaise = this.invoiceOutstandingPaise(target);
+      if (input.amountPaise > targetOutstandingPaise) {
+        throw new RepositoryValidationError(
+          `Invoice ${target.number} only owes ${targetOutstandingPaise} paise; applying ${input.amountPaise} paise would take it past settled.`,
+        );
+      }
+      const entry: JournalEntry = {
+        // Not a `je-credit-note-` id: that prefix belongs to a note's own two entries, which the
+        // cash-view walk matches by exact id. This one is sourced at the TARGET, whose receivable
+        // it settles.
+        id: `je-credit-apply-${input.id}`,
+        sourceId: target.id,
+        description: `Credit note ${note.number} applied to invoice ${target.number}`,
+        isReversal: false,
+        lines: [
+          { account: "CUSTOMER_CREDITS", debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: "RECEIVABLES", debitPaise: 0, creditPaise: input.amountPaise },
+        ],
+      };
+      this.insertJournalEntry(entry, {
+        businessId: target.businessId,
+        entryDate: input.appliedOn,
+        ...fairDim(target.fairId),
+      });
+      this.db
+        .prepare(
+          "INSERT INTO credit_note_applications (id, credit_note_id, invoice_id, amount_paise, applied_on, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(input.id, note.id, target.id, input.amountPaise, input.appliedOn, new Date().toISOString());
+      this.insertAuditEvent({ action: "credit_note.applied", entityId: input.id, occurredAt: new Date().toISOString() });
+      return entry;
+    })();
+  }
+
   public listCreditNotes(filter: { invoiceId?: string; status?: CreditNote["status"] } = {}): readonly CreditNoteSummary[] {
     const conditions: string[] = [];
     const params: string[] = [];
@@ -1611,8 +1706,11 @@ export class AccountingRepository {
       // cancelled. Reversing the whole invoice while the receipt stands would drive
       // RECEIVABLES negative and leave the cash with nowhere to go (there is no refund
       // path yet). Refund or reverse the payment first.
-      if (this.getPaidAmount(invoiceId) > 0) {
-        throw new RepositoryValidationError("An invoice with recorded payments cannot be cancelled.");
+      // Applied credits count here too (S4-5): an invoice settled by a credit note from another
+      // invoice is just as settled as one paid in cash, and cancelling it would reverse the whole
+      // invoice while the credit stood.
+      if (this.invoiceSettledPaise(invoiceId) > 0) {
+        throw new RepositoryValidationError("An invoice with recorded payments or applied credits cannot be cancelled.");
       }
       // A finalized credit note is money against the invoice for exactly the same reason, and the
       // guard above missed it. Cancellation reverses the ORIGINAL entry in full, so on a 1000
@@ -1732,7 +1830,8 @@ export class AccountingRepository {
                 i.tax_rate_basis_points,
                 (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
                   + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
-                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id), 0) AS paid_paise
+                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id), 0)
+                  + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
          FROM invoices i
          JOIN invoice_lines il ON il.invoice_id = i.id
          WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES'
@@ -2052,13 +2151,25 @@ export class AccountingRepository {
     // Refunds, by the note they discharge (S4-1). A refund is the CASH event for the part of a
     // note that was never set against an open balance: S1-6 puts the reduction in the month the
     // money left, not the month the goods came back.
-    const refundsOf = new Map<string, Array<{ amountPaise: number; date: string }>>();
+    const dischargesOf = new Map<string, Array<{ amountPaise: number; date: string }>>();
+    const addDischarge = (noteId: string, amountPaise: number, date: string): void => {
+      const entry = { amountPaise, date };
+      const list = dischargesOf.get(noteId);
+      if (list === undefined) dischargesOf.set(noteId, [entry]); else list.push(entry);
+    };
     for (const r of this.db.prepare(
       "SELECT credit_note_id, amount_paise, refunded_on FROM credit_note_refunds ORDER BY refunded_on, rowid",
     ).all() as Array<{ credit_note_id: string; amount_paise: number; refunded_on: string }>) {
-      const entry = { amountPaise: r.amount_paise, date: r.refunded_on };
-      const list = refundsOf.get(r.credit_note_id);
-      if (list === undefined) refundsOf.set(r.credit_note_id, [entry]); else list.push(entry);
+      addDischarge(r.credit_note_id, r.amount_paise, r.refunded_on);
+    }
+    // An application discharges the SOURCE note exactly as a refund does - S1-6 recognises it
+    // when the credit is USED - and at the same moment settles the TARGET invoice, where it
+    // behaves as a payment. One row, two documents.
+    for (const a of this.db.prepare(
+      "SELECT credit_note_id, invoice_id, amount_paise, applied_on FROM credit_note_applications ORDER BY applied_on, rowid",
+    ).all() as Array<{ credit_note_id: string; invoice_id: string; amount_paise: number; applied_on: string }>) {
+      addDischarge(a.credit_note_id, a.amount_paise, a.applied_on);
+      addPayment(`INVOICE|${a.invoice_id}`, a.amount_paise, a.applied_on);
     }
 
     // The document's own business and fair (documents carry fair_id, as the entries do).
@@ -2129,7 +2240,7 @@ export class AccountingRepository {
       type Event =
         | { kind: "NOTE"; date: string; noteId: string; lines: readonly Natural[]; inclusivePaise: number; offsetPaise: number }
         | { kind: "PAYMENT"; date: string; amountPaise: number }
-        | { kind: "REFUND"; date: string; noteId: string; amountPaise: number };
+        | { kind: "DISCHARGE"; date: string; noteId: string; amountPaise: number };
 
       // Partition the document's lines by EXACT entry id against the notes the table reports,
       // never by an id prefix: a prefix test silently swallows any future entry that happens to
@@ -2172,8 +2283,8 @@ export class AccountingRepository {
           // money owed back, and nothing is recognised for it until it is actually discharged.
           offsetPaise: Math.max(0, inclusivePaise - note.refundablePaise),
         });
-        for (const refund of refundsOf.get(note.id) ?? []) {
-          events.push({ kind: "REFUND", date: refund.date, noteId: note.id, amountPaise: refund.amountPaise });
+        for (const discharge of dischargesOf.get(note.id) ?? []) {
+          events.push({ kind: "DISCHARGE", date: discharge.date, noteId: note.id, amountPaise: discharge.amountPaise });
         }
       }
       for (const payment of paymentsOf.get(key) ?? []) {
@@ -2235,8 +2346,8 @@ export class AccountingRepository {
       };
 
       for (const event of events) {
-        if (event.kind === "REFUND") {
-          // Money leaving against this invoice. The note's held lines are recognised NOW, in the
+        if (event.kind === "DISCHARGE") {
+          // The note is being given back - as cash, or as credit set against a later invoice. The note's held lines are recognised NOW, in the
           // refund's own month - the owner's S4-6 figures. current and recognised move together,
           // so the running segment is untouched and must NOT be reopened: resetting it here would
           // restart the cumulative allocator mid-segment and silently change the shares of every
@@ -2521,7 +2632,7 @@ export class AccountingRepository {
 
   /** What the customer still owes: the bill, less credit notes, less cash already received. */
   private invoiceOutstandingPaise(invoice: Invoice): number {
-    return this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice) - this.getPaidAmount(invoice.id);
+    return this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice) - this.invoiceSettledPaise(invoice.id);
   }
 
   private validateCreditNoteLines(invoice: Invoice, lines: readonly CreditNoteLine[]): void {
@@ -2738,11 +2849,23 @@ export class AccountingRepository {
     ).run(randomUUID(), input.itemId, input.sourceId, input.movementType, input.quantityDelta, input.unitCostPaise, new Date().toISOString(), input.fairId ?? null);
   }
 
-  private getPaidAmount(invoiceId: string): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid_paise FROM payments WHERE invoice_id = ?")
-      .get(invoiceId) as { paid_paise: number };
-    return row.paid_paise;
+  /**
+   * What has SETTLED this invoice: cash received, plus any credit note set against it (S4-5).
+   *
+   * Deliberately not named for payments any more. An applied credit discharges the customer's
+   * debt exactly as cash does, and every caller - the payment cap, the cancellation guard and the
+   * split in finalizeCreditNote - means "how much of this bill is already dealt with". Counting
+   * only the payments table let an invoice settled entirely by credit still be cancelled, which
+   * would have reversed the whole invoice while the credit stood.
+   */
+  private invoiceSettledPaise(invoiceId: string): number {
+    const paid = this.db
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM payments WHERE invoice_id = ?")
+      .get(invoiceId) as { total: number };
+    const applied = this.db
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM credit_note_applications WHERE invoice_id = ?")
+      .get(invoiceId) as { total: number };
+    return paid.total + applied.total;
   }
 
   private reportConditions(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string }): { where: string; params: string[] } {
