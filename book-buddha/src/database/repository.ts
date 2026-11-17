@@ -1619,24 +1619,29 @@ export class AccountingRepository {
           `Credit note ${note.number} has ${balance.dischargedPaise} paise already refunded or applied to another invoice. Cancelling it would leave that money unaccounted for, and there is no path to reverse a refund yet.`,
         );
       }
-      // NEWEST FIRST. Each note split was worked out against the balance OUTSTANDING AT ITS OWN
-      // MOMENT, so the splits of any later notes depend on this one standing. Cancelling out of
-      // order would leave the ledger and the sub-ledger disagreeing, with receivables and
-      // CUSTOMER_CREDITS both carrying a figure the surviving notes no longer justify.
-      const newer = this.db
+      // NEWEST FIRST, and newest means LAST FINALIZED - never last drafted. Each note split was
+      // worked out against the balance outstanding AT THE MOMENT IT WAS FINALIZED, so that is the
+      // order the splits depend on. created_at is set when the DRAFT is saved, and the two orders
+      // come apart the moment anyone drafts two notes and finalizes them the other way round:
+      // the guard then refuses the note finalized last and waves through the one whose split
+      // everything else was measured against, leaving RECEIVABLES and CUSTOMER_CREDITS on one
+      // invoice carrying figures the surviving notes no longer justify - exactly the state this
+      // guard exists to prevent. journal_lines.id is INTEGER PRIMARY KEY AUTOINCREMENT, so the
+      // first line of a note value entry is a strictly monotonic stamp of when it posted.
+      const latest = this.db
         .prepare(
-          `SELECT id, number FROM credit_notes
-            WHERE invoice_id = ? AND status = 'FINALIZED'
-                  AND (created_at > (SELECT created_at FROM credit_notes WHERE id = ?)
-                       OR (created_at = (SELECT created_at FROM credit_notes WHERE id = ?)
-                           AND rowid > (SELECT rowid FROM credit_notes WHERE id = ?)))
-            ORDER BY created_at DESC, rowid DESC`,
+          `SELECT cn.id, cn.number,
+                  (SELECT MIN(jl.id) FROM journal_lines jl
+                    WHERE jl.journal_entry_id = 'je-credit-note-' || cn.id) AS posted_seq
+             FROM credit_notes cn
+            WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'
+            ORDER BY posted_seq DESC
+            LIMIT 1`,
         )
-        .all(note.invoiceId, note.id, note.id, note.id) as Array<{ id: string; number: string }>;
-      if (newer.length > 0) {
-        const latest = newer[0] as { id: string; number: string };
+        .get(note.invoiceId) as { id: string; number: string } | undefined;
+      if (latest !== undefined && latest.id !== note.id) {
         throw new RepositoryValidationError(
-          `Credit note ${note.number} is not the latest on invoice ${invoice.number}: cancel ${latest.number} first. Each note was split against what was outstanding when it was raised, so undoing an earlier one first would leave the later splits wrong.`,
+          `Credit note ${note.number} is not the latest on invoice ${invoice.number}: cancel ${latest.number} first. Each note was split against what was outstanding when it was finalized, so undoing an earlier one first would leave the later splits wrong.`,
         );
       }
 

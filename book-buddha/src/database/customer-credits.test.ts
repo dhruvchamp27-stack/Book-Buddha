@@ -784,3 +784,156 @@ describe("cancelling a credit note", () => {
     }
   });
 });
+
+/**
+ * REGRESSION. The newest-first guard ordered by created_at, which is set when the DRAFT is
+ * saved - but a note's split is fixed when it is FINALIZED. Draft two notes, finalize them in
+ * the opposite order, and the guard points the wrong way: it would refuse the note that was
+ * actually finalized last and allow the one whose split everything else depends on.
+ *
+ * Every other test saves and finalizes in one breath, so none of them can see this.
+ */
+describe("cancelling respects FINALIZE order, not draft order", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refuses the note finalized FIRST, whichever was drafted first", () => {
+    const repository = new AccountingRepository();
+    try {
+      const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+      const businessId = repository.createBusiness({ companyId, name: "Business" });
+      const customerId = repository.createCustomer({ companyId, name: "Customer" });
+      const itemId = repository.createItem({ companyId, name: "Item", unit: "each", trackStock: false });
+      repository.saveDraft({
+        id: "A", number: "INV-A", businessId, customerId, invoiceDate: "2026-01-01", status: "DRAFT",
+        paymentAccount: "RECEIVABLES", taxType: "NONE", taxRateBasisPoints: 0,
+        lines: [{ itemId, description: "Line", quantity: 2, unitPricePaise: 50000 }],
+      });
+      repository.finalizeInvoice("A");
+      repository.recordPayment("A", 60000, "2026-01-20");
+
+      const draft = (id: string): void => {
+        repository.saveCreditNote({
+          id, invoiceId: "A", number: `CN-${id}`, reason: "Return", status: "DRAFT",
+          lines: [{ itemId, description: "Returned", quantity: 1, unitPricePaise: 30000 }],
+        });
+      };
+      // Drafted A then B...
+      draft("cnA");
+      draft("cnB");
+      // ...but finalized B then A, so A's split was taken against what B had already left.
+      repository.finalizeCreditNote("cnB");
+      repository.finalizeCreditNote("cnA");
+      expect(repository.getCreditNoteBalance("cnB")).toMatchObject({ refundablePaise: 0 });
+      expect(repository.getCreditNoteBalance("cnA")).toMatchObject({ refundablePaise: 20000 });
+
+      // cnA was finalized LAST, so cnA is the only one that may be cancelled now.
+      expect(() => repository.cancelCreditNote("cnB")).toThrow(/is not the latest/);
+      expect(() => repository.cancelCreditNote("cnA")).not.toThrow();
+      expect(() => repository.cancelCreditNote("cnB")).not.toThrow();
+
+      // Both undone, so the invoice is back to owing what the payment left.
+      const balance = repository.db
+        .prepare(
+          `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS balance
+             FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+            WHERE je.source_id = 'A' AND jl.account = ?`,
+        );
+      expect((balance.get("RECEIVABLES") as { balance: number }).balance).toBe(40000);
+      expect((balance.get("CUSTOMER_CREDITS") as { balance: number }).balance).toBe(0);
+    } finally {
+      repository.close();
+    }
+  });
+});
+
+/**
+ * OPEN, PINNED, AWAITING THE OWNER'S RULING (2026-11-17).
+ *
+ * A credit note is dated by its DRAFT's created_at, not by when it is finalized. Draft one in
+ * January, finalize it in February, and it is back-dated into January - where it re-measures any
+ * payment that fell between the two dates. That breaks S1-6 ("never rewrite a month already
+ * reported") through an entirely ordinary workflow: raise the paperwork, finalize it later.
+ *
+ * Reproduced, not theorised. Invoice 15,000 (goods 10,000 costing 6,000 plus freight 5,000 with
+ * no cost), two payments of 3,000 on 20 and 30 January, then a freight note DRAFTED on 25 January
+ * and FINALIZED on 10 February. January's cash expenses jump from 2,400 to 3,257.14 the moment
+ * the note is finalized - a month that had already been reported, moved by a February action.
+ *
+ * The cause is one line in finalizeCreditNote: the entry date comes from the note's created_at.
+ * The fix is NOT the assistant's to choose, because it decides what date a credit note HAS:
+ *   (a) date it at FINALIZE - simple, and January can never move, but a note raised late then
+ *       lands in the month it was entered rather than the month it belongs to;
+ *   (b) give a credit note its own document date, as an invoice has, defaulting to today - most
+ *       faithful to how the paperwork actually works, but a schema change and a new input;
+ *   (c) keep draft dating and REFUSE to finalize into a month already reported.
+ *
+ * This test pins what the code does TODAY so the behaviour cannot drift unnoticed. When the
+ * owner rules, it becomes the acceptance test for whichever rule he picks.
+ */
+describe("credit notes are dated at the DRAFT, which can move a reported month (open question)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("moves January when a January draft is finalized in February", () => {
+    const repository = new AccountingRepository();
+    try {
+      vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
+      const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+      const businessId = repository.createBusiness({ companyId, name: "B" });
+      const customerId = repository.createCustomer({ companyId, name: "C" });
+      const goodsId = repository.createItem({ companyId, name: "Goods", unit: "each", trackStock: true });
+      repository.addStockMovement({ itemId: goodsId, movementType: "OPENING", quantity: 30, unitCostPaise: 60000 });
+      const freightId = repository.createItem({ companyId, name: "Freight", unit: "job", trackStock: false });
+
+      repository.saveDraft({
+        id: "INV", number: "INV", businessId, customerId, invoiceDate: "2026-01-10", status: "DRAFT",
+        paymentAccount: "RECEIVABLES", taxType: "NONE", taxRateBasisPoints: 0,
+        lines: [
+          { itemId: goodsId, description: "Goods", quantity: 10, unitPricePaise: 100000 },
+          { itemId: freightId, description: "Freight", quantity: 1, unitPricePaise: 500000 },
+        ],
+      });
+      repository.finalizeInvoice("INV");
+
+      vi.setSystemTime(new Date("2026-01-20T06:00:00.000Z"));
+      repository.recordPayment("INV", 300000, "2026-01-20");
+      // The second payment falls AFTER the date the note will be back-dated to.
+      vi.setSystemTime(new Date("2026-01-30T06:00:00.000Z"));
+      repository.recordPayment("INV", 300000, "2026-01-30");
+
+      const january = () => repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
+      // 600,000 of 1,500,000 collected: 40% of a 600,000 cost.
+      expect(january()).toMatchObject({ totalIncomePaise: 600000, totalExpensesPaise: 240000 });
+
+      vi.setSystemTime(new Date("2026-01-25T06:00:00.000Z"));
+      repository.saveCreditNote({
+        id: "CN", invoiceId: "INV", number: "CN", reason: "Freight waived", status: "DRAFT",
+        lines: [{ itemId: freightId, description: "Freight", quantity: 1, unitPricePaise: 500000 }],
+      });
+      vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+      repository.finalizeCreditNote("CN");
+
+      // The entry carries the DRAFT's date, not February's.
+      const entry = repository.db
+        .prepare("SELECT entry_date FROM journal_entries WHERE id = 'je-credit-note-CN'")
+        .get() as { entry_date: string };
+      expect(entry.entry_date).toBe("2026-01-25");
+
+      // THE DEFECT: January moved. Income is unchanged, but the cost of what was collected on
+      // 30 January is re-measured against the re-based balance - 120,000 from the first payment
+      // plus 205,714 from the second, where it had been 240,000 in total.
+      expect(january()).toMatchObject({ totalIncomePaise: 600000, totalExpensesPaise: 325714 });
+      // And February, the month the note was actually raised in, shows nothing at all.
+      expect(repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" }))
+        .toMatchObject({ totalIncomePaise: 0, totalExpensesPaise: 0 });
+    } finally {
+      repository.close();
+    }
+  });
+});
