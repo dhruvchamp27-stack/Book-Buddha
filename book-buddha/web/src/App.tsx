@@ -539,7 +539,7 @@ export function App() {
 
   return (
     <main className="shell">
-      <header className="header"><div><p className="eyebrow">Offline-first accounting</p><h1>Book Buddha</h1></div><span className="status"><span className="dot" /> Local workspace</span></header>
+      <header className="header"><div><h1>Book Buddha</h1></div><span className="status"><span className="dot" /> Local workspace</span></header>
       <section className="hero"><div><p className="eyebrow">Phase 1A</p><h2>Accounting proof of concept</h2><p>Create records, raise an invoice, and verify balanced accounting entries.</p></div></section>
       {message && <div className="notice">{message}</div>}
       <section className="card">

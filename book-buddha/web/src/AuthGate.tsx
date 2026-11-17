@@ -157,7 +157,6 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
       <main className="shell">
         <header className="header">
           <div>
-            <p className="eyebrow">Offline-first accounting</p>
             <h1>Book Buddha</h1>
           </div>
         </header>
@@ -204,7 +203,6 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
     <main className="shell">
       <header className="header">
         <div>
-          <p className="eyebrow">Offline-first accounting</p>
           <h1>Book Buddha</h1>
         </div>
       </header>
