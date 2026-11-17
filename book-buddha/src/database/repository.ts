@@ -444,6 +444,43 @@ export interface CashViewDerivation {
   readonly invoiceCollections: ReadonlyArray<{ readonly date: string; readonly amountPaise: number }>;
 }
 
+/**
+ * The derived retained-earnings figure cut at the financial-year boundary (R5).
+ *
+ * PRESENTATION ONLY. No closing entry is ever posted (S5-4) and `BalanceSheetReport.equity`
+ * is untouched: it still carries the single derived RETAINED_EARNINGS row, and this split is
+ * an extra reading of that same number. The cut is ONE date - the financial year's start - and
+ * the upper bound is whatever bound the sheet itself used, so the two parts partition the
+ * figure exactly and cannot quietly lose an entry between them.
+ */
+export interface RetainedEarningsSplit {
+  readonly financialYearId: string;
+  readonly startsOn: string;
+  readonly endsOn: string;
+  /** Profit for the year is measured from here: the financial year's first day. */
+  readonly periodFrom: string;
+  /**
+   * ...to here: the sheet's own as-at date. `null` means the sheet had no as-at bound, so the
+   * figure runs to the latest entry there is - which, if anything is dated after `endsOn`,
+   * is MORE than the financial year. The dates are published so that is visible, not implied.
+   */
+  readonly periodTo: string | null;
+  /** Everything earned before `periodFrom`: retained earnings brought forward. */
+  readonly broughtForwardPaise: number;
+  /** Everything earned from `periodFrom` to `periodTo`: profit for the year. */
+  readonly profitForYearPaise: number;
+}
+
+/** The derived retained-earnings figure, and the year-boundary split of it when one is possible. */
+export interface RetainedEarningsBreakdown {
+  /** The single derived figure - identical to the RETAINED_EARNINGS row in `equity`. */
+  readonly totalPaise: number;
+  /** `null` when no financial year can be picked; `broughtForwardPaise + profitForYearPaise === totalPaise`. */
+  readonly split: RetainedEarningsSplit | null;
+  /** Plain English for the owner, non-null exactly when `split` is null. */
+  readonly unsplitReason: string | null;
+}
+
 export interface BalanceSheetReport {
   readonly assets: readonly ReportAccountRow[];
   readonly liabilities: readonly ReportAccountRow[];
@@ -451,6 +488,8 @@ export interface BalanceSheetReport {
   readonly totalAssetsPaise: number;
   readonly totalLiabilitiesPaise: number;
   readonly totalEquityPaise: number;
+  /** R5: the derived retained earnings, split into brought forward and profit for the year. */
+  readonly retainedEarnings: RetainedEarningsBreakdown;
 }
 
 export interface GeneralLedgerRow {
@@ -3058,12 +3097,7 @@ export class AccountingRepository {
     const postedEquity = rows.filter((row) => row.type === "EQUITY").map(creditSide);
     // Retained earnings = all income less all expenses, so the sheet balances. It is DERIVED and
     // deliberately has no row in chart_accounts: nothing may ever post to it directly.
-    const netProfitPaise = rows
-      .filter((row) => row.type === "INCOME")
-      .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0)
-      - rows
-        .filter((row) => row.type === "EXPENSE")
-        .reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
+    const netProfitPaise = AccountingRepository.netProfitOf(rows);
     const retainedEarnings: ClassifiedReportAccountRow = {
       account: "RETAINED_EARNINGS",
       type: "EQUITY",
@@ -3080,6 +3114,81 @@ export class AccountingRepository {
       totalAssetsPaise: assets.reduce((total, row) => total + row.balancePaise, 0),
       totalLiabilitiesPaise: liabilities.reduce((total, row) => total + row.balancePaise, 0),
       totalEquityPaise: equity.reduce((total, row) => total + row.balancePaise, 0),
+      retainedEarnings: this.splitRetainedEarnings(filter, netProfitPaise),
+    };
+  }
+
+  /** Income less expenses over a set of report rows. The one definition of net profit. */
+  private static netProfitOf(rows: readonly ClassifiedReportAccountRow[]): number {
+    return rows
+      .filter((row) => row.type === "INCOME")
+      .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0)
+      - rows
+        .filter((row) => row.type === "EXPENSE")
+        .reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
+  }
+
+  /** The day before an ISO date, used to close the brought-forward period at the year boundary. */
+  private static dayBefore(date: string): string {
+    const previous = new Date(`${date}T00:00:00.000Z`);
+    previous.setUTCDate(previous.getUTCDate() - 1);
+    return previous.toISOString().slice(0, 10);
+  }
+
+  /**
+   * R5, presentation only: cut the derived retained-earnings figure at the financial-year start.
+   *
+   * The cut is a SINGLE date, and the upper bound is the sheet's own, so brought forward and
+   * profit for the year partition `totalPaise` exactly - there is no third bucket an entry can
+   * fall into. A split needs a business, because financial years belong to one (`financial_years
+   * .business_id`); the consolidated sheet therefore cannot be split and says so rather than
+   * guessing a year.
+   */
+  private splitRetainedEarnings(filter: AsAtReportFilter, totalPaise: number): RetainedEarningsBreakdown {
+    const unsplit = (unsplitReason: string): RetainedEarningsBreakdown => ({ totalPaise, split: null, unsplitReason });
+    const { businessId } = filter;
+    if (businessId === undefined) {
+      return unsplit(
+        "This Balance Sheet covers every business at once, and each business keeps its own financial years, "
+          + "so there is no single year to split at. Choose a business to see brought forward and profit for the year.",
+      );
+    }
+    const years = this.listFinancialYears(businessId);
+    if (years.length === 0) {
+      return unsplit("This business has no financial year set up yet, so there is no year boundary to split at.");
+    }
+    // The year to report is the one containing the sheet's own date - its as-at date, or today
+    // when it has none, which is the date an unbounded sheet is in fact read on.
+    const onDate = filter.asAtDate ?? istDateOf();
+    const year = years.find((candidate) => candidate.startsOn <= onDate && onDate <= candidate.endsOn);
+    if (year === undefined) {
+      return unsplit(`No financial year covers ${onDate}, so there is no year boundary to split at.`);
+    }
+    // Both parts are measured the same way the total was, with the SAME upper bound, so what the
+    // sheet includes is exactly what the two parts add up to.
+    const periodTo = filter.asAtDate ?? null;
+    const broughtForwardPaise = AccountingRepository.netProfitOf(
+      this.getReportAccountRows({ businessId, toDate: AccountingRepository.dayBefore(year.startsOn) }),
+    );
+    const profitForYearPaise = AccountingRepository.netProfitOf(
+      this.getReportAccountRows({
+        businessId,
+        fromDate: year.startsOn,
+        ...(periodTo === null ? {} : { toDate: periodTo }),
+      }),
+    );
+    return {
+      totalPaise,
+      split: {
+        financialYearId: year.id,
+        startsOn: year.startsOn,
+        endsOn: year.endsOn,
+        periodFrom: year.startsOn,
+        periodTo,
+        broughtForwardPaise,
+        profitForYearPaise,
+      },
+      unsplitReason: null,
     };
   }
 
