@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountingRepository } from "./repository.js";
-import { ACCOUNT_ROLES, SETTLEMENT_ROLES } from "./chart-accounts-schema.js";
+import { ACCOUNT_ROLES, SEED_ACCOUNTS, SETTLEMENT_ROLES } from "./chart-accounts-schema.js";
 import { runMigrations } from "./migrations.js";
 
 /**
@@ -26,8 +26,10 @@ describe("v11: widening the chart_accounts role CHECK", () => {
         .prepare("SELECT code, name, type, role FROM chart_accounts ORDER BY code")
         .all() as Array<{ code: string; name: string; type: string; role: string | null }>;
       const byCode = new Map(accounts.map((a) => [a.code, a]));
-      // The 22 seeded at v9 survived the rebuild, and the two added since are present.
-      expect(accounts.length).toBe(24);
+      // Every account the live chart declares is present: the v9 seeds survived the rebuild and
+      // each one added by a later migration is there. DERIVED from SEED_ACCOUNTS, never a literal -
+      // a literal here went red the moment v13 seeded STOCK_ADJUSTMENT, and said nothing useful.
+      expect(accounts.map((a) => a.code).sort()).toEqual(SEED_ACCOUNTS.map((a) => a.code).sort());
       expect(byCode.get("CUSTOMER_CREDITS")).toMatchObject({ type: "LIABILITY", role: "CUSTOMER_CREDITS" });
       expect(byCode.get("UNCATEGORIZED_INCOME")).toMatchObject({ type: "INCOME", role: null });
       // S4-4: the code is immutable, so the expense side keeps it and only the name moves.
