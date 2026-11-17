@@ -5,7 +5,7 @@ import { AccountingRepository } from "../database/repository.js";
 describe("purchasing & expenses API", () => {
   it("runs suppliers, bills, payments, expenses and reports end to end", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     const post = async (url: string, payload: unknown) => app.inject({ method: "POST", url, payload: payload as object });
     try {
       const companyId = (await post("/companies", { name: "Co" })).json<{ id: string }>().id;
@@ -103,7 +103,7 @@ describe("purchasing & expenses API", () => {
 
   it("cancels a bill via the API and refuses unknown ids", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     const post = async (url: string, payload: unknown) => app.inject({ method: "POST", url, payload: payload as object });
     try {
       const companyId = (await post("/companies", { name: "Co" })).json<{ id: string }>().id;

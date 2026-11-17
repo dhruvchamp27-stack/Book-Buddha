@@ -5,7 +5,7 @@ import { AccountingRepository } from "../database/repository.js";
 describe("customers / items / inventory API", () => {
   it("creates numbered customers, patches, finds duplicates, toggles active and deletes", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Co" } })).json<{ id: string }>().id;
       const created = await app.inject({
@@ -41,7 +41,7 @@ describe("customers / items / inventory API", () => {
 
   it("enriches items and serves the inventory reports", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Co" } })).json<{ id: string }>().id;
       const itemId = (await app.inject({

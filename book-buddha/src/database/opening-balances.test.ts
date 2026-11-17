@@ -258,7 +258,7 @@ describe("opening balances: income lines in the P&L", () => {
 describe("opening balances API", () => {
   it("POST, GET and reverse, with validation", async () => {
     const { repository, businessId } = world();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const bad = await app.inject({ method: "POST", url: "/opening-balances", payload: { businessId, asAt: "31/03/2025", lines: [] } });
       expect(bad.statusCode).toBe(400);

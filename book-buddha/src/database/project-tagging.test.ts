@@ -354,7 +354,7 @@ describe("project (fair) tagging, slice 8b", () => {
   describe("API", () => {
     it("accepts fairId on /purchase-bills and /expenses and rejects an empty one", async () => {
       const w = setup();
-      const app = buildApi(w.repository);
+      const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
       try {
         const bill = await app.inject({
           method: "POST", url: "/purchase-bills",

@@ -234,7 +234,7 @@ describe("insertJournalEntry guard", () => {
 describe("report filter query parameters", () => {
   it("accepts optional filters, keeps no-parameter behaviour, and rejects bad input", async () => {
     const w = scenario();
-    const app = buildApi(w.repository);
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       const get = async (url: string) => app.inject({ method: "GET", url });
       const all = (await get("/reports/profit-and-loss")).json<{ totalIncomePaise: number }>();

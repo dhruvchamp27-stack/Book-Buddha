@@ -11,7 +11,7 @@ import { verifyAuditChain } from "../database/audit-log.js";
 describe("chart of accounts API", () => {
   it("lists the seeded chart, creates, renames and deactivates a user account", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Co" } })).json<{ id: string }>().id;
 
@@ -59,7 +59,7 @@ describe("chart of accounts API", () => {
 
   it("refuses the things that would corrupt the chart", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Co" } })).json<{ id: string }>().id;
       const post = (payload: unknown) => app.inject({ method: "POST", url: "/accounts", payload: payload as never });
@@ -106,7 +106,7 @@ describe("chart of accounts API", () => {
 
   it("keeps one company's accounts out of another's list", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const a = (await app.inject({ method: "POST", url: "/companies", payload: { name: "A" } })).json<{ id: string }>().id;
       const b = (await app.inject({ method: "POST", url: "/companies", payload: { name: "B" } })).json<{ id: string }>().id;

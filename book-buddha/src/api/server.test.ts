@@ -5,7 +5,7 @@ import { AccountingRepository } from "../database/repository.js";
 describe("local API", () => {
   it("supports a validated invoice lifecycle", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyResponse = await app.inject({
         method: "POST",
@@ -92,7 +92,7 @@ describe("local API", () => {
 
   it("returns a clear validation response", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const response = await app.inject({
         method: "POST",
@@ -111,7 +111,7 @@ describe("local API", () => {
 
   it("rejects invoice references from different companies", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyA = (await app.inject({
         method: "POST",
@@ -184,7 +184,7 @@ describe("local API", () => {
 
   it("updates drafts but rejects edits after finalization", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = app
         ? (await app.inject({ method: "POST", url: "/companies", payload: { name: "Edit Company" } })).json<{ id: string }>().id
@@ -238,7 +238,7 @@ describe("local API", () => {
 
   it("records receivable payments and exposes ageing data", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Payment Company" } })).json<{ id: string }>().id;
       const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Payment Business" } })).json<{ id: string }>().id;
@@ -273,7 +273,7 @@ describe("local API", () => {
 
   it("creates fairs and reports finalized fair sales", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Fair API Company" } })).json<{ id: string }>().id;
       const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Fair API Business" } })).json<{ id: string }>().id;
@@ -312,7 +312,7 @@ describe("local API", () => {
 
   it("adds inventory and rejects a sale that would make stock negative", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Stock API Company" } })).json<{ id: string }>().id;
       const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Stock API Business" } })).json<{ id: string }>().id;
@@ -349,7 +349,7 @@ describe("local API", () => {
 
   it("lists credit notes, rejects over-returns and keeps ledger balanced", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "CN Company" } })).json<{ id: string }>().id;
       const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "CN Business" } })).json<{ id: string }>().id;
@@ -398,7 +398,7 @@ describe("local API", () => {
    */
   it("refunds, applies and cancels a credit note over HTTP", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       // A credit note is dated by its created_at, i.e. now, so every discharge date has to be
       // after today. Fake timers are not an option here: they stall Fastify's own async work.
@@ -481,7 +481,7 @@ describe("local API", () => {
 
   it("runs the auth flow: setup, login, session, change-password, logout", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       expect((await app.inject({ method: "GET", url: "/auth/status" })).json()).toEqual({ configured: false, locked: false });
       expect((await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "weak" } })).statusCode).toBe(400);
@@ -513,7 +513,7 @@ describe("local API", () => {
 
   it("locks the account after repeated wrong passwords (423)", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } });
       for (let i = 0; i < 5; i++) {
@@ -531,7 +531,7 @@ describe("local API", () => {
 
   it("manages recurring invoice templates and generates drafts", async () => {
     const repository = new AccountingRepository();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Rec Co" } })).json<{ id: string }>().id;
       const businessId = (await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Rec Biz" } })).json<{ id: string }>().id;

@@ -231,7 +231,7 @@ describe("fair filter on reports, slice 8c", () => {
 
   it("accepts fairId on three report routes and returns 400 on the Balance Sheet route", async () => {
     const w = twoFairs();
-    const app = buildApi(w.repository);
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       const get = async (url: string) => app.inject({ method: "GET", url });
       const pl = await get(`/reports/profit-and-loss?fairId=${w.fairA}`);

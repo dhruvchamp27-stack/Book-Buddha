@@ -406,7 +406,7 @@ describe("opening supplier balances", () => {
 describe("opening sub-ledger API", () => {
   it("saves, lists, receipts and reverses, with validation", async () => {
     const w = world();
-    const app = buildApi(w.repository);
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       const { businessId, customerId, supplierId } = w;
       const bad = await app.inject({

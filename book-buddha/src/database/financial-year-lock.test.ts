@@ -190,7 +190,7 @@ describe("the lock stops postings at the door", () => {
 describe("financial years over HTTP", () => {
   it("creates, lists and locks a year, and the lock then blocks a finalize", async () => {
     const w = world();
-    const app = buildApi(w.repository);
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       const created = await app.inject({
         method: "POST", url: "/financial-years",

@@ -685,7 +685,7 @@ describe("cash view: default basis resolution", () => {
 
   it("is exposed on /reports/profit-and-loss as a strict optional query parameter", async () => {
     const { repository, cashBiz } = twoCompanies();
-    const app = buildApi(repository);
+    const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const get = async (url: string) => app.inject({ method: "GET", url });
       expect((await get(`/reports/profit-and-loss?businessId=${cashBiz}`)).json<ProfitAndLossReport>()).toMatchObject({ basis: "CASH", totalIncomePaise: 4000 });
@@ -705,7 +705,7 @@ describe("cash view: default basis resolution", () => {
 describe("cash view is derived, never posted", () => {
   it("writes no journal entries or lines: counts are unchanged by every cash report call", async () => {
     const w = world("CASH");
-    const app = buildApi(w.repository);
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       ownerInvoice(w, "INV-1", "2026-01-10");
       ownerInvoice(w, "INV-C", "2026-01-11", "CASH");
@@ -872,7 +872,7 @@ describe("payment dates: a payment can be entered after the fact with its real d
 
   it("API: accepts paidOn on both payment routes and answers 400 (not 500) for a bad date", async () => {
     const { w, billId } = entered();
-    const app = buildApi(w.repository);
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       const post = (url: string, payload: Record<string, unknown>) => app.inject({ method: "POST", url, payload });
 

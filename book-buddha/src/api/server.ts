@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyContextConfig, type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Invoice } from "../accounting/types.js";
@@ -367,7 +367,72 @@ class RequestValidationError extends Error {
   }
 }
 
-export function buildApi(repository: AccountingRepository): FastifyInstance {
+/** One registered route, with the authentication decision that applies to it. */
+export interface ApiRouteRecord {
+  readonly method: string;
+  readonly url: string;
+  readonly isPublic: boolean;
+}
+
+/**
+ * The exact wording the authentication hook refuses with. Exported so a test can
+ * prove the HOOK did the refusing rather than a route handler that happens to
+ * return the same status — `/auth/session`, `/auth/logout` and
+ * `/auth/change-password` all answer 401 on their own account.
+ */
+export const AUTH_HOOK_MESSAGES = {
+  notSetUp: "This Book Buddha database is not set up yet. Create the administrator first.",
+  noToken: "Sign in required to use Book Buddha.",
+  invalidSession: "Your session is no longer valid. Please sign in again.",
+} as const;
+
+declare module "fastify" {
+  interface FastifyContextConfig {
+    /**
+     * Marks a route as reachable WITHOUT a session. Absence means NOT public, so
+     * the default is deny and a newly added route is protected until someone
+     * deliberately opens it here.
+     */
+    public?: boolean;
+  }
+
+  interface FastifyInstance {
+    /**
+     * Every route this instance registered, with the authentication decision that
+     * applies to it. Collected by an `onRoute` hook inside `buildApi`, because
+     * `onRoute` does not fire retroactively — a hook added after `buildApi`
+     * returns sees nothing — and `printRoutes()` only yields a tree string that
+     * would have to be parsed. `src/api/auth-enforcement.test.ts` derives its
+     * route sweep from this, so a route added later is swept automatically
+     * without anyone editing a list.
+     */
+    authRoutes: readonly ApiRouteRecord[];
+  }
+}
+
+export interface BuildApiOptions {
+  /**
+   * Turns the authentication hook OFF so the API answers unauthenticated
+   * requests. **TESTS ONLY — never set this anywhere a user's data can reach.**
+   *
+   * Why it exists: the test suite builds 28 API worlds whose repositories never
+   * run `setupAdmin`, so a fail-closed API would answer all 208 of their injects
+   * with 409. Signing in inside each world is not an option either — `setupAdmin`
+   * and `login` write audit events and session rows, which would shift the
+   * audit-chain sequence assertions and the fake-clock files.
+   *
+   * It is opt-in and defaults to OFF, so production is protected by default. It is
+   * deliberately unreachable from `createApi` and from `src/api/main.ts`, and it is
+   * read from no environment variable and no config file: a test has to pass it
+   * here, in code, where a reader can see it.
+   */
+  readonly __unsafeDisableAuthForTests?: boolean;
+}
+
+export function buildApi(
+  repository: AccountingRepository,
+  options: BuildApiOptions = {},
+): FastifyInstance {
   const app = Fastify({ logger: false });
 
   app.setErrorHandler((error, request, reply) => {
@@ -391,19 +456,57 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     return reply.code(500).send({ error: "Internal server error." });
   });
 
-  app.get("/health", async () => ({ status: "ok" }));
-
   // ---- Auth. Token transport: `Authorization: Bearer <token>` header only.
   // The raw token is returned once by /auth/login; the server stores only its hash.
-  const bearerToken = (header: string | undefined): string => {
+  const bearerToken = (header: string | undefined, message = "Sign in required."): string => {
     const match = /^Bearer\s+(\S+)$/i.exec(header ?? "");
-    if (match === null) throw new AuthenticationError("Sign in required.", 401);
+    if (match === null) throw new AuthenticationError(message, 401);
     return match[1] as string;
   };
 
-  app.get("/auth/status", async () => repository.getAuthStatus());
+  // ---- Authentication enforcement. FAIL CLOSED: a route is reachable without a
+  // session only when it says so, in the open, with `config: { public: true }`.
+  //
+  // The decision is read from the matched route's own config and NEVER from the URL
+  // string, so a route added later cannot slip through by resembling a public path.
+  // An unmatched path carries no route config, so it is not public either and is
+  // refused rather than told which paths exist.
+  const isPublic = (config: FastifyContextConfig | undefined): boolean => config?.public === true;
 
-  app.post("/auth/setup", async (request, reply) => {
+  // Same predicate feeds the hook and the route table, so the two cannot drift.
+  const authRoutes: ApiRouteRecord[] = [];
+  app.decorate("authRoutes", authRoutes);
+  app.addHook("onRoute", (route) => {
+    const methods = Array.isArray(route.method) ? route.method : [route.method];
+    for (const method of methods) {
+      authRoutes.push({ method, url: route.url, isPublic: isPublic(route.config) });
+    }
+  });
+
+  if (options.__unsafeDisableAuthForTests !== true) {
+    app.addHook("onRequest", async (request) => {
+      if (isPublic(request.routeOptions?.config)) return;
+
+      // An unconfigured database refuses; it does not fall open and it does not
+      // serve. 409 matches the convention `getAuthStatus`/`recoverPassword` already
+      // use for "this database has no administrator yet".
+      if (!repository.getAuthStatus().configured) {
+        throw new AuthenticationError(AUTH_HOOK_MESSAGES.notSetUp, 409);
+      }
+
+      const token = bearerToken(request.headers.authorization, AUTH_HOOK_MESSAGES.noToken);
+      if (repository.validateSession(token) === null) {
+        throw new AuthenticationError(AUTH_HOOK_MESSAGES.invalidSession, 401);
+      }
+    });
+  }
+
+  // ---- The complete public surface. Everything not marked here needs a session.
+  app.get("/health", { config: { public: true } }, async () => ({ status: "ok" }));
+
+  app.get("/auth/status", { config: { public: true } }, async () => repository.getAuthStatus());
+
+  app.post("/auth/setup", { config: { public: true } }, async (request, reply) => {
     const input = parseBody(authSetupInput, request.body);
     const result = repository.setupAdmin({
       password: input.password,
@@ -413,7 +516,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     return reply.code(201).send({ id: result.userId });
   });
 
-  app.post("/auth/login", async (request) => {
+  app.post("/auth/login", { config: { public: true } }, async (request) => {
     const input = parseBody(authLoginInput, request.body);
     const { token, expiresAt } = repository.login(input.password);
     return { token, expiresAt };
@@ -441,7 +544,7 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
   });
 
   // Caller must have verified the Google identity already (see recoverPassword).
-  app.post("/auth/recover", async (request) => {
+  app.post("/auth/recover", { config: { public: true } }, async (request) => {
     const input = parseBody(authRecoverInput, request.body);
     repository.recoverPassword({
       newPassword: input.newPassword,
