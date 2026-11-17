@@ -486,3 +486,91 @@ describe("applying a credit note to a later invoice", () => {
     }
   });
 });
+
+/**
+ * A guard that the split quietly leans on. cancelInvoice refuses when invoiceCreditedPaise is
+ * above zero, and that figure counts only the OFFSET part of a note - the part posted to
+ * RECEIVABLES. A note that is entirely refundable posts nothing there, so on its own that guard
+ * would let the invoice be cancelled while the note stood, reversing the invoice underneath it.
+ *
+ * It cannot happen, and the reason is worth pinning rather than trusting: offset is zero only
+ * when nothing was outstanding, and nothing is outstanding only because the invoice was paid,
+ * settled by an applied credit, or already fully credited - each of which is itself refused.
+ * If anyone later changes the split, one of these three fails.
+ */
+describe("an invoice carrying a credit note can never be cancelled out from under it", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function world() {
+    const repository = new AccountingRepository();
+    const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+    const businessId = repository.createBusiness({ companyId, name: "Business" });
+    const customerId = repository.createCustomer({ companyId, name: "Customer" });
+    const itemId = repository.createItem({ companyId, name: "Item", unit: "each", trackStock: false });
+    const invoice = (id: string, totalPaise: number): void => {
+      repository.saveDraft({
+        id,
+        number: `INV-${id}`,
+        businessId,
+        customerId,
+        invoiceDate: "2026-01-01",
+        status: "DRAFT",
+        paymentAccount: "RECEIVABLES",
+        taxType: "NONE",
+        taxRateBasisPoints: 0,
+        lines: [{ itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
+      });
+      repository.finalizeInvoice(id);
+    };
+    const note = (id: string, invoiceId: string, taxablePaise: number): void => {
+      repository.saveCreditNote({
+        id,
+        invoiceId,
+        number: `CN-${id}`,
+        reason: "Return",
+        status: "DRAFT",
+        lines: [{ itemId, description: "Returned", quantity: 1, unitPricePaise: taxablePaise }],
+      });
+      repository.finalizeCreditNote(id);
+    };
+    return { repository, invoice, note };
+  }
+
+  it("refuses whether the note was offset, refundable, or a mix of the two", () => {
+    const w = world();
+    try {
+      // Fully refundable note (invoice paid first, so the note offsets nothing).
+      w.invoice("A", 100000);
+      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.note("cnA", "A", 100000);
+      expect(w.repository.getCreditNoteBalance("cnA").refundablePaise).toBe(100000);
+      expect(() => w.repository.cancelInvoice("A")).toThrow();
+
+      // Fully offset note (nothing paid, so the note comes straight off the bill).
+      w.invoice("B", 100000);
+      w.note("cnB", "B", 100000);
+      expect(w.repository.getCreditNoteBalance("cnB").refundablePaise).toBe(0);
+      expect(() => w.repository.cancelInvoice("B")).toThrow(/credit notes against it/);
+
+      // Split note: part off the bill, part owed back.
+      w.invoice("C", 100000);
+      w.repository.recordPayment("C", 60000, "2026-01-20");
+      w.note("cnC", "C", 100000);
+      expect(w.repository.getCreditNoteBalance("cnC").refundablePaise).toBe(60000);
+      expect(() => w.repository.cancelInvoice("C")).toThrow();
+
+      // And an invoice with NOTHING against it still cancels, so the guards are not just
+      // refusing everything.
+      w.invoice("D", 100000);
+      expect(() => w.repository.cancelInvoice("D")).not.toThrow();
+    } finally {
+      w.repository.close();
+    }
+  });
+});
