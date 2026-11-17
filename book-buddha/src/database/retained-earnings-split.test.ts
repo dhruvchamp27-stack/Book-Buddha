@@ -125,20 +125,21 @@ describe("retained earnings split at the financial-year boundary", () => {
     try {
       const sheet = w.repository.getBalanceSheet({ businessId: w.businessId, asAtDate: "2026-12-31" });
       const split = sheet.retainedEarnings.split;
-      expect(split).not.toBeNull();
+      if (split === null) throw new Error("expected a split: the as-at date is inside FY 2026-27");
 
       // Profit for the year is the P&L for that period, measured independently of this code path.
       const pl = w.repository.getProfitAndLoss({
         businessId: w.businessId, basis: "ACCRUAL",
-        fromDate: split?.periodFrom, toDate: split?.periodTo ?? undefined,
+        fromDate: split.periodFrom,
+        ...(split.periodTo === null ? {} : { toDate: split.periodTo }),
       });
-      expect(split?.profitForYearPaise).toBe(pl.netProfitPaise);
+      expect(split.profitForYearPaise).toBe(pl.netProfitPaise);
 
       // And brought forward is the P&L for everything up to the day before the year began.
       const earlier = w.repository.getProfitAndLoss({
         businessId: w.businessId, basis: "ACCRUAL", toDate: "2026-03-31",
       });
-      expect(split?.broughtForwardPaise).toBe(earlier.netProfitPaise);
+      expect(split.broughtForwardPaise).toBe(earlier.netProfitPaise);
     } finally {
       w.repository.close();
     }

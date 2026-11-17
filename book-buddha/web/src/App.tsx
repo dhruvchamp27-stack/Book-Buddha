@@ -26,7 +26,15 @@ interface AuditEvent { action: string; entityId: string; occurredAt: string; }
 interface TrialBalanceRow { account: string; debitPaise: number; creditPaise: number; }
 interface ReportAccountRow { account: string; debitPaise: number; creditPaise: number; balancePaise: number; }
 interface ProfitAndLossReport { income: ReportAccountRow[]; expenses: ReportAccountRow[]; totalIncomePaise: number; totalExpensesPaise: number; netProfitPaise: number; }
-interface BalanceSheetReport { assets: ReportAccountRow[]; liabilities: ReportAccountRow[]; equity: ReportAccountRow[]; totalAssetsPaise: number; totalLiabilitiesPaise: number; totalEquityPaise: number; }
+/** R5. Presentation only: the derived retained-earnings figure cut at the financial-year start. */
+interface RetainedEarningsSplit {
+  financialYearId: string; startsOn: string; endsOn: string;
+  periodFrom: string; periodTo: string | null;
+  broughtForwardPaise: number; profitForYearPaise: number;
+}
+interface RetainedEarningsBreakdown { totalPaise: number; split: RetainedEarningsSplit | null; unsplitReason: string | null; }
+interface BalanceSheetReport { assets: ReportAccountRow[]; liabilities: ReportAccountRow[]; equity: ReportAccountRow[]; totalAssetsPaise: number; totalLiabilitiesPaise: number; totalEquityPaise: number; retainedEarnings: RetainedEarningsBreakdown; }
+interface FinancialYear { id: string; businessId: string; startsOn: string; endsOn: string; status: "OPEN" | "LOCKED"; lockedAt: string | null; }
 interface GeneralLedgerRow { journalEntryId: string; sourceId: string; date: string; description: string; isReversal: boolean; account: string; debitPaise: number; creditPaise: number; }
 interface Payment { id: string; invoiceId: string; amountPaise: number; paymentAccount: "CASH"; paidAt: string; }
 interface ReceivableRow { invoiceId: string; invoiceNumber: string; customerId: string; invoiceDate: string; totalPaise: number; paidPaise: number; outstandingPaise: number; ageDays: number; }
@@ -97,6 +105,10 @@ export function App() {
   const [buyerName, setBuyerName] = useState("");
   const [buyerContact, setBuyerContact] = useState("");
   const [itemId, setItemId] = useState("");
+  // R5. Financial years, so retained earnings can be split at the year boundary.
+  const [financialYears, setFinancialYears] = useState<FinancialYear[]>([]);
+  const [yearStartsOn, setYearStartsOn] = useState("");
+  const [yearEndsOn, setYearEndsOn] = useState("");
   const [invoices, setInvoices] = useState<InvoiceSummary[]>([]);
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [invoiceNumber, setInvoiceNumber] = useState("");
@@ -224,6 +236,10 @@ export function App() {
 
   useEffect(() => {
     void loadInvoices(businessId).catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Could not load invoices."));
+    // R5: the years, and the Balance Sheet with them — the sheet is asked for this business, so
+    // the retained-earnings split follows whichever business is selected.
+    void loadFinancialYears(businessId).catch(() => setFinancialYears([]));
+    void refreshLedgerViews().catch(() => undefined);
   }, [businessId]);
 
   async function run(action: () => Promise<void>) {
@@ -359,6 +375,35 @@ export function App() {
     });
   }
 
+  /**
+   * R5. The Balance Sheet is asked for ONE business when one is selected, because the retained
+   * earnings split needs a financial year and years belong to a business. With no business
+   * selected the sheet is consolidated, and the report itself says why it cannot be split.
+   */
+  function balanceSheetPath(): string {
+    return businessId === "" ? "/reports/balance-sheet" : `/reports/balance-sheet?businessId=${encodeURIComponent(businessId)}`;
+  }
+
+  /** R5. The years defined for the selected business; none to show when none is selected. */
+  async function loadFinancialYears(id: string) {
+    if (id === "") { setFinancialYears([]); return; }
+    setFinancialYears(await api<FinancialYear[]>(`/financial-years?businessId=${encodeURIComponent(id)}`));
+  }
+
+  async function submitFinancialYear(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await run(async () => {
+      if (!businessId) throw new Error("Select or create a business first — a financial year belongs to one.");
+      await api<{ id: string }>("/financial-years", {
+        method: "POST",
+        body: JSON.stringify({ businessId, startsOn: yearStartsOn, endsOn: yearEndsOn }),
+      });
+      setYearStartsOn(""); setYearEndsOn("");
+      await loadFinancialYears(businessId);
+      await refreshLedgerViews();
+    });
+  }
+
   async function refreshAccounting(invoiceId: string) {
     const [events, entries, balance] = await Promise.all([
       api<AuditEvent[]>(`/audit-events?entityId=${encodeURIComponent(invoiceId)}`),
@@ -368,7 +413,7 @@ export function App() {
     setAuditEvents(events); setJournalEntries(entries); setTrialBalance(balance);
     const [profitAndLossReport, balanceSheetReport, ledger] = await Promise.all([
       api<ProfitAndLossReport>("/reports/profit-and-loss"),
-      api<BalanceSheetReport>("/reports/balance-sheet"),
+      api<BalanceSheetReport>(balanceSheetPath()),
       api<GeneralLedgerRow[]>("/reports/general-ledger"),
     ]);
     setProfitAndLoss(profitAndLossReport);
@@ -481,7 +526,7 @@ export function App() {
     setTrialBalance(balance); setJournalEntries(entries); setGeneralLedger(ledger);
     const [profitAndLossReport, balanceSheetReport] = await Promise.all([
       api<ProfitAndLossReport>("/reports/profit-and-loss"),
-      api<BalanceSheetReport>("/reports/balance-sheet"),
+      api<BalanceSheetReport>(balanceSheetPath()),
     ]);
     setProfitAndLoss(profitAndLossReport); setBalanceSheet(balanceSheetReport);
   }
@@ -684,7 +729,42 @@ export function App() {
         )}
       </section>
       <section className="grid"><article className="card"><p className="eyebrow">Reports</p><h3>Trial Balance</h3>{trialBalance.length === 0 ? <p className="muted">Finalize an invoice to populate the report.</p> : <table><thead><tr><th>Account</th><th>Debit</th><th>Credit</th></tr></thead><tbody>{trialBalance.map((row) => <tr key={row.account}><td>{row.account}</td><td>{money(row.debitPaise)}</td><td>{money(row.creditPaise)}</td></tr>)}</tbody></table>}</article><article className="card"><p className="eyebrow">Traceability</p><h3>Audit history</h3>{auditEvents.length === 0 ? <p className="muted">Finalize or cancel an invoice to see its events.</p> : <ul className="events">{auditEvents.map((event) => <li key={`${event.action}-${event.occurredAt}`}><strong>{event.action}</strong><span>{new Date(event.occurredAt).toLocaleString()}</span></li>)}</ul>}<h3 className="subheading">Journal entries</h3>{journalEntries.map((entry) => <p className="journal" key={entry.id}>{entry.description} · {entry.isReversal ? "Reversal" : "Original"}</p>)}</article></section>
-      <section className="grid"><article className="card"><p className="eyebrow">Financial statements</p><h3>Profit &amp; Loss</h3>{profitAndLoss === null ? <p className="muted">Finalize an invoice to populate the report.</p> : <><p>Income: <strong>{money(profitAndLoss.totalIncomePaise)}</strong></p><p>Expenses: <strong>{money(profitAndLoss.totalExpensesPaise)}</strong></p><p>Net profit: <strong>{money(profitAndLoss.netProfitPaise)}</strong></p></>}</article><article className="card"><p className="eyebrow">Financial position</p><h3>Balance Sheet</h3>{balanceSheet === null ? <p className="muted">Finalize an invoice to populate the report.</p> : <><p>Assets: <strong>{money(balanceSheet.totalAssetsPaise)}</strong></p><p>Liabilities: <strong>{money(balanceSheet.totalLiabilitiesPaise)}</strong></p><p>Equity: <strong>{money(balanceSheet.totalEquityPaise)}</strong></p></>}</article></section>
+      <section className="grid"><article className="card"><p className="eyebrow">Financial statements</p><h3>Profit &amp; Loss</h3>{profitAndLoss === null ? <p className="muted">Finalize an invoice to populate the report.</p> : <><p>Income: <strong>{money(profitAndLoss.totalIncomePaise)}</strong></p><p>Expenses: <strong>{money(profitAndLoss.totalExpensesPaise)}</strong></p><p>Net profit: <strong>{money(profitAndLoss.netProfitPaise)}</strong></p></>}</article><article className="card"><p className="eyebrow">Financial position</p><h3>Balance Sheet</h3>{balanceSheet === null ? <p className="muted">Finalize an invoice to populate the report.</p> : <><p>Assets: <strong>{money(balanceSheet.totalAssetsPaise)}</strong></p><p>Liabilities: <strong>{money(balanceSheet.totalLiabilitiesPaise)}</strong></p><p>Equity: <strong>{money(balanceSheet.totalEquityPaise)}</strong></p>
+        <h3 className="subheading">Retained earnings</h3>
+        <p>Total: <strong>{money(balanceSheet.retainedEarnings.totalPaise)}</strong></p>
+        {balanceSheet.retainedEarnings.split === null
+          ? <p className="muted">{balanceSheet.retainedEarnings.unsplitReason}</p>
+          : <>
+              <p>Brought forward: <strong>{money(balanceSheet.retainedEarnings.split.broughtForwardPaise)}</strong></p>
+              <p>Profit for the year: <strong>{money(balanceSheet.retainedEarnings.split.profitForYearPaise)}</strong></p>
+              <p className="muted">
+                Year {balanceSheet.retainedEarnings.split.startsOn} to {balanceSheet.retainedEarnings.split.endsOn}.
+                Profit for the year is measured from {balanceSheet.retainedEarnings.split.periodFrom} to{" "}
+                {balanceSheet.retainedEarnings.split.periodTo ?? "the latest entry there is"}.
+                Nothing is posted to split this — it is the same figure, read two ways.
+              </p>
+            </>}
+      </>}</article></section>
+      <section className="card">
+        <p className="eyebrow">Year close</p><h3>Financial years</h3>
+        <p className="muted">
+          A financial year is what the Balance Sheet splits retained earnings at: everything earned
+          before it starts is brought forward, everything since is profit for the year. Years belong
+          to a business, so select one first. Nothing is posted — defining a year moves no money.
+        </p>
+        <form onSubmit={submitFinancialYear} className="form">
+          <label>Year starts on<input type="date" value={yearStartsOn} onChange={(event) => setYearStartsOn(event.target.value)} required /></label>
+          <label>Year ends on<input type="date" value={yearEndsOn} onChange={(event) => setYearEndsOn(event.target.value)} required /></label>
+          <button className="primary" disabled={busy || businessId === ""}>Add financial year</button>
+        </form>
+        {businessId === ""
+          ? <p className="muted">Select a business above to see and add its financial years.</p>
+          : financialYears.length === 0
+            ? <p className="muted">No financial year yet for this business.</p>
+            : <table><thead><tr><th>Starts</th><th>Ends</th><th>Status</th></tr></thead><tbody>
+                {financialYears.map((year) => <tr key={year.id}><td>{year.startsOn}</td><td>{year.endsOn}</td><td>{year.status}</td></tr>)}
+              </tbody></table>}
+      </section>
       <section className="card"><p className="eyebrow">Report detail</p><h3>General Ledger</h3>{generalLedger.length === 0 ? <p className="muted">No journal lines yet.</p> : <div className="ledger"><table><thead><tr><th>Date</th><th>Account</th><th>Description</th><th>Debit</th><th>Credit</th></tr></thead><tbody>{generalLedger.map((row) => <tr key={`${row.journalEntryId}-${row.account}`}><td>{new Date(row.date).toLocaleDateString()}</td><td>{row.account}</td><td>{row.description}{row.isReversal ? " (Reversal)" : ""}</td><td>{money(row.debitPaise)}</td><td>{money(row.creditPaise)}</td></tr>)}</tbody></table></div>}</section>
       <section className="card"><p className="eyebrow">Receivables</p><h3>Outstanding invoices</h3>{receivables.length === 0 ? <p className="muted">No outstanding receivables.</p> : <table><thead><tr><th>Invoice</th><th>Invoice date</th><th>Outstanding</th><th>Age</th></tr></thead><tbody>{receivables.map((row) => <tr key={row.invoiceId}><td>{row.invoiceNumber}</td><td>{new Date(row.invoiceDate).toLocaleDateString()}</td><td>{money(row.outstandingPaise)}</td><td>{row.ageDays} days</td></tr>)}</tbody></table>}</section>
       <section className="card"><p className="eyebrow">Fair reporting</p><h3>Sales by fair</h3>{fairSales.length === 0 ? <p className="muted">No fairs have finalized sales yet.</p> : <table><thead><tr><th>Fair</th><th>Invoices</th><th>Sales</th></tr></thead><tbody>{fairSales.map((row) => <tr key={row.fairId}><td>{row.fairName}</td><td>{row.invoiceCount}</td><td>{money(row.totalPaise)}</td></tr>)}</tbody></table>}</section>
