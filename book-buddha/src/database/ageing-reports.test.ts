@@ -162,6 +162,22 @@ describe("R7b: ageing of what customers owe", () => {
       expect(onTheDay.totalOutstandingPaise).toBe(50000); // INV-91 alone
       expect(amounts(onTheDay)).toEqual([50000, 0, 0, 0]);
 
+      // BUT a document is only dropped when a date was actually ASKED for. With no as-at date
+      // the question is "what is owed now", and an invoice dated tomorrow is owed now just the
+      // same - dropping it would hide a real debt. Its age clamps at nil days instead.
+      w.repository.saveDraft(invoice(w, "INV-FUTURE", "2099-01-01", 9000));
+      w.repository.finalizeInvoice("INV-FUTURE");
+      const asked = w.repository.getReceivablesAgeing({ asAtDate: AS_AT });
+      expect(asked.totalOutstandingPaise).toBe(150000); // the 2099 invoice is excluded
+      const notAsked = w.repository.getReceivablesAgeing();
+      expect(notAsked.totalOutstandingPaise).toBe(159000); // ...and included
+      expect(notAsked.buckets[0]?.outstandingPaise).toBeGreaterThanOrEqual(9000);
+      // getReceivables follows exactly the same rule, so the two cannot disagree on the total.
+      expect(w.repository.getReceivables({ asAtDate: AS_AT }).reduce((sum, row) => sum + row.outstandingPaise, 0))
+        .toBe(asked.totalOutstandingPaise);
+      expect(w.repository.getReceivables().reduce((sum, row) => sum + row.outstandingPaise, 0))
+        .toBe(notAsked.totalOutstandingPaise);
+
       // Two calls with the same as-at date give the same answer, which is the point of passing it.
       expect(w.repository.getReceivablesAgeing({ asAtDate: AS_AT }))
         .toEqual(w.repository.getReceivablesAgeing({ asAtDate: AS_AT }));

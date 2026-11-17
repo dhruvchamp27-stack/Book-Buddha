@@ -2475,11 +2475,14 @@ export class AccountingRepository {
     // One definition of "what a customer still owes": the shared open-items query, which reads
     // invoices (less payments, applied credit and credit notes from the POSTED journal) and
     // opening balances alike. This method only reshapes its rows.
-    const now = Date.parse(`${this.asAtOrToday(filter.asAtDate)}T00:00:00.000Z`);
+    const asAtDate = this.asAtOrToday(filter.asAtDate);
+    const now = Date.parse(`${asAtDate}T00:00:00.000Z`);
     return this.openCustomerItemRows({
       ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
       ...(filter.customerId === undefined ? {} : { customerId: filter.customerId }),
-    }).map((item) => ({
+      // Same rule as the ageing report, so the two cannot disagree on what is outstanding:
+      // a document dated after the as-at date did not exist then.
+    }).filter((item) => filter.asAtDate === undefined || item.date.slice(0, 10) <= asAtDate).map((item) => ({
       kind: item.kind,
       invoiceId: item.documentId,
       invoiceNumber: item.number,
@@ -2518,8 +2521,20 @@ export class AccountingRepository {
     asAtDate: string,
     documents: ReadonlyArray<{ partyId: string; date: string; outstandingPaise: number }>,
     names: ReadonlyMap<string, string>,
+    /**
+     * Whether the caller ASKED for that date. Only then does a document dated after it get
+     * dropped: "as at 1 January" genuinely excludes June's invoice. With no date asked for the
+     * report means "what is owed now", and an invoice dated tomorrow is owed now just the same -
+     * dropping it would hide a real debt. Its age then clamps at nil days rather than going
+     * negative and falling outside every band.
+     */
+    excludeAfter: boolean,
   ): AgeingReport {
     const asAtMs = Date.parse(`${asAtDate}T00:00:00.000Z`);
+    // Open items come from several tables (invoices, opening balances, bills, expenses). Take the
+    // date part only: one of them carrying a full timestamp would make every age NaN, and the
+    // band guard below would then throw for the whole report rather than for that one row.
+    const dayOf = (value: string): string => value.slice(0, 10);
     const emptyBuckets = (): AgeingBucket[] =>
       AccountingRepository.AGEING_BANDS.map((band) => ({ ...band, outstandingPaise: 0, documentCount: 0 }));
     const byParty = new Map<string, AgeingBucket[]>();
@@ -2529,8 +2544,9 @@ export class AccountingRepository {
       if (document.outstandingPaise === 0) continue;
       // A document dated after the as-at date did not exist then, so it cannot be owed then.
       // Without this an ageing report run as at January listed June's invoices at nil days old.
-      if (document.date > asAtDate) continue;
-      const ageDays = Math.floor((asAtMs - Date.parse(`${document.date}T00:00:00.000Z`)) / 86400000);
+      const documentDay = dayOf(document.date);
+      if (excludeAfter && documentDay > asAtDate) continue;
+      const ageDays = Math.max(0, Math.floor((asAtMs - Date.parse(`${documentDay}T00:00:00.000Z`)) / 86400000));
       const index = AccountingRepository.AGEING_BANDS
         .findIndex((band) => ageDays >= band.fromDays && (band.toDays === null || ageDays <= band.toDays));
       // The bands run contiguously from 0 with an open top, so this cannot miss. Guarded anyway:
@@ -2575,6 +2591,7 @@ export class AccountingRepository {
       this.asAtOrToday(filter.asAtDate),
       items.map((item) => ({ partyId: item.customerId, date: item.date, outstandingPaise: item.outstandingPaise })),
       names,
+      filter.asAtDate !== undefined,
     );
   }
 
@@ -2592,6 +2609,7 @@ export class AccountingRepository {
       this.asAtOrToday(filter.asAtDate),
       items.map((item) => ({ partyId: item.supplierId, date: item.date, outstandingPaise: item.outstandingPaise })),
       names,
+      filter.asAtDate !== undefined,
     );
   }
 
@@ -4770,11 +4788,13 @@ export class AccountingRepository {
   /** R7b: took no filters and aged against the wall clock, exactly as getReceivables did. */
   public getPayables(filter: { businessId?: string; supplierId?: string; asAtDate?: string } = {}): readonly PayableRow[] {
     // The supplier mirror of getReceivables: reshapes the shared open-items rows.
-    const now = Date.parse(`${this.asAtOrToday(filter.asAtDate)}T00:00:00.000Z`);
+    const asAtDate = this.asAtOrToday(filter.asAtDate);
+    const now = Date.parse(`${asAtDate}T00:00:00.000Z`);
     return this.openSupplierItemRows({
       ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
       ...(filter.supplierId === undefined ? {} : { supplierId: filter.supplierId }),
-    }).map((item) => ({
+      // Same rule as the ageing report, for the same reason.
+    }).filter((item) => filter.asAtDate === undefined || item.date.slice(0, 10) <= asAtDate).map((item) => ({
       documentType: item.kind,
       documentId: item.documentId,
       documentNumber: item.number,
