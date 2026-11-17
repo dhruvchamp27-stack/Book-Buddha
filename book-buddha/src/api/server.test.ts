@@ -392,6 +392,93 @@ describe("local API", () => {
     }
   });
 
+  /**
+   * S4-1 / S4-5 over HTTP: the three ways a credit note is settled. Without these routes the
+   * refund path existed only inside the repository and nothing could reach it.
+   */
+  it("refunds, applies and cancels a credit note over HTTP", async () => {
+    const repository = new AccountingRepository();
+    const app = buildApi(repository);
+    try {
+      // A credit note is dated by its created_at, i.e. now, so every discharge date has to be
+      // after today. Fake timers are not an option here: they stall Fastify's own async work.
+      const inDays = (days: number): string => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+      // An empty object rather than no payload at all: the routes that ignore the body do not
+      // parse it, and a conditional spread trips exactOptionalPropertyTypes.
+      const post = async (url: string, payload: object = {}) => app.inject({ method: "POST", url, payload });
+      const idOf = async (url: string, payload: object): Promise<string> =>
+        (await post(url, payload)).json<{ id: string }>().id;
+
+      const companyId = await idOf("/companies", { name: "Refund Company" });
+      const businessId = await idOf("/businesses", { companyId, name: "Refund Business" });
+      const customerId = await idOf("/customers", { companyId, name: "Refund Customer" });
+      const itemId = await idOf("/items", { companyId, name: "Refund Book", unit: "each", trackStock: false });
+
+      const invoiceId = await idOf("/invoices", {
+        number: "INV-RF-1", businessId, customerId, paymentAccount: "RECEIVABLES",
+        lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }],
+      });
+      await post(`/invoices/${invoiceId}/finalize`);
+      // Paid in full, so any credit note is money owed BACK.
+      expect((await post(`/invoices/${invoiceId}/payments`, { amountPaise: 40000, paidOn: inDays(-1) })).statusCode).toBe(201);
+
+      const noteId = await idOf("/credit-notes", {
+        invoiceId, number: "CN-RF-1", reason: "Returned",
+        lines: [{ itemId, description: "Book", quantity: 2, unitPricePaise: 10000 }],
+      });
+      await post(`/credit-notes/${noteId}/finalize`);
+
+      const balance = await app.inject({ method: "GET", url: `/credit-notes/${noteId}/balance` });
+      expect(balance.json()).toEqual({ refundablePaise: 20000, dischargedPaise: 0, outstandingPaise: 20000 });
+
+      // A real date is required - today is not assumed, or the reduction would land in the
+      // wrong month of the cash P&L.
+      expect((await post(`/credit-notes/${noteId}/refunds`, { amountPaise: 5000, paymentAccount: "CASH" })).statusCode).toBe(400);
+      expect((await post(`/credit-notes/${noteId}/refunds`, { amountPaise: 5000, refundedOn: "nonsense", paymentAccount: "CASH" })).statusCode).toBe(400);
+      // RECEIVABLES is not somewhere money can go out to.
+      expect((await post(`/credit-notes/${noteId}/refunds`, { amountPaise: 5000, refundedOn: inDays(2), paymentAccount: "RECEIVABLES" })).statusCode).toBe(400);
+
+      // Half back in cash, and the rest set against a second invoice.
+      const refunded = await post(`/credit-notes/${noteId}/refunds`, { amountPaise: 5000, refundedOn: inDays(2), paymentAccount: "BANK" });
+      expect(refunded.statusCode).toBe(201);
+      expect(refunded.json<{ balance: { outstandingPaise: number } }>().balance.outstandingPaise).toBe(15000);
+
+      const nextInvoiceId = await idOf("/invoices", {
+        number: "INV-RF-2", businessId, customerId, paymentAccount: "RECEIVABLES",
+        lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }],
+      });
+      await post(`/invoices/${nextInvoiceId}/finalize`);
+      const applied = await post(`/credit-notes/${noteId}/applications`, {
+        invoiceId: nextInvoiceId, amountPaise: 15000, appliedOn: inDays(3),
+      });
+      expect(applied.statusCode).toBe(201);
+      expect(applied.json<{ balance: { outstandingPaise: number } }>().balance.outstandingPaise).toBe(0);
+      // Nothing left, so a further refund is refused rather than overdrawing the note.
+      expect((await post(`/credit-notes/${noteId}/refunds`, { amountPaise: 1, refundedOn: inDays(4), paymentAccount: "CASH" })).statusCode).toBe(400);
+      // And the second invoice really was settled by that credit: 40,000 less 15,000.
+      const receivables = (await app.inject({ method: "GET", url: "/reports/receivables" }))
+        .json<Array<{ invoiceId: string; outstandingPaise: number }>>();
+      expect(receivables.find((r) => r.invoiceId === nextInvoiceId)?.outstandingPaise).toBe(25000);
+
+      // A discharged note cannot be cancelled; an untouched one can.
+      expect((await post(`/credit-notes/${noteId}/cancel`)).statusCode).toBe(400);
+      const cleanNoteId = await idOf("/credit-notes", {
+        invoiceId: nextInvoiceId, number: "CN-RF-2", reason: "Mistake",
+        lines: [{ itemId, description: "Book", quantity: 1, unitPricePaise: 10000 }],
+      });
+      await post(`/credit-notes/${cleanNoteId}/finalize`);
+      expect((await post(`/credit-notes/${cleanNoteId}/cancel`)).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: `/credit-notes/${cleanNoteId}` })).json<{ status: string }>().status).toBe("CANCELLED");
+      // Cancelling put the 10,000 back on the bill.
+      const after = (await app.inject({ method: "GET", url: "/reports/receivables" }))
+        .json<Array<{ invoiceId: string; outstandingPaise: number }>>();
+      expect(after.find((r) => r.invoiceId === nextInvoiceId)?.outstandingPaise).toBe(25000);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
   it("runs the auth flow: setup, login, session, change-password, logout", async () => {
     const repository = new AccountingRepository();
     const app = buildApi(repository);

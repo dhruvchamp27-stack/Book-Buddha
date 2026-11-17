@@ -230,6 +230,24 @@ const creditNoteInput = z.object({
   lines: z.array(invoiceLine).min(1),
 });
 
+/**
+ * Discharging a credit note (S4-1, S4-5). The date is required on both, unlike a payment's
+ * optional paidOn: a refund or an application is a deliberate, dated act, and defaulting it to
+ * today would quietly drop the reduction into the wrong month of the cash P&L.
+ */
+const creditNoteRefundInput = z.object({
+  amountPaise: z.number().int().positive(),
+  refundedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
+  // BANK is reachable here, and only here: payments.payment_account is still CHECK IN ('CASH').
+  paymentAccount: z.enum(["CASH", "BANK"]),
+});
+
+const creditNoteApplicationInput = z.object({
+  invoiceId: id,
+  amountPaise: z.number().int().positive(),
+  appliedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
+});
+
 const recurringTemplateInput = z.object({
   id: id.optional(),
   businessId: id,
@@ -679,6 +697,40 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
 
   app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/finalize", async (request) =>
     ({ journalEntry: repository.finalizeCreditNote(request.params.creditNoteId) }));
+
+  /** What the note is worth back to the customer, and how much of it is still undischarged. */
+  app.get<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/balance", async (request) =>
+    repository.getCreditNoteBalance(request.params.creditNoteId));
+
+  /** Pay a credit note back in cash or from the bank (S4-1). */
+  app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/refunds", async (request, reply) => {
+    const input = parseBody(creditNoteRefundInput, request.body);
+    const journalEntry = repository.recordCreditNoteRefund({
+      id: randomUUID(),
+      creditNoteId: request.params.creditNoteId,
+      amountPaise: input.amountPaise,
+      refundedOn: input.refundedOn,
+      paymentAccount: input.paymentAccount,
+    });
+    return reply.code(201).send({ journalEntry, balance: repository.getCreditNoteBalance(request.params.creditNoteId) });
+  });
+
+  /** Set a credit note against a later invoice for the same customer instead (S4-5). */
+  app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/applications", async (request, reply) => {
+    const input = parseBody(creditNoteApplicationInput, request.body);
+    const journalEntry = repository.applyCreditNote({
+      id: randomUUID(),
+      creditNoteId: request.params.creditNoteId,
+      invoiceId: input.invoiceId,
+      amountPaise: input.amountPaise,
+      appliedOn: input.appliedOn,
+    });
+    return reply.code(201).send({ journalEntry, balance: repository.getCreditNoteBalance(request.params.creditNoteId) });
+  });
+
+  /** Undo a finalized credit note, newest first (S4-1). Reversal, never deletion. */
+  app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/cancel", async (request) =>
+    ({ journalEntry: repository.cancelCreditNote(request.params.creditNoteId) }));
 
   app.post("/quotations", async (request, reply) => {
     const input = parseBody(invoiceInput, request.body);
