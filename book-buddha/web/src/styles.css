@@ -72,3 +72,10 @@ th:not(:first-child), td:not(:first-child) { text-align: right; }
   .line-row { grid-template-columns: 1fr 1fr; }
   .line-row label:first-child { grid-column: 1 / -1; }
 }
+
+/* R4c: the inventory-to-ledger tie-out, and what a stock entry is about to post. */
+.posting-note { margin: 4px 0 0; padding: 11px 13px; border-left: 3px solid #9ac8a9; background: #f3faf5; color: #27402f; font-size: .86rem; }
+.posted-note { margin: 12px 0 0; padding: 11px 13px; border-left: 3px solid #4f8f66; background: #eef7f1; color: #27402f; font-size: .86rem; }
+.tieout td { font-variant-numeric: tabular-nums; }
+.tieout tr.agrees td { color: #2c6a42; background: #f1f9f4; }
+.tieout tr.differs td { color: #8d2929; background: #fdf3f3; }

@@ -32,6 +32,21 @@ interface Payment { id: string; invoiceId: string; amountPaise: number; paymentA
 interface ReceivableRow { invoiceId: string; invoiceNumber: string; customerId: string; invoiceDate: string; totalPaise: number; paidPaise: number; outstandingPaise: number; ageDays: number; }
 interface FairSalesRow { fairId: string; fairName: string; invoiceCount: number; totalPaise: number; }
 interface StockBalance { itemId: string; itemName: string; unit: string; quantity: number; valuePaise: number; }
+/** R4c. OPENING and ADJUSTMENT post to the ledger; a bare PURCHASE does not (its bill does). */
+type StockMovementType = "OPENING" | "ADJUSTMENT" | "PURCHASE";
+interface StockMovementResult {
+  id: string; itemId: string; movementType: StockMovementType; quantityDelta: number;
+  unitCostPaise: number; occurredAt: string; journalEntryId?: string;
+}
+interface StockBackfillRow {
+  movementId: string; itemName: string; movementType: StockMovementType; quantity: number;
+  unitCostPaise: number; valuePaise: number; entryDate: string; offsetAccount: string; reason?: string;
+}
+interface StockBackfillResult {
+  dryRun: boolean; postedCount: number; postedPaise: number; totalPaise: number;
+  toPost: StockBackfillRow[]; refused: StockBackfillRow[]; nothingToPost: StockBackfillRow[];
+  uncoveredPurchaseMovements: number;
+}
 interface CreditNoteSummary {
   id: string; invoiceId: string; invoiceNumber: string; number: string; reason: string;
   status: "DRAFT" | "FINALIZED" | "CANCELLED"; createdAt: string;
@@ -59,7 +74,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function money(paise: number): string {
-  return `₹${(paise / 100).toFixed(2)}`;
+  // Indian digit grouping (1,12,500.00), which is what the figures are read in.
+  const rupees = Math.abs(paise) / 100;
+  // The minus belongs in FRONT of the symbol: -₹2,500.00, never ₹-2,500.00.
+  return `${paise < 0 ? "-" : ""}₹${rupees.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function emptyLine(): InvoiceLine {
@@ -114,6 +132,18 @@ export function App() {
   const [stockItemId, setStockItemId] = useState("");
   const [stockQuantity, setStockQuantity] = useState("");
   const [stockCost, setStockCost] = useState("");
+  // R4c: a hand-entered movement now posts, so it needs a type and a date of its own.
+  const [stockMovementType, setStockMovementType] = useState<StockMovementType>("OPENING");
+  const [stockOccurredOn, setStockOccurredOn] = useState(new Date().toISOString().slice(0, 10));
+  const [lastStockPosting, setLastStockPosting] = useState<StockMovementResult | null>(null);
+  const [backfill, setBackfill] = useState<StockBackfillResult | null>(null);
+  const [postedSummary, setPostedSummary] = useState<{ count: number; paise: number } | null>(null);
+  // R4c's tie-out, both sides derived from what the app already has on screen: the INVENTORY
+  // account as the LEDGER has it, against the stock the FIFO layers say is held.
+  const inventoryLedgerPaise = trialBalance
+    .filter((row) => row.account === "INVENTORY")
+    .reduce((total, row) => total + row.debitPaise - row.creditPaise, 0);
+  const stockValuationPaise = stockBalances.reduce((total, row) => total + row.valuePaise, 0);
   const [paymentAmount, setPaymentAmount] = useState("");
   const [creditNotes, setCreditNotes] = useState<CreditNoteSummary[]>([]);
   const [returnedByItem, setReturnedByItem] = useState<Record<string, number>>({});
@@ -185,6 +215,11 @@ export function App() {
   useEffect(() => {
     void loadCompanies().catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Could not load saved records."));
     void loadCreditNotes().catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Could not load credit notes."));
+    // R4c: the inventory tie-out reads the trial balance, so the reports must be loaded on
+    // arrival. Without this the ledger side shows zero on a book that already has entries -
+    // which reads as "the accounts hold no stock" when they may hold plenty.
+    void refreshLedgerViews().catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Could not load the reports."));
+    void api<StockBalance[]>("/inventory/stock").then(setStockBalances).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -403,19 +438,86 @@ export function App() {
     event.preventDefault();
     await run(async () => {
       if (!stockItemId) throw new Error("Select a stock-tracked item first.");
-      await api("/inventory/movements", {
+      const posted = await api<StockMovementResult>("/inventory/movements", {
         method: "POST",
         body: JSON.stringify({
           itemId: stockItemId,
           quantity: Number(stockQuantity),
           unitCostPaise: Math.round(Number(stockCost) * 100),
-          movementType: "PURCHASE",
+          movementType: stockMovementType,
+          // R4c: the business owns the journal entry, and the date is the entry's date.
+          ...(businessId === "" ? {} : { businessId }),
+          ...(stockMovementType === "PURCHASE" ? {} : { occurredOn: stockOccurredOn }),
+          ...(fairId === "" || stockMovementType === "PURCHASE" ? {} : { fairId }),
         }),
       });
       setStockQuantity("");
       setStockCost("");
+      setLastStockPosting(posted);
       setStockBalances(await api<StockBalance[]>("/inventory/stock"));
-      setMessage("Stock added.");
+      await refreshLedgerViews();
+      setMessage(
+        posted.journalEntryId === undefined
+          ? "Stock added. Nothing was posted to the accounts: a purchase is posted by its bill."
+          : `Stock added and posted to the accounts: ${stockPostingWords(stockMovementType)}.`,
+      );
+    });
+  }
+
+  /** R4c: what the owner is about to post, in words, before they press the button. */
+  function stockPostingWords(movementType: StockMovementType): string {
+    if (movementType === "OPENING") return "Debit Inventory, credit Opening Balance Equity";
+    if (movementType === "ADJUSTMENT") return "Debit Inventory, credit Stock Adjustment";
+    return "nothing — a purchase is posted by its bill";
+  }
+
+  /** The reports that move when anything posts, refreshed without needing an invoice. */
+  async function refreshLedgerViews() {
+    const [balance, entries, ledger] = await Promise.all([
+      api<TrialBalanceRow[]>("/reports/trial-balance"),
+      api<JournalEntry[]>("/journal-entries"),
+      api<GeneralLedgerRow[]>("/reports/general-ledger"),
+    ]);
+    setTrialBalance(balance); setJournalEntries(entries); setGeneralLedger(ledger);
+    const [profitAndLossReport, balanceSheetReport] = await Promise.all([
+      api<ProfitAndLossReport>("/reports/profit-and-loss"),
+      api<BalanceSheetReport>("/reports/balance-sheet"),
+    ]);
+    setProfitAndLoss(profitAndLossReport); setBalanceSheet(balanceSheetReport);
+  }
+
+  /**
+   * R4c. `apply: false` is a DRY RUN: it reports what would be posted and writes nothing. The
+   * owner has to press the second button, which is the whole point - it never runs on its own.
+   */
+  async function runBackfill(apply: boolean) {
+    await run(async () => {
+      if (!businessId) throw new Error("Pick a business first: a journal entry belongs to one.");
+      const result = await api<StockBackfillResult>("/inventory/journal-backfill", {
+        method: "POST",
+        body: JSON.stringify({ businessId, apply }),
+      });
+      setBackfill(result);
+      if (apply) {
+        setStockBalances(await api<StockBalance[]>("/inventory/stock"));
+        await refreshLedgerViews();
+        // Re-check after posting, so what is on screen is what is NOW outstanding rather than
+        // a list of things already done, still headed "would post".
+        setBackfill(await api<StockBackfillResult>("/inventory/journal-backfill", {
+          method: "POST",
+          body: JSON.stringify({ businessId, apply: false }),
+        }));
+        setPostedSummary({ count: result.postedCount, paise: result.postedPaise });
+      } else {
+        setPostedSummary(null);
+      }
+      setMessage(
+        apply
+          ? `Posted ${result.postedCount} entr${result.postedCount === 1 ? "y" : "ies"}, ${money(result.postedPaise)} in total.`
+          : result.toPost.length === 0
+            ? "Checked: every opening and adjustment movement is already in the accounts."
+            : `Checked only — nothing written. ${result.toPost.length} movement${result.toPost.length === 1 ? "" : "s"} worth ${money(result.totalPaise)} would be posted.`,
+      );
     });
   }
 
@@ -450,7 +552,81 @@ export function App() {
           <label>Fair<select value={fairId} onChange={(event) => setFairId(event.target.value)} disabled={!companyId}><option value="">No fair</option>{fairs.filter((fair) => fair.hostCustomerId === customerId).map((fair) => <option key={fair.id} value={fair.id}>{fair.name}</option>)}</select></label>
         </div>
       </section>
-      <section className="card"><p className="eyebrow">Inventory</p><h3>Add stock</h3><form onSubmit={submitStockMovement} className="form"><div className="form-row"><label>Item<select value={stockItemId} onChange={(event) => setStockItemId(event.target.value)} required><option value="">Select tracked item</option>{items.filter((item) => item.trackStock).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Quantity<input type="number" min="1" step="1" value={stockQuantity} onChange={(event) => setStockQuantity(event.target.value)} required /></label><label>Unit cost (₹)<input type="number" min="0" step="0.01" value={stockCost} onChange={(event) => setStockCost(event.target.value)} required /></label></div><button className="primary" disabled={busy}>Add stock</button></form>{stockBalances.length > 0 && <table><thead><tr><th>Item</th><th>Quantity</th><th>Value</th></tr></thead><tbody>{stockBalances.map((row) => <tr key={row.itemId}><td>{row.itemName}</td><td>{row.quantity} {row.unit}</td><td>{money(row.valuePaise)}</td></tr>)}</tbody></table>}</section>
+      {/* R4c: opening stock and adjustments now reach the accounts, so this card says what it
+          will post BEFORE the button is pressed, and shows the entry it posted afterwards. */}
+      <section className="card">
+        <p className="eyebrow">Inventory</p><h3>Add stock</h3>
+        <form onSubmit={submitStockMovement} className="form">
+          <div className="form-row">
+            <label>Item<select value={stockItemId} onChange={(event) => setStockItemId(event.target.value)} required><option value="">Select tracked item</option>{items.filter((item) => item.trackStock).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label>Why<select value={stockMovementType} onChange={(event) => { setStockMovementType(event.target.value as StockMovementType); setLastStockPosting(null); }}>
+              <option value="OPENING">Opening stock (held before the books began)</option>
+              <option value="ADJUSTMENT">Adjustment (a recount found more)</option>
+              <option value="PURCHASE">Purchase without a bill</option>
+            </select></label>
+          </div>
+          <div className="form-row">
+            <label>Quantity<input type="number" min="1" step="1" value={stockQuantity} onChange={(event) => setStockQuantity(event.target.value)} required /></label>
+            <label>Unit cost (₹)<input type="number" min="0" step="0.01" value={stockCost} onChange={(event) => setStockCost(event.target.value)} required /></label>
+            <label>Dated<input type="date" value={stockOccurredOn} onChange={(event) => setStockOccurredOn(event.target.value)} disabled={stockMovementType === "PURCHASE"} /></label>
+          </div>
+          <p className={stockMovementType === "PURCHASE" ? "muted" : "posting-note"}>
+            {stockMovementType === "PURCHASE"
+              ? "This posts nothing to the accounts: a purchase is posted by its bill, so posting here would count the same stock twice."
+              : <>This will post <strong>{stockPostingWords(stockMovementType)}</strong>{stockQuantity !== "" && stockCost !== "" ? <> — {money(Math.round(Number(stockQuantity) * Number(stockCost) * 100))}</> : null}, dated {stockOccurredOn}.</>}
+          </p>
+          <button className="primary" disabled={busy}>Add stock</button>
+        </form>
+        {lastStockPosting !== null && <p className={lastStockPosting.journalEntryId === undefined ? "muted" : "posted-note"}>
+          {lastStockPosting.journalEntryId === undefined
+            ? `${lastStockPosting.quantityDelta} added to stock. Nothing posted to the accounts.`
+            : `${lastStockPosting.quantityDelta} added to stock and posted: ${money(lastStockPosting.quantityDelta * lastStockPosting.unitCostPaise)}.`}
+        </p>}
+        {stockBalances.length > 0 && <table><thead><tr><th>Item</th><th>Quantity</th><th>Value</th></tr></thead><tbody>{stockBalances.map((row) => <tr key={row.itemId}><td>{row.itemName}</td><td>{row.quantity} {row.unit}</td><td>{money(row.valuePaise)}</td></tr>)}</tbody></table>}
+      </section>
+      {/* R4c: the tie-out this slice exists for, plus the backfill for stock entered earlier. */}
+      <section className="card">
+        <p className="eyebrow">Inventory &amp; the ledger</p><h3>Does the stock agree with the accounts?</h3>
+        <table className="tieout">
+          <tbody>
+            <tr><td>Inventory, as the accounts have it</td><td>{money(inventoryLedgerPaise)}</td></tr>
+            <tr><td>Stock the app says you hold</td><td>{money(stockValuationPaise)}</td></tr>
+            <tr className={inventoryLedgerPaise === stockValuationPaise ? "agrees" : "differs"}>
+              <td><strong>Difference</strong></td><td><strong>{money(inventoryLedgerPaise - stockValuationPaise)}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+        <p className="muted">
+          {inventoryLedgerPaise === stockValuationPaise
+            ? "They agree to the paise."
+            : "They do not agree. Opening stock or adjustments entered before this was built posted nothing to the accounts; check below."}
+        </p>
+        <h3 className="subheading">Stock entered without an accounting entry</h3>
+        <div className="form-row">
+          <button type="button" className="primary" disabled={busy} onClick={() => void runBackfill(false)}>Check only (writes nothing)</button>
+          <button type="button" disabled={busy || backfill === null || backfill.toPost.length === 0} onClick={() => void runBackfill(true)}>
+            {backfill === null || backfill.toPost.length === 0 ? "Post these entries" : `Post these ${backfill.toPost.length} entries (${money(backfill.totalPaise)})`}
+          </button>
+        </div>
+        {postedSummary !== null && <p className="posted-note">
+          Posted {postedSummary.count} entr{postedSummary.count === 1 ? "y" : "ies"}, {money(postedSummary.paise)} in total. Nothing else is waiting.
+        </p>}
+        {backfill !== null && <>
+          <p className="muted">{backfill.toPost.length === 0 ? "Every opening and adjustment movement is in the accounts." : "Checked only — nothing has been written."}</p>
+          {backfill.toPost.length > 0 && <table><thead><tr><th>Item</th><th>Why</th><th>Dated</th><th>Quantity</th><th>Value</th><th>Would credit</th></tr></thead><tbody>
+            {backfill.toPost.map((row) => <tr key={row.movementId}><td>{row.itemName}</td><td>{row.movementType === "OPENING" ? "Opening stock" : "Adjustment"}</td><td>{row.entryDate}</td><td>{row.quantity}</td><td>{money(row.valuePaise)}</td><td>{row.offsetAccount === "OPENING_BALANCE_EQUITY" ? "Opening Balance Equity" : "Stock Adjustment"}</td></tr>)}
+          </tbody></table>}
+          {backfill.refused.length > 0 && <>
+            <h3 className="subheading">Refused, and why</h3>
+            <table><thead><tr><th>Item</th><th>Dated</th><th>Value</th><th>Reason</th></tr></thead><tbody>
+              {backfill.refused.map((row) => <tr key={row.movementId}><td>{row.itemName}</td><td>{row.entryDate}</td><td>{money(row.valuePaise)}</td><td>{row.reason}</td></tr>)}
+            </tbody></table>
+          </>}
+          {backfill.uncoveredPurchaseMovements > 0 && <p className="muted">
+            {backfill.uncoveredPurchaseMovements} purchase movement{backfill.uncoveredPurchaseMovements === 1 ? "" : "s"} {backfill.uncoveredPurchaseMovements === 1 ? "has" : "have"} no bill behind {backfill.uncoveredPurchaseMovements === 1 ? "it" : "them"}, so {backfill.uncoveredPurchaseMovements === 1 ? "it" : "they"} cannot be posted here. Enter a purchase bill for {backfill.uncoveredPurchaseMovements === 1 ? "it" : "them"} instead.
+          </p>}
+        </>}
+      </section>
       {invoice?.status === "FINALIZED" && invoice.paymentAccount === "RECEIVABLES" && <section className="card payment-card"><p className="eyebrow">Receivables</p><h3>Record customer payment</h3><form onSubmit={submitPayment} className="form"><label>Amount (₹)<input type="number" min="0.01" step="0.01" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} required /></label><button className="primary" disabled={busy}>Record payment</button></form>{payments.length > 0 && <p className="muted">{payments.length} payment{payments.length === 1 ? "" : "s"} recorded · {money(payments.reduce((total, payment) => total + payment.amountPaise, 0))}</p>}</section>}
       <section className="grid">
         <article className="card"><p className="eyebrow">Setup</p><h3>Create new records</h3><form onSubmit={submitSetup} className="form">
