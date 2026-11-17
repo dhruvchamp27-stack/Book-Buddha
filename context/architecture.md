@@ -69,6 +69,30 @@ README/REQUIREMENTS/SETUP/CLAUDE_FINISHING_PLAN/IMPLEMENTATION_PROGRESS.
   backup/restore, attachments, auth/roles/sessions/lockout, FY locking, hash-chain
   audit, versioned migrations, automated backups, desktop packaging.
 
+### Auth layer — VERIFIED as built, session 6 (not self-reported)
+The target's "API / auth" layer now exists in the prototype and is gated. Wiring:
+- **`src/api/server.ts`** — ONE `onRequest` hook inside `buildApi` is the single
+  enforcement point for all 101 routes. It **fails closed**: a route is reachable
+  without a session only when registered with `config: { public: true }`, read from
+  the matched route's own config, never from the URL string. An unmatched path has no
+  config, so it is denied rather than answering 404. Public surface is exactly
+  `GET /health`, `GET /auth/status`, `POST /auth/setup`, `POST /auth/login`,
+  `POST /auth/recover` (7 table entries — Fastify mirrors HEAD onto every GET).
+  Unconfigured DB → 409; bad/expired/revoked token → 401. `app.authRoutes` (built by
+  an `onRoute` hook) exposes the route table so the test sweep is DERIVED, not listed.
+- **`buildApi(repo, { __unsafeDisableAuthForTests })`** — opt-in, default off, and
+  deliberately unreachable from `createApi`, `main.ts`, env vars and config files.
+  Used at 28 test call sites. **Never add a way to set it from outside code.**
+- **`src/auth/recovery-code.ts` + `src/database/recovery-code-schema.ts` (migration
+  v16)** — `auth_users.recovery_code_hash`. Recovery is by 150-bit code only; the old
+  `email`/`googleSub` identity match is GONE. Using a code burns it and reissues.
+  `POST /auth/recovery-code` (authenticated, needs the current password) mints one.
+- **`web/src/AuthGate.tsx` + `web/src/session.ts`** — the UI gate. The token lives in
+  module scope in `session.ts`; `api()` in `App.tsx` reads it via `authHeaders()`.
+  Not persisted, so a refresh signs out. Designed to be deleted whole when the real
+  UI lands. **`web/` is type-checked by NOTHING** (`tsconfig` is `include: ["src"]`,
+  vite is transpile-only) — see decisions S6-4.
+
 ## Prototype vs spec — known divergences (ARCH §6)
 - One `invoices` table for drafts/quotes/finalised/cancelled (ARCH §6 wants a
   deliberate choice; target uses a common `documents` header).
