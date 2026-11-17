@@ -568,24 +568,71 @@ describe("cash view: credit notes re-base the remainder (S2-2; figures unconfirm
    * makes. The cost is that a genuine return-after-payment has to wait for the refund path,
    * which is deferred - and that gap is the owner's to close, so it is named in the message.
    */
-  it("refuses a note that exceeds what is unpaid, so no closed month can be rewritten", () => {
+  /**
+   * S4-6, the owner's acceptance figures for the refund path (2026-11-17). This test USED to
+   * assert that the note was refused outright: under S3-3 a return after full payment had
+   * nowhere to go, because crediting drove RECEIVABLES negative and no refund path existed.
+   * The owner ruled the path should be built, so the note is now allowed and the money owed back
+   * is a liability.
+   *
+   * Invoice Rs 11,800 paid in full on 20 Jan. Two of ten units come back on 10 Feb (Rs 2,360,
+   * cost Rs 1,200). Refunded in cash on 5 Mar. The owner chose the refund month over the month
+   * the goods returned, which is S1-6: cash reports follow the money.
+   */
+  it("ACCEPTANCE refund: a return after full payment reduces the month the money went BACK (S4-6)", () => {
     vi.useFakeTimers();
     at("2026-01-10T06:00:00.000Z");
     const w = world();
     try {
+      const ledger = (account: string): number => {
+        const row = w.repository.getTrialBalance().find((r) => r.account === account);
+        return (row?.debitPaise ?? 0) - (row?.creditPaise ?? 0);
+      };
+      const period = (fromDate: string, toDate: string) => w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate });
+
       ownerInvoice(w, "INV-1", "2026-01-10");
       at("2026-01-20T06:00:00.000Z");
       w.repository.recordPayment("INV-1", 1180000);
-      const january = w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
-      expect(january.totalIncomePaise).toBe(1000000);
+      // January: the whole invoice, because the whole invoice was collected.
+      expect(period("2026-01-01", "2026-01-31")).toMatchObject({
+        totalIncomePaise: 1000000, gstOnSalesPaise: 180000, totalExpensesPaise: 600000,
+      });
 
       at("2026-02-10T06:00:00.000Z");
-      expect(() => creditNote(w, "CN-1")).toThrow(/only 0 paise of the invoice is still unpaid/);
+      creditNote(w, "CN-1"); // 2 units back: 236,000 inclusive, COGS 120,000
+      // The money owed back is a LIABILITY. Receivables stop at zero rather than going negative
+      // and hiding behind getReceivables' "outstanding > 0" filter, which is what S3-3 feared.
+      expect(ledger("RECEIVABLES")).toBe(0);
+      expect(-ledger("CUSTOMER_CREDITS")).toBe(236000);
+      expect(w.repository.getCreditNoteBalance("CN-1")).toMatchObject({ refundablePaise: 236000, dischargedPaise: 0, outstandingPaise: 236000 });
+      // February recognises NOTHING: the goods are back but no money has moved.
+      expect(period("2026-02-01", "2026-02-28")).toMatchObject({ totalIncomePaise: 0, totalExpensesPaise: 0 });
+      // And January is untouched, which was the whole point of the old test and still is.
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(1000000);
 
-      // January is untouched, which is the whole point.
-      expect(w.repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" }).totalIncomePaise).toBe(1000000);
-      expect(w.repository.getProfitAndLoss({ basis: "CASH" }).totalIncomePaise).toBe(1000000);
-      expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(1000000);
+      at("2026-03-05T06:00:00.000Z");
+      w.repository.recordCreditNoteRefund({ id: "RF-1", creditNoteId: "CN-1", amountPaise: 236000, refundedOn: "2026-03-05", paymentAccount: "CASH" });
+
+      // MARCH carries the reduction - the owner's figures.
+      const march = period("2026-03-01", "2026-03-31");
+      expect(march.totalIncomePaise).toBe(-200000);
+      expect(march.gstOnSalesPaise).toBe(-36000);
+      expect(march.totalExpensesPaise).toBe(-120000);
+      // January still untouched after the refund: S1-6 holds end to end.
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(1000000);
+
+      // Year to date now equals accrual: 8,000 income, 1,440 GST, 4,800 cost.
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(accrual).toMatchObject({ totalIncomePaise: 800000, gstOnSalesPaise: 144000, totalExpensesPaise: 480000 });
+      expect(cash.totalIncomePaise).toBe(800000);
+      expect(cash.gstOnSalesPaise).toBe(144000);
+      expect(cash.totalExpensesPaise).toBe(480000);
+      // The liability is discharged, and the cash actually went out.
+      expect(ledger("CUSTOMER_CREDITS")).toBe(0);
+      expect(w.repository.getCreditNoteBalance("CN-1").outstandingPaise).toBe(0);
+      expect(() => w.repository.recordCreditNoteRefund({ id: "RF-2", creditNoteId: "CN-1", amountPaise: 1, refundedOn: "2026-03-06", paymentAccount: "CASH" }))
+        .toThrow(/0 paise left to give back/);
     } finally {
       w.repository.close();
     }

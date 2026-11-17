@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import { ACCOUNT_ROLES, SETTLEMENT_ROLES } from "./chart-accounts-schema.js";
 import { runMigrations } from "./migrations.js";
@@ -125,6 +125,187 @@ describe("v12: the credit-discharge tables", () => {
       ).toThrow();
     } finally {
       repository.close();
+    }
+  });
+});
+
+/**
+ * S4-1 / S4-6: refunding a credit note. The invariant asserted throughout is the one that makes
+ * the two sides agree - the CUSTOMER_CREDITS ledger balance must always equal the sum of every
+ * note's (refundable - discharged). If posting and the sub-ledger ever drift apart, this fails.
+ */
+describe("refunding a credit note", () => {
+  // A credit note is dated by its created_at, so the clock has to be pinned or every refund
+  // date in these tests would predate the note.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  interface World {
+    repository: AccountingRepository;
+    businessId: string;
+    customerId: string;
+    itemId: string;
+  }
+
+  function world(): World {
+    const repository = new AccountingRepository();
+    const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+    const businessId = repository.createBusiness({ companyId, name: "Business" });
+    const customerId = repository.createCustomer({ companyId, name: "Customer" });
+    const itemId = repository.createItem({ companyId, name: "Item", unit: "each", trackStock: false });
+    return { repository, businessId, customerId, itemId };
+  }
+
+  function invoice(w: World, id: string, totalPaise: number, paymentAccount: "RECEIVABLES" | "CASH" = "RECEIVABLES"): void {
+    w.repository.saveDraft({
+      id,
+      number: `INV-${id}`,
+      businessId: w.businessId,
+      customerId: w.customerId,
+      invoiceDate: "2026-01-01",
+      status: "DRAFT",
+      paymentAccount,
+      taxType: "NONE",
+      taxRateBasisPoints: 0,
+      lines: [{ itemId: w.itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
+    });
+    w.repository.finalizeInvoice(id);
+  }
+
+  function note(w: World, id: string, invoiceId: string, taxablePaise: number): void {
+    w.repository.saveCreditNote({
+      id,
+      invoiceId,
+      number: `CN-${id}`,
+      reason: "Return",
+      status: "DRAFT",
+      lines: [{ itemId: w.itemId, description: "Returned", quantity: 1, unitPricePaise: taxablePaise }],
+    });
+    w.repository.finalizeCreditNote(id);
+  }
+
+  /** THE INVARIANT: ledger CUSTOMER_CREDITS == sum over notes of (refundable - discharged). */
+  function assertCreditsAgree(w: World): void {
+    const ledger = w.repository.db
+      .prepare(
+        "SELECT COALESCE(SUM(credit_paise), 0) - COALESCE(SUM(debit_paise), 0) AS balance FROM journal_lines WHERE account = 'CUSTOMER_CREDITS'",
+      )
+      .get() as { balance: number };
+    const noteIds = (
+      w.repository.db.prepare("SELECT id FROM credit_notes WHERE status = 'FINALIZED'").all() as Array<{ id: string }>
+    ).map((r) => r.id);
+    const subLedger = noteIds.reduce((total, id) => total + w.repository.getCreditNoteBalance(id).outstandingPaise, 0);
+    expect(ledger.balance).toBe(subLedger);
+  }
+
+  it("telescopes partial refunds and lands exactly, never a paisa adrift", () => {
+    const w = world();
+    try {
+      invoice(w, "inv1", 100000);
+      w.repository.recordPayment("inv1", 100000, "2026-01-05");
+      note(w, "cn1", "inv1", 99999); // odd value, fully refundable
+      assertCreditsAgree(w);
+
+      // Odd-sized refunds against an odd balance: the cumulative allocator must telescope.
+      for (const [index, amount] of [1, 7, 33333, 66658].entries()) {
+        w.repository.recordCreditNoteRefund({
+          id: `rf${index}`,
+          creditNoteId: "cn1",
+          amountPaise: amount,
+          refundedOn: "2026-02-01",
+          paymentAccount: "CASH",
+        });
+        assertCreditsAgree(w);
+      }
+      expect(w.repository.getCreditNoteBalance("cn1")).toMatchObject({ refundablePaise: 99999, dischargedPaise: 99999, outstandingPaise: 0 });
+
+      // Fully discharged, so the cash view has now seen the whole note: it equals accrual.
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(cash.totalIncomePaise).toBe(accrual.totalIncomePaise);
+      expect(cash.totalIncomePaise).toBe(1);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refunds out of the BANK, which payments still cannot do", () => {
+    const w = world();
+    try {
+      invoice(w, "inv1", 50000);
+      w.repository.recordPayment("inv1", 50000, "2026-01-05");
+      note(w, "cn1", "inv1", 50000);
+      // payments.payment_account is still CHECK IN ('CASH'), so this is the first money-out path
+      // in the app that can use the bank at all. Its own table is why.
+      w.repository.recordCreditNoteRefund({ id: "rf1", creditNoteId: "cn1", amountPaise: 50000, refundedOn: "2026-02-01", paymentAccount: "BANK" });
+      const bank = w.repository.getTrialBalance().find((r) => r.account === "BANK");
+      expect((bank?.creditPaise ?? 0) - (bank?.debitPaise ?? 0)).toBe(50000);
+      assertCreditsAgree(w);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses a refund that predates its note, exceeds the balance, or is not a whole positive amount", () => {
+    const w = world();
+    try {
+      invoice(w, "inv1", 50000);
+      w.repository.recordPayment("inv1", 50000, "2026-01-05");
+      note(w, "cn1", "inv1", 50000);
+      const refund = (amountPaise: number, refundedOn: string) =>
+        w.repository.recordCreditNoteRefund({ id: `rf-${amountPaise}-${refundedOn}`, creditNoteId: "cn1", amountPaise, refundedOn, paymentAccount: "CASH" });
+      expect(() => refund(10000, "2020-01-01")).toThrow(/cannot predate its credit note/);
+      expect(() => refund(50001, "2026-02-01")).toThrow(/50000 paise left to give back/);
+      expect(() => refund(0, "2026-02-01")).toThrow(/whole number of paise above zero/);
+      expect(() => refund(-5, "2026-02-01")).toThrow(/whole number of paise above zero/);
+      assertCreditsAgree(w);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("does not split a CASH invoice's note: there the note IS the refund", () => {
+    const w = world();
+    try {
+      invoice(w, "inv1", 50000, "CASH");
+      note(w, "cn1", "inv1", 50000);
+      // Nothing is owed back as a liability, because the money already went back across the
+      // counter. The cash view recognises a paid-at-once document on its entries' own dates.
+      expect(w.repository.getCreditNoteBalance("cn1")).toMatchObject({ refundablePaise: 0, outstandingPaise: 0 });
+      const credits = w.repository.getTrialBalance().find((r) => r.account === "CUSTOMER_CREDITS");
+      expect((credits?.creditPaise ?? 0) - (credits?.debitPaise ?? 0)).toBe(0);
+      assertCreditsAgree(w);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("keeps receivables at zero rather than negative, however the note is split", () => {
+    const w = world();
+    try {
+      for (const [index, paid] of [100000, 70000, 0].entries()) {
+        const id = `inv${index}`;
+        invoice(w, id, 100000);
+        if (paid > 0) w.repository.recordPayment(id, paid, "2026-01-05");
+        note(w, `cn${index}`, id, 100000);
+        const row = w.repository.db
+          .prepare(
+            `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS balance
+               FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+              WHERE je.source_id = ? AND jl.account = 'RECEIVABLES'`,
+          )
+          .get(id) as { balance: number };
+        expect(row.balance).toBe(0);
+        expect(w.repository.getCreditNoteBalance(`cn${index}`).refundablePaise).toBe(paid);
+      }
+      assertCreditsAgree(w);
+    } finally {
+      w.repository.close();
     }
   });
 });

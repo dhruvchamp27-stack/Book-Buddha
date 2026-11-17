@@ -1352,6 +1352,24 @@ export class AccountingRepository {
       // The settlement credit follows the tax ACTUALLY posted, or the caps would unbalance the
       // entry and the door would reject it.
       const postedTaxPaise = taxLines.reduce((sum, line) => sum + line.debitPaise, 0);
+      const noteInclusivePaise = taxablePaise + postedTaxPaise;
+      // S4-1: the settlement credit SPLITS. Up to what the invoice still owes, the note reduces
+      // the customer's bill. Anything beyond that is money owed BACK to them, which is a
+      // LIABILITY, not a negative asset - so receivables land on zero instead of going negative
+      // and hiding behind getReceivables' "outstanding > 0" filter.
+      //
+      // A CASH invoice is never split. There is no open balance to offset and the money goes
+      // back across the counter at once, so the note IS the refund; the walk already recognises
+      // a paid-at-once document's entries on their own dates, which is what S1-6 asks for.
+      const outstandingPaise =
+        invoice.paymentAccount === "CASH"
+          ? noteInclusivePaise
+          : Math.max(0, this.invoiceTotal(invoice) - this.invoiceCreditedPaise(invoice) - this.getPaidAmount(invoice.id));
+      const offsetPaise = Math.min(noteInclusivePaise, outstandingPaise);
+      const refundablePaise = noteInclusivePaise - offsetPaise;
+      const settlementLines: Array<JournalEntry["lines"][number]> = [];
+      if (offsetPaise > 0) settlementLines.push({ account: invoice.paymentAccount, debitPaise: 0, creditPaise: offsetPaise });
+      if (refundablePaise > 0) settlementLines.push({ account: "CUSTOMER_CREDITS", debitPaise: 0, creditPaise: refundablePaise });
       const entry: JournalEntry = {
         id: `je-credit-note-${note.id}`,
         sourceId: invoice.id,
@@ -1360,7 +1378,7 @@ export class AccountingRepository {
         lines: [
           { account: "SALES", debitPaise: taxablePaise, creditPaise: 0 },
           ...taxLines,
-          { account: invoice.paymentAccount, debitPaise: 0, creditPaise: taxablePaise + postedTaxPaise },
+          ...settlementLines,
         ],
       };
       const inventoryCost = this.restoreCreditNoteStock(note, invoice.fairId);
@@ -1376,8 +1394,106 @@ export class AccountingRepository {
           isReversal: false,
         }, dims);
       }
-      this.db.prepare("UPDATE credit_notes SET status = 'FINALIZED' WHERE id = ?").run(note.id);
+      // Persisted, never recomputed later: the walk sorts notes BEFORE payments on the same day,
+      // so a walk that re-derived the split would disagree with the ledger whenever a payment and
+      // a note share a date (pay 14,000 in the morning, credit 5,000 that afternoon - the books
+      // say 1,000 offset, a recomputing walk would say 5,000).
+      this.db.prepare("UPDATE credit_notes SET status = 'FINALIZED', refundable_paise = ? WHERE id = ?").run(refundablePaise, note.id);
       this.insertAuditEvent({ action: "credit_note.finalized", entityId: note.id, occurredAt: new Date().toISOString() });
+      return entry;
+    })();
+  }
+
+  /**
+   * How much of a credit note has already been discharged - refunded in cash, or set against a
+   * later invoice (S4-5). One figure for both routes, because they draw on the same pot.
+   */
+  private creditNoteDischargedPaise(creditNoteId: string): number {
+    const refunded = this.db
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM credit_note_refunds WHERE credit_note_id = ?")
+      .get(creditNoteId) as { total: number };
+    const applied = this.db
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM credit_note_applications WHERE credit_note_id = ?")
+      .get(creditNoteId) as { total: number };
+    return refunded.total + applied.total;
+  }
+
+  /** What a credit note is worth back to the customer, and how much of it is still undischarged. */
+  public getCreditNoteBalance(creditNoteId: string): {
+    refundablePaise: number;
+    dischargedPaise: number;
+    outstandingPaise: number;
+  } {
+    const row = this.db.prepare("SELECT refundable_paise FROM credit_notes WHERE id = ?").get(creditNoteId) as
+      | { refundable_paise: number }
+      | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`No credit note ${creditNoteId}.`);
+    const dischargedPaise = this.creditNoteDischargedPaise(creditNoteId);
+    return {
+      refundablePaise: row.refundable_paise,
+      dischargedPaise,
+      outstandingPaise: row.refundable_paise - dischargedPaise,
+    };
+  }
+
+  /**
+   * Pay a credit note back to the customer in cash or from the bank (S4-1).
+   *
+   * Dr CUSTOMER_CREDITS / Cr CASH|BANK on the refund's OWN date, which is what makes S1-6 work:
+   * the cash P&L falls in the month the money actually left, never in the month the goods came
+   * back. Its own table, so the `CHECK IN ('CASH')` still on payments.payment_account - which
+   * would otherwise make BANK unusable - is not in the way.
+   */
+  public recordCreditNoteRefund(input: {
+    id: string;
+    creditNoteId: string;
+    amountPaise: number;
+    refundedOn: string;
+    paymentAccount: "CASH" | "BANK";
+  }): JournalEntry {
+    return this.db.transaction(() => {
+      const note = this.getCreditNote(input.creditNoteId);
+      if (note.status !== "FINALIZED") {
+        throw new RepositoryValidationError("Only a finalized credit note can be refunded.");
+      }
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("A refund must be a whole number of paise above zero.");
+      }
+      const invoice = this.getInvoice(note.invoiceId);
+      const row = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
+      const noteDate = istDateOf(row.created_at);
+      if (input.refundedOn < noteDate) {
+        throw new RepositoryValidationError(`A refund cannot predate its credit note (${noteDate}).`);
+      }
+      const balance = this.getCreditNoteBalance(note.id);
+      if (input.amountPaise > balance.outstandingPaise) {
+        throw new RepositoryValidationError(
+          `Credit note ${note.number} has ${balance.outstandingPaise} paise left to give back; a refund of ${input.amountPaise} paise exceeds it.`,
+        );
+      }
+      const entry: JournalEntry = {
+        // Deliberately NOT a `je-credit-note-` id: that prefix belongs to the note's own two
+        // entries, which the cash-view walk matches by exact id.
+        id: `je-refund-${input.id}`,
+        sourceId: invoice.id,
+        description: `Refund of credit note ${note.number}`,
+        isReversal: false,
+        lines: [
+          { account: "CUSTOMER_CREDITS", debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: input.paymentAccount, debitPaise: 0, creditPaise: input.amountPaise },
+        ],
+      };
+      this.insertJournalEntry(entry, {
+        businessId: invoice.businessId,
+        entryDate: input.refundedOn,
+        ...fairDim(invoice.fairId),
+      });
+      this.db
+        .prepare(
+          "INSERT INTO credit_note_refunds (id, credit_note_id, amount_paise, refunded_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(input.id, note.id, input.amountPaise, input.refundedOn, input.paymentAccount, new Date().toISOString());
+      this.insertAuditEvent({ action: "credit_note.refunded", entityId: input.id, occurredAt: new Date().toISOString() });
       return entry;
     })();
   }
@@ -1924,12 +2040,25 @@ export class AccountingRepository {
     // `je-credit-note-inventory-<id>` (the stock going back) - and they have to be ONE event. As
     // two, anything that acts on a note (the settlement true-up, a refund split) can catch one
     // entry and not the other, stranding COGS on a different date from the sales it belongs to.
-    const notesOf = new Map<string, string[]>();
+    const notesOf = new Map<string, Array<{ id: string; refundablePaise: number }>>();
     for (const n of this.db.prepare(
-      "SELECT id, invoice_id FROM credit_notes WHERE status = 'FINALIZED' ORDER BY created_at, rowid",
-    ).all() as Array<{ id: string; invoice_id: string }>) {
+      "SELECT id, invoice_id, refundable_paise FROM credit_notes WHERE status = 'FINALIZED' ORDER BY created_at, rowid",
+    ).all() as Array<{ id: string; invoice_id: string; refundable_paise: number }>) {
+      const entry = { id: n.id, refundablePaise: n.refundable_paise };
       const list = notesOf.get(n.invoice_id);
-      if (list === undefined) notesOf.set(n.invoice_id, [n.id]); else list.push(n.id);
+      if (list === undefined) notesOf.set(n.invoice_id, [entry]); else list.push(entry);
+    }
+
+    // Refunds, by the note they discharge (S4-1). A refund is the CASH event for the part of a
+    // note that was never set against an open balance: S1-6 puts the reduction in the month the
+    // money left, not the month the goods came back.
+    const refundsOf = new Map<string, Array<{ amountPaise: number; date: string }>>();
+    for (const r of this.db.prepare(
+      "SELECT credit_note_id, amount_paise, refunded_on FROM credit_note_refunds ORDER BY refunded_on, rowid",
+    ).all() as Array<{ credit_note_id: string; amount_paise: number; refunded_on: string }>) {
+      const entry = { amountPaise: r.amount_paise, date: r.refunded_on };
+      const list = refundsOf.get(r.credit_note_id);
+      if (list === undefined) refundsOf.set(r.credit_note_id, [entry]); else list.push(entry);
     }
 
     // The document's own business and fair (documents carry fair_id, as the entries do).
@@ -1998,8 +2127,9 @@ export class AccountingRepository {
       if (totalPaise <= 0) continue;
 
       type Event =
-        | { kind: "NOTE"; date: string; lines: readonly Natural[]; inclusivePaise: number }
-        | { kind: "PAYMENT"; date: string; amountPaise: number };
+        | { kind: "NOTE"; date: string; noteId: string; lines: readonly Natural[]; inclusivePaise: number; offsetPaise: number }
+        | { kind: "PAYMENT"; date: string; amountPaise: number }
+        | { kind: "REFUND"; date: string; noteId: string; amountPaise: number };
 
       // Partition the document's lines by EXACT entry id against the notes the table reports,
       // never by an id prefix: a prefix test silently swallows any future entry that happens to
@@ -2007,9 +2137,9 @@ export class AccountingRepository {
       // from day one and re-measure months already reported (the S3-5 defect).
       const notes = doc.type === "INVOICE" ? notesOf.get(doc.id) ?? [] : [];
       const noteOfEntry = new Map<string, string>();
-      for (const noteId of notes) {
-        noteOfEntry.set(`je-credit-note-${noteId}`, noteId);
-        noteOfEntry.set(`je-credit-note-inventory-${noteId}`, noteId);
+      for (const note of notes) {
+        noteOfEntry.set(`je-credit-note-${note.id}`, note.id);
+        noteOfEntry.set(`je-credit-note-inventory-${note.id}`, note.id);
       }
       const valueRowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
       const stockRowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
@@ -2022,28 +2152,38 @@ export class AccountingRepository {
         if (list === undefined) target.set(noteId, [row]); else list.push(row);
       }
       const events: Event[] = [];
-      for (const noteId of notes) {
-        const valueRows = valueRowsOf.get(noteId) ?? [];
-        const stockRows = stockRowsOf.get(noteId) ?? [];
+      for (const note of notes) {
+        const valueRows = valueRowsOf.get(note.id) ?? [];
+        const stockRows = stockRowsOf.get(note.id) ?? [];
         if (valueRows.length === 0 && stockRows.length === 0) continue;
         const dateRow = (valueRows[0] ?? stockRows[0]) as (typeof lineRows)[number];
+        // The note's tax-inclusive value: the negated sum of its SALES and GST lines. The stock
+        // entry moves cost between accounts and takes nothing off the bill, so it is excluded
+        // here but included in the lines. CUSTOMER_CREDITS is a settlement role and so never
+        // reaches these rows at all - which is why it had to be one.
+        const inclusivePaise = -sumByAccount(valueRows).reduce((total, line) => total + line.amountPaise, 0);
         events.push({
           kind: "NOTE",
           date: dateRow.entry_date,
+          noteId: note.id,
           lines: sumByAccount([...valueRows, ...stockRows]),
-          // The note's tax-inclusive value is what it took off the bill: the negated sum of its
-          // SALES and GST lines. The stock entry moves cost between accounts and takes nothing
-          // off the bill, so it is excluded from this sum but included in the lines above.
-          inclusivePaise: -sumByAccount(valueRows).reduce((total, line) => total + line.amountPaise, 0),
+          inclusivePaise,
+          // Only the part set against an OPEN BALANCE takes anything off the bill. The rest is
+          // money owed back, and nothing is recognised for it until it is actually discharged.
+          offsetPaise: Math.max(0, inclusivePaise - note.refundablePaise),
         });
+        for (const refund of refundsOf.get(note.id) ?? []) {
+          events.push({ kind: "REFUND", date: refund.date, noteId: note.id, amountPaise: refund.amountPaise });
+        }
       }
       for (const payment of paymentsOf.get(key) ?? []) {
         events.push({ kind: "PAYMENT", date: istDateOf(payment.paidAt), amountPaise: payment.amountPaise });
       }
-      // Notes before payments on the same day: the note reduces the bill, then cash is applied to
-      // whatever is left of it. Documented because the two orders give different figures.
-      events.sort((a, b) =>
-        a.date < b.date ? -1 : a.date > b.date ? 1 : a.kind === b.kind ? 0 : a.kind === "NOTE" ? -1 : 1);
+      // Notes before payments before refunds on the same day: the note reduces the bill, cash is
+      // applied to whatever is left of it, and only then can anything be given back. Documented
+      // because the orders give different figures.
+      const rank = (event: Event): number => (event.kind === "NOTE" ? 0 : event.kind === "PAYMENT" ? 1 : 2);
+      events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : rank(a) - rank(b)));
 
       const current = new Map<string, number>();
       for (const line of sumByAccount(baseRows)) current.set(line.account, line.amountPaise);
@@ -2071,10 +2211,63 @@ export class AccountingRepository {
         segmentPaid = 0;
       };
 
+      // Each note runs ONE cumulative allocator over its own tax-inclusive value. The offset
+      // share is consumed first, then every discharge in turn, so the shares telescope exactly as
+      // a document's payments do: once a note is fully discharged it has recognised precisely its
+      // own lines, however many odd-sized refunds came first.
+      const noteLedger = new Map<string, { lines: readonly Natural[]; inclusivePaise: number; dischargedPaise: number }>();
+      const dischargeShares = (noteId: string, amountPaise: number): Array<{ account: string; amountPaise: number }> => {
+        const state = noteLedger.get(noteId);
+        if (state === undefined || state.inclusivePaise <= 0 || amountPaise <= 0) return [];
+        const before = state.dischargedPaise;
+        const after = Math.min(before + amountPaise, state.inclusivePaise);
+        if (after <= before) return [];
+        const shares = allocateProportionally({
+          lineAmountsPaise: state.lines.map((line) => line.amountPaise),
+          totalPaise: state.inclusivePaise,
+          paidBeforePaise: before,
+          paidAfterPaise: after,
+        });
+        state.dischargedPaise = after;
+        return state.lines
+          .map((line, index) => ({ account: line.account, amountPaise: shares[index] as number }))
+          .filter((line) => line.amountPaise !== 0);
+      };
+
       for (const event of events) {
+        if (event.kind === "REFUND") {
+          // Money leaving against this invoice. The note's held lines are recognised NOW, in the
+          // refund's own month - the owner's S4-6 figures. current and recognised move together,
+          // so the running segment is untouched and must NOT be reopened: resetting it here would
+          // restart the cumulative allocator mid-segment and silently change the shares of every
+          // later payment.
+          for (const line of dischargeShares(event.noteId, event.amountPaise)) {
+            current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
+            recognised.set(line.account, (recognised.get(line.account) ?? 0) + line.amountPaise);
+            if (inPeriod(event.date)) {
+              recognitions.push({ date: event.date, account: line.account, amountPaise: line.amountPaise, documentType: doc.type, documentId: doc.id });
+            }
+          }
+          // Gross collections fall by what went back out, or gross would stop equalling
+          // income + GST once the invoice had converged.
+          if (doc.type === "INVOICE" && inPeriod(event.date)) {
+            invoiceCollections.push({ date: event.date, amountPaise: -event.amountPaise });
+          }
+          continue;
+        }
         if (event.kind === "NOTE") {
-          for (const line of event.lines) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
-          balancePaise -= event.inclusivePaise;
+          noteLedger.set(event.noteId, { lines: event.lines, inclusivePaise: event.inclusivePaise, dischargedPaise: 0 });
+          // Only the OFFSET share folds into the document now. A note worth more than the invoice
+          // still owes has the remainder held back entirely until it is refunded or applied: S1-6
+          // puts that reduction in the month it actually happens.
+          if (event.inclusivePaise <= 0) {
+            for (const line of event.lines) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
+          } else {
+            for (const line of dischargeShares(event.noteId, event.offsetPaise)) {
+              current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
+            }
+          }
+          balancePaise -= event.offsetPaise;
           // S4-3 (owner, 2026-11-17; AMENDS S2-2): a note that CLEARS what is owed is itself a
           // settlement event. S2-2 still governs the note's own lines - the returned goods never
           // hit the cash P&L on the note date - but once nothing is owed, the lines the customer
@@ -2365,22 +2558,14 @@ export class AccountingRepository {
         `Credit notes cannot exceed what the invoice charged before tax (${taxableBase} paise); this note would take the total credited to ${creditTotal + alreadyCredited.total} paise.`,
       );
     }
-    // SECOND CAP, tax-inclusive, against what is still OWED rather than the whole bill. Without
-    // it, crediting an invoice the customer has already paid drove RECEIVABLES negative with no
-    // error - money the books said we owed back, with no refund path to pay it. Refusing is the
-    // same choice cancelInvoice already makes ("an invoice with recorded payments cannot be
-    // cancelled"), and it keeps the books right until the refund path (deferred) exists.
-    const paidPaise = this.getPaidAmount(invoice.id);
-    const creditedPaise = this.invoiceCreditedPaise(invoice);
-    const thisNotePaise = creditTotal + this.creditNoteTaxPaise(invoice, creditTotal);
-    const roomPaise = this.invoiceTotal(invoice) - creditedPaise - paidPaise;
-    if (thisNotePaise > roomPaise) {
-      throw new RepositoryValidationError(
-        paidPaise > 0
-          ? `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is still unpaid. Crediting more than is owed would leave the books showing money due back to the customer, and there is no refund path yet to pay it.`
-          : `This credit note is worth ${thisNotePaise} paise but only ${roomPaise} paise of the invoice is left to credit.`,
-      );
-    }
+    // The cap against what is still UNPAID is GONE (S4-1, owner ruling 2026-11-17). It existed
+    // only because crediting an already-paid invoice drove RECEIVABLES negative with no refund
+    // path to settle it. A genuine return after payment is an ordinary business event, and it is
+    // now representable: finalizeCreditNote splits the settlement credit, so whatever exceeds the
+    // open balance becomes CUSTOMER_CREDITS - a liability - and receivables stop at zero.
+    //
+    // The cap above still stands and still matters: a note can never credit more than the
+    // invoice CHARGED before tax, whatever has been paid.
   }
 
   private restoreCreditNoteStock(note: CreditNote, fairId: string | undefined): number {

@@ -59,6 +59,18 @@ function creditNote(w: World, invoice: Invoice, id: string, taxablePaise: number
   };
 }
 
+/** The CUSTOMER_CREDITS balance for one invoice, as a POSITIVE amount owed back. */
+function customerCreditsPaise(repository: AccountingRepository, invoiceId: string): number {
+  const row = repository.db
+    .prepare(
+      `SELECT COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS balance
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.source_id = ? AND jl.account = 'CUSTOMER_CREDITS'`,
+    )
+    .get(invoiceId) as { balance: number };
+  return row.balance;
+}
+
 /** The RECEIVABLES control balance straight from the ledger: debits less credits. */
 function receivablesPaise(repository: AccountingRepository, invoiceId: string): number {
   const row = repository.db
@@ -192,29 +204,45 @@ describe("DEFECT 1: a credit note must reduce what the customer can still pay", 
     }
   });
 
-  it("refuses a credit note on an invoice the customer has ALREADY paid", () => {
+  it("credits an invoice the customer has ALREADY paid, as a liability rather than a negative asset", () => {
     const w = world();
     try {
       const invoice = finalizedInvoice(w, { unitPricePaise: 100000 });
       w.repository.recordPayment(invoice.id, 100000);
       expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
 
-      // THE DEFECT: this used to be accepted, leaving RECEIVABLES at -40000 - the books saying
-      // money was due back to the customer, with no refund path able to pay it. getReceivables
-      // then hid the row entirely behind its "outstanding > 0" filter.
-      // Refused as early as the DRAFT, since that is where the lines are first validated.
-      expect(() => w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 40000)))
-        .toThrow(/only 0 paise of the invoice is still unpaid/);
+      // THE ORIGINAL DEFECT: this was once accepted silently and left RECEIVABLES at -40000 -
+      // the books saying money was due back, with no way to pay it - and getReceivables then hid
+      // the row behind its "outstanding > 0" filter. S3-3 refused the note outright as a stopgap.
+      // S4-1 (owner, 2026-11-17) builds the real path instead: the note is allowed, and what it
+      // is worth beyond the open balance becomes CUSTOMER_CREDITS, a liability that can be
+      // refunded or set against a later invoice.
+      w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 40000));
+      w.repository.finalizeCreditNote("cn1");
+      // The defect itself is still fixed: receivables stop at zero, they do not go negative.
       expect(receivablesPaise(w.repository, invoice.id)).toBe(0);
-      expect(w.repository.listCreditNotes({ invoiceId: invoice.id })).toHaveLength(0);
+      expect(customerCreditsPaise(w.repository, invoice.id)).toBe(40000);
+      expect(w.repository.getCreditNoteBalance("cn1")).toMatchObject({ refundablePaise: 40000, outstandingPaise: 40000 });
+      // Nothing is owed BY the customer, so no receivable row appears for them either.
+      expect(w.repository.getReceivables().filter((r) => r.invoiceId === invoice.id)).toHaveLength(0);
 
-      // Part-paid: a note is allowed only up to what is still owed.
+      // Part-paid: the note SPLITS - 30,000 comes off what is still owed, 1 paisa is owed back.
       const other = finalizedInvoice(w, { id: "inv2", unitPricePaise: 100000 });
       w.repository.recordPayment(other.id, 70000);
-      expect(() => w.repository.saveCreditNote(creditNote(w, other, "cn2", 30001))).toThrow(/only 30000 paise/);
-      w.repository.saveCreditNote(creditNote(w, other, "cn3", 30000));
-      w.repository.finalizeCreditNote("cn3");
+      w.repository.saveCreditNote(creditNote(w, other, "cn2", 30001));
+      w.repository.finalizeCreditNote("cn2");
       expect(receivablesPaise(w.repository, other.id)).toBe(0);
+      expect(customerCreditsPaise(w.repository, other.id)).toBe(1);
+      expect(w.repository.getCreditNoteBalance("cn2")).toMatchObject({ refundablePaise: 1 });
+
+      // A note that fits entirely inside the open balance is NOT split, exactly as before.
+      const third = finalizedInvoice(w, { id: "inv3", unitPricePaise: 100000 });
+      w.repository.recordPayment(third.id, 70000);
+      w.repository.saveCreditNote(creditNote(w, third, "cn3", 30000));
+      w.repository.finalizeCreditNote("cn3");
+      expect(receivablesPaise(w.repository, third.id)).toBe(0);
+      expect(customerCreditsPaise(w.repository, third.id)).toBe(0);
+      expect(w.repository.getCreditNoteBalance("cn3")).toMatchObject({ refundablePaise: 0 });
     } finally {
       w.repository.close();
     }
