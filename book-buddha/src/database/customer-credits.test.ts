@@ -574,3 +574,213 @@ describe("an invoice carrying a credit note can never be cancelled out from unde
     }
   });
 });
+
+/**
+ * S4-1: cancelling a finalized credit note. Until this existed `CreditNoteStatus.CANCELLED` was
+ * a value nothing ever set, so a note could not be undone - and since an invoice carrying a note
+ * cannot be cancelled either, one mistaken note froze that invoice permanently. That was the
+ * known dead end carried in HOT for two sessions.
+ */
+describe("cancelling a credit note", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function world(trackStock = false) {
+    const repository = new AccountingRepository();
+    const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
+    const businessId = repository.createBusiness({ companyId, name: "Business" });
+    const customerId = repository.createCustomer({ companyId, name: "Customer" });
+    const itemId = repository.createItem({ companyId, name: "Item", unit: "each", trackStock });
+    if (trackStock) {
+      repository.addStockMovement({ itemId, movementType: "OPENING", quantity: 30, unitCostPaise: 10000 });
+    }
+    const invoice = (id: string, unitPricePaise: number, quantity = 1): void => {
+      repository.saveDraft({
+        id,
+        number: `INV-${id}`,
+        businessId,
+        customerId,
+        invoiceDate: "2026-01-01",
+        status: "DRAFT",
+        paymentAccount: "RECEIVABLES",
+        taxType: "NONE",
+        taxRateBasisPoints: 0,
+        lines: [{ itemId, description: "Line", quantity, unitPricePaise }],
+      });
+      repository.finalizeInvoice(id);
+    };
+    const note = (id: string, invoiceId: string, unitPricePaise: number, quantity = 1): void => {
+      repository.saveCreditNote({
+        id,
+        invoiceId,
+        number: `CN-${id}`,
+        reason: "Return",
+        status: "DRAFT",
+        lines: [{ itemId, description: "Returned", quantity, unitPricePaise }],
+      });
+      repository.finalizeCreditNote(id);
+    };
+    const ledger = (account: string, invoiceId: string): number => {
+      const row = repository.db
+        .prepare(
+          `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS balance
+             FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+            WHERE je.source_id = ? AND jl.account = ?`,
+        )
+        .get(invoiceId, account) as { balance: number };
+      return row.balance;
+    };
+    return { repository, itemId, invoice, note, ledger };
+  }
+
+  it("OPENS THE DEAD END: an invoice carrying a note can be cancelled once the note is", () => {
+    const w = world();
+    try {
+      w.invoice("A", 100000);
+      w.note("cn1", "A", 40000);
+      // Before: frozen, exactly as it has been since the guard was added.
+      expect(() => w.repository.cancelInvoice("A")).toThrow(/Cancel its credit notes first/);
+
+      w.repository.cancelCreditNote("cn1");
+
+      // The note is reversed, so the invoice is free again.
+      expect(w.repository.getCreditNote("cn1").status).toBe("CANCELLED");
+      expect(w.ledger("RECEIVABLES", "A")).toBe(100000);
+      expect(() => w.repository.cancelInvoice("A")).not.toThrow();
+      expect(w.repository.getInvoice("A").status).toBe("CANCELLED");
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("reverses the split, whichever side of it the note fell on", () => {
+    const w = world();
+    try {
+      // Fully refundable: paid first, so the note created a liability and nothing else.
+      w.invoice("A", 100000);
+      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.note("cn1", "A", 100000);
+      expect(-w.ledger("CUSTOMER_CREDITS", "A")).toBe(100000);
+      w.repository.cancelCreditNote("cn1");
+      expect(w.ledger("CUSTOMER_CREDITS", "A")).toBe(0);
+      expect(w.repository.getCreditNoteBalance("cn1").outstandingPaise).toBe(0);
+      // Receivables are back where the payment left them.
+      expect(w.ledger("RECEIVABLES", "A")).toBe(0);
+
+      // Split: part off the bill, part owed back. Both halves must come back.
+      w.invoice("B", 100000);
+      w.repository.recordPayment("B", 60000, "2026-01-20");
+      w.note("cn2", "B", 100000);
+      expect(-w.ledger("CUSTOMER_CREDITS", "B")).toBe(60000);
+      expect(w.ledger("RECEIVABLES", "B")).toBe(0);
+      w.repository.cancelCreditNote("cn2");
+      expect(w.ledger("CUSTOMER_CREDITS", "B")).toBe(0);
+      // 100,000 billed less 60,000 paid: the note is gone, so 40,000 is owed again.
+      expect(w.ledger("RECEIVABLES", "B")).toBe(40000);
+      const receivable = w.repository.getReceivables().find((r) => r.invoiceId === "B");
+      expect(receivable?.outstandingPaise).toBe(40000);
+      // And that 40,000 can be collected, which it could not while the note stood.
+      expect(() => w.repository.recordPayment("B", 40000, "2026-02-11")).not.toThrow();
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("sends the returned stock back out, and refuses if it has already gone", () => {
+    const w = world(true);
+    try {
+      const onHand = (): number =>
+        (
+          w.repository.db
+            .prepare("SELECT COALESCE(SUM(quantity_delta), 0) AS quantity FROM stock_movements WHERE item_id = ?")
+            .get(w.itemId) as { quantity: number }
+        ).quantity;
+
+      w.invoice("A", 100000, 10); // 30 on hand, 10 sold
+      expect(onHand()).toBe(20);
+      w.note("cn1", "A", 100000, 10); // all 10 come back
+      expect(onHand()).toBe(30);
+      w.repository.cancelCreditNote("cn1");
+      // The return is undone, so the goods are with the customer again and the cost is back out
+      // of inventory: 10 units at 10,000 against this invoice.
+      expect(onHand()).toBe(20);
+      expect(w.ledger("INVENTORY", "A")).toBe(-100000);
+
+      // Now the same, but the returned goods are sold on before anyone cancels the note.
+      w.invoice("B", 100000, 10);
+      w.note("cn2", "B", 100000, 10);
+      expect(onHand()).toBe(20);
+      w.invoice("C", 100000, 20); // sell every remaining unit
+      expect(onHand()).toBe(0);
+      expect(() => w.repository.cancelCreditNote("cn2")).toThrow(/already gone out again/);
+      expect(w.repository.getCreditNote("cn2").status).toBe("FINALIZED");
+      expect(onHand()).toBe(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses out-of-order, discharged, and already-cancelled notes", () => {
+    const w = world();
+    try {
+      w.invoice("A", 100000, 2);
+      w.note("cn1", "A", 30000);
+      w.note("cn2", "A", 30000);
+      // Each note was split against what was outstanding at its own moment, so the later one has
+      // to go first.
+      expect(() => w.repository.cancelCreditNote("cn1")).toThrow(/is not the latest/);
+      w.repository.cancelCreditNote("cn2");
+      expect(() => w.repository.cancelCreditNote("cn1")).not.toThrow();
+      // A cancelled note cannot be cancelled twice.
+      expect(() => w.repository.cancelCreditNote("cn1")).toThrow(/Only a finalized credit note/);
+
+      // A note with money already given back cannot be undone: that cash is gone.
+      w.invoice("B", 100000);
+      w.repository.recordPayment("B", 100000, "2026-01-20");
+      w.note("cn3", "B", 100000);
+      w.repository.recordCreditNoteRefund({ id: "rf1", creditNoteId: "cn3", amountPaise: 1, refundedOn: "2026-02-11", paymentAccount: "CASH" });
+      expect(() => w.repository.cancelCreditNote("cn3")).toThrow(/already refunded or applied/);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("does not rewrite a month already reported, and still converges afterwards", () => {
+    const w = world();
+    try {
+      const period = (fromDate: string, toDate: string) =>
+        w.repository.getProfitAndLoss({ basis: "CASH", fromDate, toDate });
+
+      vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
+      w.invoice("A", 100000);
+      w.repository.recordPayment("A", 60000, "2026-01-20");
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(60000);
+
+      // A note in February, then cancelled in March.
+      vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
+      w.note("cn1", "A", 40000);
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(60000);
+
+      vi.setSystemTime(new Date("2026-03-10T06:00:00.000Z"));
+      w.repository.cancelCreditNote("cn1");
+      // JANUARY IS UNTOUCHED - the cancellation is dated at the cancellation, not back at the
+      // note and certainly not back at the payment.
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(60000);
+
+      // The invoice owes its last 40,000 again; paying it converges on accrual.
+      w.repository.recordPayment("A", 40000, "2026-03-15");
+      const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
+      expect(accrual.totalIncomePaise).toBe(100000);
+      expect(cash.totalIncomePaise).toBe(100000);
+      expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(60000);
+    } finally {
+      w.repository.close();
+    }
+  });
+});

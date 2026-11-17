@@ -1424,16 +1424,16 @@ export class AccountingRepository {
     dischargedPaise: number;
     outstandingPaise: number;
   } {
-    const row = this.db.prepare("SELECT refundable_paise FROM credit_notes WHERE id = ?").get(creditNoteId) as
-      | { refundable_paise: number }
+    const row = this.db.prepare("SELECT refundable_paise, status FROM credit_notes WHERE id = ?").get(creditNoteId) as
+      | { refundable_paise: number; status: CreditNote["status"] }
       | undefined;
     if (row === undefined) throw new RepositoryValidationError(`No credit note ${creditNoteId}.`);
     const dischargedPaise = this.creditNoteDischargedPaise(creditNoteId);
-    return {
-      refundablePaise: row.refundable_paise,
-      dischargedPaise,
-      outstandingPaise: row.refundable_paise - dischargedPaise,
-    };
+    // refundable_paise stays as the historical record of what the note was worth, but a CANCELLED
+    // note owes nothing: its entries have been reversed, so the ledger carries none of it either.
+    // Reporting the old figure would make this sub-ledger disagree with the books.
+    const outstandingPaise = row.status === "CANCELLED" ? 0 : row.refundable_paise - dischargedPaise;
+    return { refundablePaise: row.refundable_paise, dischargedPaise, outstandingPaise };
   }
 
   /**
@@ -1597,6 +1597,126 @@ export class AccountingRepository {
     })();
   }
 
+  /**
+   * Undo a finalized credit note (S4-1). Until this existed, `CreditNoteStatus.CANCELLED` was a
+   * value nothing ever set, so a note could never be undone - and because an invoice carrying a
+   * note cannot be cancelled either, one mistaken note froze that invoice for good.
+   *
+   * Correction by REVERSAL, never deletion: both of the note entries are negated on today date
+   * and the restored stock goes back out. Nothing earlier is rewritten, so a month already
+   * reported stays exactly as it was (S1-6).
+   */
+  public cancelCreditNote(creditNoteId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const note = this.getCreditNote(creditNoteId);
+      if (note.status !== "FINALIZED") {
+        throw new RepositoryValidationError("Only a finalized credit note can be cancelled.");
+      }
+      const invoice = this.getInvoice(note.invoiceId);
+      const balance = this.getCreditNoteBalance(note.id);
+      if (balance.dischargedPaise > 0) {
+        throw new RepositoryValidationError(
+          `Credit note ${note.number} has ${balance.dischargedPaise} paise already refunded or applied to another invoice. Cancelling it would leave that money unaccounted for, and there is no path to reverse a refund yet.`,
+        );
+      }
+      // NEWEST FIRST. Each note split was worked out against the balance OUTSTANDING AT ITS OWN
+      // MOMENT, so the splits of any later notes depend on this one standing. Cancelling out of
+      // order would leave the ledger and the sub-ledger disagreeing, with receivables and
+      // CUSTOMER_CREDITS both carrying a figure the surviving notes no longer justify.
+      const newer = this.db
+        .prepare(
+          `SELECT id, number FROM credit_notes
+            WHERE invoice_id = ? AND status = 'FINALIZED'
+                  AND (created_at > (SELECT created_at FROM credit_notes WHERE id = ?)
+                       OR (created_at = (SELECT created_at FROM credit_notes WHERE id = ?)
+                           AND rowid > (SELECT rowid FROM credit_notes WHERE id = ?)))
+            ORDER BY created_at DESC, rowid DESC`,
+        )
+        .all(note.invoiceId, note.id, note.id, note.id) as Array<{ id: string; number: string }>;
+      if (newer.length > 0) {
+        const latest = newer[0] as { id: string; number: string };
+        throw new RepositoryValidationError(
+          `Credit note ${note.number} is not the latest on invoice ${invoice.number}: cancel ${latest.number} first. Each note was split against what was outstanding when it was raised, so undoing an earlier one first would leave the later splits wrong.`,
+        );
+      }
+
+      // The stock this note put back has to still be there to go out again. If it has since been
+      // sold on, cancelling would drive the item negative.
+      const restored = this.db
+        .prepare(
+          "SELECT item_id, quantity_delta, unit_cost_paise FROM stock_movements WHERE source_id = ? AND movement_type = 'SALE_REVERSAL' ORDER BY rowid",
+        )
+        .all(note.id) as Array<{ item_id: string; quantity_delta: number; unit_cost_paise: number }>;
+      const neededByItem = new Map<string, number>();
+      for (const row of restored) {
+        neededByItem.set(row.item_id, (neededByItem.get(row.item_id) ?? 0) + row.quantity_delta);
+      }
+      for (const [itemId, quantity] of neededByItem) {
+        const onHand = (
+          this.db
+            .prepare("SELECT COALESCE(SUM(quantity_delta), 0) AS quantity FROM stock_movements WHERE item_id = ?")
+            .get(itemId) as { quantity: number }
+        ).quantity;
+        if (onHand < quantity) {
+          throw new RepositoryValidationError(
+            `Cancelling credit note ${note.number} needs ${quantity} of item ${itemId} back, but only ${onHand} are on hand: the returned goods have already gone out again.`,
+          );
+        }
+      }
+      for (const row of restored) {
+        this.insertStockMovement({
+          itemId: row.item_id,
+          sourceId: note.id,
+          movementType: "SALE",
+          quantityDelta: -row.quantity_delta,
+          unitCostPaise: row.unit_cost_paise,
+          ...fairDim(invoice.fairId),
+        });
+      }
+
+      const dims = { businessId: invoice.businessId, entryDate: istDateOf(), ...fairDim(invoice.fairId) };
+      const reverse = (sourceEntryId: string, id: string, description: string): JournalEntry | undefined => {
+        const lines = this.db
+          .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
+          .all(sourceEntryId) as Array<{ account: string; debit_paise: number; credit_paise: number }>;
+        if (lines.length === 0) return undefined;
+        return {
+          id,
+          sourceId: invoice.id,
+          description,
+          isReversal: true,
+          lines: lines.map((line) => ({
+            account: line.account,
+            debitPaise: line.credit_paise,
+            creditPaise: line.debit_paise,
+          })),
+        };
+      };
+      // These ids keep the `je-credit-note-` prefix deliberately. invoiceCreditedPaise sums that
+      // prefix against the settlement account, so the reversal nets this note credit back to zero
+      // there with no special case - which is precisely what frees the invoice to be cancelled.
+      const valueReversal = reverse(
+        `je-credit-note-${note.id}`,
+        `je-credit-note-cancel-${note.id}`,
+        `Cancellation of credit note ${note.number}`,
+      );
+      if (valueReversal === undefined) {
+        throw new Error(`Credit note ${note.id} is finalized but has no journal entry to reverse.`);
+      }
+      this.insertJournalEntry(valueReversal, dims);
+      const stockReversal = reverse(
+        `je-credit-note-inventory-${note.id}`,
+        `je-credit-note-cancel-inventory-${note.id}`,
+        `Stock sent out again for cancelled credit note ${note.number}`,
+      );
+      if (stockReversal !== undefined) this.insertJournalEntry(stockReversal, dims);
+
+      this.db.prepare("UPDATE credit_notes SET status = 'CANCELLED' WHERE id = ?").run(note.id);
+      this.insertAuditEvent({ action: "credit_note.cancelled", entityId: note.id, occurredAt: new Date().toISOString() });
+      return valueReversal;
+    })();
+  }
+
   public listCreditNotes(filter: { invoiceId?: string; status?: CreditNote["status"] } = {}): readonly CreditNoteSummary[] {
     const conditions: string[] = [];
     const params: string[] = [];
@@ -1721,14 +1841,14 @@ export class AccountingRepository {
       // invoice carrying a 400 note it reversed 1000 of SALES that only stood at 600 — leaving
       // SALES with a 400 DEBIT balance and RECEIVABLES at -400, silently.
       //
-      // KNOWN DEAD END: there is no path to cancel a finalized credit note (CreditNoteStatus has
-      // a CANCELLED value that nothing ever sets), so an invoice carrying one can never be
-      // cancelled at all. The message says what is true rather than suggesting a step that does
-      // not exist; the way out is the credit-note cancellation path, which is still unbuilt.
+      // THE DEAD END IS CLOSED. This used to be terminal: CreditNoteStatus had a CANCELLED value
+      // that nothing ever set, so a note could not be undone and one mistaken note froze its
+      // invoice for good. cancelCreditNote now exists, and because its reversal keeps the
+      // `je-credit-note-` prefix, the sum below nets back to zero with no special case here.
       const creditedPaise = this.invoiceCreditedPaise(invoice);
       if (creditedPaise > 0) {
         throw new RepositoryValidationError(
-          `This invoice has ${creditedPaise} paise of credit notes against it and cannot be cancelled: the cancellation would reverse more than the invoice still owes. A finalized credit note cannot yet be undone, so this invoice can no longer be cancelled.`,
+          `This invoice has ${creditedPaise} paise of credit notes against it and cannot be cancelled: the cancellation would reverse more than the invoice still owes. Cancel its credit notes first, newest first.`,
         );
       }
       const originalEntry = this.getOriginalJournalEntry(invoiceId);
@@ -2143,9 +2263,12 @@ export class AccountingRepository {
     // `je-credit-note-inventory-<id>` (the stock going back) - and they have to be ONE event. As
     // two, anything that acts on a note (the settlement true-up, a refund split) can catch one
     // entry and not the other, stranding COGS on a different date from the sales it belongs to.
+    // CANCELLED notes are loaded as well as finalized ones. Their original entries are still in
+    // the ledger, and if they were not claimed here they would fall into baseRows, become part of
+    // the invoice from day one and re-measure months already reported - the S3-5 defect.
     const notesOf = new Map<string, Array<{ id: string; refundablePaise: number }>>();
     for (const n of this.db.prepare(
-      "SELECT id, invoice_id, refundable_paise FROM credit_notes WHERE status = 'FINALIZED' ORDER BY created_at, rowid",
+      "SELECT id, invoice_id, refundable_paise FROM credit_notes WHERE status IN ('FINALIZED', 'CANCELLED') ORDER BY created_at, rowid",
     ).all() as Array<{ id: string; invoice_id: string; refundable_paise: number }>) {
       const entry = { id: n.id, refundablePaise: n.refundable_paise };
       const list = notesOf.get(n.invoice_id);
@@ -2244,32 +2367,37 @@ export class AccountingRepository {
       type Event =
         | { kind: "NOTE"; date: string; noteId: string; lines: readonly Natural[]; inclusivePaise: number; offsetPaise: number }
         | { kind: "PAYMENT"; date: string; amountPaise: number }
-        | { kind: "DISCHARGE"; date: string; noteId: string; amountPaise: number };
+        | { kind: "DISCHARGE"; date: string; noteId: string; amountPaise: number }
+        | { kind: "CANCEL"; date: string; noteId: string };
 
       // Partition the document's lines by EXACT entry id against the notes the table reports,
       // never by an id prefix: a prefix test silently swallows any future entry that happens to
       // start the same way, and a reversal landing in baseRows would become part of the invoice
       // from day one and re-measure months already reported (the S3-5 defect).
       const notes = doc.type === "INVOICE" ? notesOf.get(doc.id) ?? [] : [];
-      const noteOfEntry = new Map<string, string>();
+      // Entry id -> which note, and which PART of it. Exact ids throughout: a startsWith test
+      // would put `je-credit-note-cancel-inventory-x` in the wrong bucket, and would silently
+      // swallow any future entry that happened to share the prefix.
+      const entryRole = new Map<string, string>();
       for (const note of notes) {
-        noteOfEntry.set(`je-credit-note-${note.id}`, note.id);
-        noteOfEntry.set(`je-credit-note-inventory-${note.id}`, note.id);
+        entryRole.set(`je-credit-note-${note.id}`, `${note.id}|VALUE`);
+        entryRole.set(`je-credit-note-inventory-${note.id}`, `${note.id}|STOCK`);
+        entryRole.set(`je-credit-note-cancel-${note.id}`, `${note.id}|CANCEL`);
+        entryRole.set(`je-credit-note-cancel-inventory-${note.id}`, `${note.id}|CANCEL`);
       }
-      const valueRowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
-      const stockRowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
+      const rowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
       const baseRows: Array<(typeof lineRows)[number]> = [];
       for (const row of docLines) {
-        const noteId = noteOfEntry.get(row.entry_id);
-        if (noteId === undefined) { baseRows.push(row); continue; }
-        const target = row.entry_id.startsWith("je-credit-note-inventory-") ? stockRowsOf : valueRowsOf;
-        const list = target.get(noteId);
-        if (list === undefined) target.set(noteId, [row]); else list.push(row);
+        const key = entryRole.get(row.entry_id);
+        if (key === undefined) { baseRows.push(row); continue; }
+        const list = rowsOf.get(key);
+        if (list === undefined) rowsOf.set(key, [row]); else list.push(row);
       }
       const events: Event[] = [];
       for (const note of notes) {
-        const valueRows = valueRowsOf.get(note.id) ?? [];
-        const stockRows = stockRowsOf.get(note.id) ?? [];
+        const valueRows = rowsOf.get(`${note.id}|VALUE`) ?? [];
+        const stockRows = rowsOf.get(`${note.id}|STOCK`) ?? [];
+        const cancelRows = rowsOf.get(`${note.id}|CANCEL`) ?? [];
         if (valueRows.length === 0 && stockRows.length === 0) continue;
         const dateRow = (valueRows[0] ?? stockRows[0]) as (typeof lineRows)[number];
         // The note's tax-inclusive value: the negated sum of its SALES and GST lines. The stock
@@ -2290,6 +2418,11 @@ export class AccountingRepository {
         for (const discharge of dischargesOf.get(note.id) ?? []) {
           events.push({ kind: "DISCHARGE", date: discharge.date, noteId: note.id, amountPaise: discharge.amountPaise });
         }
+        // A cancelled note is NOT erased from the walk. It stands at its own date, and a second
+        // event undoes it on the CANCEL date, so a month that has been reported never moves.
+        if (cancelRows.length > 0) {
+          events.push({ kind: "CANCEL", date: (cancelRows[0] as (typeof lineRows)[number]).entry_date, noteId: note.id });
+        }
       }
       for (const payment of paymentsOf.get(key) ?? []) {
         events.push({ kind: "PAYMENT", date: istDateOf(payment.paidAt), amountPaise: payment.amountPaise });
@@ -2297,7 +2430,8 @@ export class AccountingRepository {
       // Notes before payments before refunds on the same day: the note reduces the bill, cash is
       // applied to whatever is left of it, and only then can anything be given back. Documented
       // because the orders give different figures.
-      const rank = (event: Event): number => (event.kind === "NOTE" ? 0 : event.kind === "PAYMENT" ? 1 : 2);
+      const rank = (event: Event): number =>
+        event.kind === "NOTE" ? 0 : event.kind === "PAYMENT" ? 1 : event.kind === "DISCHARGE" ? 2 : 3;
       events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : rank(a) - rank(b)));
 
       const current = new Map<string, number>();
@@ -2330,7 +2464,17 @@ export class AccountingRepository {
       // share is consumed first, then every discharge in turn, so the shares telescope exactly as
       // a document's payments do: once a note is fully discharged it has recognised precisely its
       // own lines, however many odd-sized refunds came first.
-      const noteLedger = new Map<string, { lines: readonly Natural[]; inclusivePaise: number; dischargedPaise: number }>();
+      const noteLedger = new Map<
+        string,
+        {
+          lines: readonly Natural[];
+          inclusivePaise: number;
+          dischargedPaise: number;
+          offsetPaise: number;
+          /** Exactly what this note folded into the document, so a cancellation can take back that and no more. */
+          folded: Array<{ account: string; amountPaise: number }>;
+        }
+      >();
       const dischargeShares = (noteId: string, amountPaise: number): Array<{ account: string; amountPaise: number }> => {
         const state = noteLedger.get(noteId);
         if (state === undefined || state.inclusivePaise <= 0 || amountPaise <= 0) return [];
@@ -2370,18 +2514,41 @@ export class AccountingRepository {
           }
           continue;
         }
+        if (event.kind === "CANCEL") {
+          const state = noteLedger.get(event.noteId);
+          if (state === undefined) continue;
+          // Take back EXACTLY what the note folded in, and nothing else. Recognitions already
+          // emitted stand: S1-6 forbids rewriting a month that has been reported, and this event
+          // is dated at the cancellation, never back at the note.
+          for (const line of state.folded) {
+            current.set(line.account, (current.get(line.account) ?? 0) - line.amountPaise);
+          }
+          balancePaise += state.offsetPaise;
+          state.folded = [];
+          // Belt and braces: a cancelled note can carry no discharges (cancelCreditNote refuses
+          // once any part has been refunded or applied), but this makes it impossible anyway.
+          state.dischargedPaise = state.inclusivePaise;
+          openSegment();
+          continue;
+        }
         if (event.kind === "NOTE") {
-          noteLedger.set(event.noteId, { lines: event.lines, inclusivePaise: event.inclusivePaise, dischargedPaise: 0 });
+          const state = {
+            lines: event.lines,
+            inclusivePaise: event.inclusivePaise,
+            dischargedPaise: 0,
+            offsetPaise: event.offsetPaise,
+            folded: [] as Array<{ account: string; amountPaise: number }>,
+          };
+          noteLedger.set(event.noteId, state);
           // Only the OFFSET share folds into the document now. A note worth more than the invoice
           // still owes has the remainder held back entirely until it is refunded or applied: S1-6
           // puts that reduction in the month it actually happens.
-          if (event.inclusivePaise <= 0) {
-            for (const line of event.lines) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
-          } else {
-            for (const line of dischargeShares(event.noteId, event.offsetPaise)) {
-              current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
-            }
-          }
+          const folded =
+            event.inclusivePaise <= 0
+              ? event.lines.map((line) => ({ account: line.account, amountPaise: line.amountPaise }))
+              : dischargeShares(event.noteId, event.offsetPaise);
+          for (const line of folded) current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
+          state.folded = folded;
           balancePaise -= event.offsetPaise;
           // S4-3 (owner, 2026-11-17; AMENDS S2-2): a note that CLEARS what is owed is itself a
           // settlement event. S2-2 still governs the note's own lines - the returned goods never
