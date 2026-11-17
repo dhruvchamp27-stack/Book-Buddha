@@ -2,9 +2,9 @@
 
 ## Last session
 2026-11-17 (session 7), branch `autonomous/book-buddha-finish`. **R4c IS BUILT AND ON SCREEN
-(figures unconfirmed).** 4 commits, last `732e903`. **EVERY commit here is unpushed — count with
-`git log --oneline @{u}..HEAD | wc -l`; only the owner's terminal can push.** Gates:
-**458/458 vitest, 37 files, tsc clean (unpiped), vite build clean.** Rulings **S7-1, S7-2**.
+(figures unconfirmed).** Last commit `732e903` (code). **EVERY commit here is unpushed — count with
+`git log --oneline @{u}..HEAD | wc -l`; only the owner's terminal can push.** Gates: **458/458
+vitest, 37 files, tsc clean (unpiped), vite build clean.** Rulings **S7-1, S7-2**.
 
 ## What session 7 did
 1. **`b932d26` — R4c.** Opening stock posts `Dr INVENTORY / Cr OPENING_BALANCE_EQUITY`, an
