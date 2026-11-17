@@ -7,6 +7,21 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S8-5 (2026-11-17) — A FALSE FACT CORRECTED: pushing DOES work from a tool shell.** Sessions
+  4-8 carried "a tool shell CANNOT push (no tty for the credential manager)" in the resume brief
+  and acted on it for four sessions. Nobody re-tested it. Measured today, dry-run only, on
+  `autonomous/book-buddha-finish`: with `GIT_TERMINAL_PROMPT=0` alone it exited 0 on a clean
+  fast-forward but took **over 60s** and the tool timeout killed it first — which is exactly what
+  "cannot push" looks like from the inside. Re-run with Git Credential Manager's own interactivity
+  also off (`GCM_INTERACTIVE=never`, `-c credential.interactive=false`) it exited 0 in **3
+  seconds**. So a credential is stored under `credential.helper=manager` and works with every
+  prompt shut off; `gh` is not logged in and is not needed. **STILL UNRESOLVED:** whether the slow
+  first attempt was GCM opening a sign-in window that the owner completed at the screen, or just a
+  slow first fetch — ask him. If a window appeared, the credential can lapse and the next first
+  push would block on a popup, so never run one in the foreground. **The lesson generalises: a
+  hung command is not a broken capability.** A timeout was written down as an impossibility and
+  inherited as fact. Re-run in the background before recording a limitation. **Permission is
+  unchanged — ask him before every push, feature branch only, never `main`.**
 - **S8-4 (2026-11-17) — ASSISTANT FINDING, NOT FIXED: a credit note has no date of its own, so a
   return cannot be back-dated.** `CreditNote` (`src/accounting/types.ts`) carries no date field, so
   its journal entry is dated the day it is FINALIZED. A return against a May invoice therefore

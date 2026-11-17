@@ -38,10 +38,24 @@ test files separately before changing any signature. `repository.ts` line 53 fai
 1. `context/HOT.md` — auto-loaded, accurate as of session 8. Trust it.
 2. `git branch --show-current` must be `autonomous/book-buddha-finish`; tip **`4427078`** or later.
 3. `context/decisions.md` — read **S8-1 … S8-4**, then S7-1, S7-2. S5-x and S6-x still apply.
-4. **EVERY commit on this branch is UNPUSHED and that is deliberate.** Count it, never quote a
-   number out of this file: `git log --oneline @{u}..HEAD | wc -l`. A tool shell CANNOT push (no
-   tty for the credential manager). Only the owner pushes, from his own terminal. **Ask, never
-   retry.**
+4. **Count the unpushed commits, never quote a number out of this file:**
+   `git log --oneline @{u}..HEAD | wc -l`.
+   **PUSHING WORKS FROM A TOOL SHELL. Sessions 4–8 wrote that it could not, and never re-tested
+   it.** Measured 2026-11-17, twice, dry-run only, on this branch:
+   - 1st attempt, `GIT_TERMINAL_PROMPT=0` only: exit 0, clean fast-forward, but took **over 60s**
+     and was killed by the tool timeout before it reported — the exact shape of "cannot push".
+   - 2nd attempt, with Git Credential Manager's own interactivity off as well
+     (`GCM_INTERACTIVE=never`, `-c credential.interactive=false`): exit 0 in **3 seconds**.
+   So a credential IS stored, under `credential.helper=manager`, and it works with every prompt
+   shut off. `gh` is NOT logged in and is not needed.
+   **UNRESOLVED, and it matters when he is away:** whether that slow first attempt was GCM opening
+   a sign-in window that he completed at the screen (he was there), or just a slow first fetch.
+   `context/decisions.md` records nothing about pushing, so there is no earlier observation to
+   check. **Ask him whether a sign-in window appeared.** If it did, the credential can lapse and
+   the first push after that will block on a popup, so never leave one in the foreground.
+   **None of this changes permission: ASK HIM BEFORE EVERY PUSH, and only to this feature branch,
+   never `main`.** "Yes, commit" is not "yes, push". After a push, confirm
+   `git log --oneline @{u}..HEAD` is empty.
 5. Gates (npm is NOT on PATH), from `book-buddha/`:
    `./node_modules/.bin/vitest.cmd run --root .` · `tsc.cmd` · `vite.cmd build`
    **Baseline: 41 files, 487 tests, tsc clean, build clean.**
@@ -146,8 +160,13 @@ under S10–S14.
 - **ACCEPTANCE for 7d, 8c, R1, R2, R4, R4b, R4c, R5 and R7 all await him. Only R3 is signed off.**
 - **The R4c backfill has NEVER touched his real database and must not without his say-so.**
 - If his database predates v16 it has **no recovery code** — sign in, `POST /auth/recovery-code`.
-- 13 test files are dirty with **CRLF-only churn** (zero content diff). Offer `git checkout --` on
-  those explicit paths. `book-buddha/.codebase-memory/` is untracked — ask about `.gitignore`.
+- The 13 CRLF-dirty test files were **restored on 2026-11-17 and the tree is clean.** If they come
+  back: `core.autocrlf=true` plus `* text=auto` means git wants CRLF in the worktree, while the
+  tools here write LF, so `git status` says `M` while BOTH `git diff` and `git diff
+  --ignore-cr-at-eol` print nothing and `update-index --refresh` says "needs update". That shape
+  — status dirty, no diff at all — is a line-ending mismatch, not an edit, and
+  `git checkout --` on the explicit paths clears it. `book-buddha/.codebase-memory/` is still
+  untracked — ask about `.gitignore`.
 - **Known flake, pre-existing:** the fuzz test in `src/accounting/engine.test.ts`
   ("allocateProportionally … fuzz") can exceed its 5000ms per-test limit under full-suite parallel
   load, then passes alone. Timing-fragile, not wrong.
@@ -203,7 +222,11 @@ under S10–S14.
   session 8 it caught an ungated "vite build clean" claim, the receivables/ageing as-at
   disagreement, and the SALES-in-debit hole that payment cancellation had opened.
 - Stage by **explicit path**, never `git add -A`. One commit = one idea. **Put the honest limits
-  in the commit message.** Committing locally is pre-authorised; **ASK BEFORE PUSHING.**
+  in the commit message.** Committing locally is pre-authorised; **ASK BEFORE PUSHING** (it works
+  now — see ORIENT 4 — which makes asking matter more, not less).
+- **A hung command is not a broken capability.** "A tool shell cannot push" survived four sessions
+  as fact because a 60s timeout was read as a failure, and nobody re-tested it. If a tool times
+  out, re-run it in the background before writing the limitation down.
 - `context/HOT.md` stays **under 50 lines**. **Delete words, then count** — reflowing does nothing.
 
 ## WHERE THE PRODUCT ACTUALLY STANDS — do not over-report progress
