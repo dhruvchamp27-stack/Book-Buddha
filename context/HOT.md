@@ -15,12 +15,13 @@ Gates: **458/458 vitest, 37 files, tsc clean (unpiped), vite build clean.**
    ENTRY only, so the FIFO layer stays append-only and posted COGS is never re-measured; movement +
    entry are ONE transaction. The backfill: **dry run by default**, idempotent, refuses locked years.
 2. **`c844e90` + `8556daf` — `book-buddha/R4C-WORKINGS.md`** (the sign-off document) plus three
-   self-review fixes: the route had never executed in a test; the doc wrongly called scenario 2 his
-   real data; S7-2 found. **Five mutations proved the new tests can fail.**
+   self-review fixes. **Five mutations proved the new tests can fail.**
 3. **`732e903` — R4c ON SCREEN** (`web/src/App.tsx`): Add stock names the reason and says what it
    will post; a new card shows the tie-out and runs the backfill (check-only first, then posting).
 
 ## NEXT STEP — in this order
+0. **FIRST, owner's instruction:** delete the "Offline-first accounting" tag — `web/src/App.tsx:542`
+   and `web/src/AuthGate.tsx:160` and `:207`. Keep the `<h1>Book Buddha</h1>` and the layout.
 1. **R5-rem** — presentation only: split the derived `RETAINED_EARNINGS` into brought-forward and
    profit-for-the-year at the FY boundary, with an invariant test that they still sum (**S5-4**).
    Needs a `businessId` to pick the FY; consolidated has none.

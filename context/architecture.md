@@ -93,6 +93,33 @@ The target's "API / auth" layer now exists in the prototype and is gated. Wiring
   UI lands. **`web/` is type-checked by NOTHING** (`tsconfig` is `include: ["src"]`,
   vite is transpile-only) — see decisions S6-4.
 
+### Stock → ledger — VERIFIED as built, session 7 (R4c)
+Hand-entered stock used to move inventory with no GL effect. It now posts, and the
+wiring is deliberately thin — **no new table and no migration** (v17 is still free):
+- **`addStockMovement` (`src/database/repository.ts`)** — OPENING posts
+  `Dr INVENTORY / Cr OPENING_BALANCE_EQUITY`, ADJUSTMENT `Cr STOCK_ADJUSTMENT`
+  (seeded at v13); a bare PURCHASE still posts NOTHING, because its bill posts it.
+  Movement + entry are ONE transaction, through `insertJournalEntry`, so the FY lock
+  and the chart validation apply and a refusal leaves no stock row behind.
+- **`"STOCK_MOVEMENT"` in `JournalSourceType`** — `journal_entries.source_type` has
+  no CHECK in SQLite, so this is a TypeScript widening. `source_id` is the movement's
+  own id: a movement is posted exactly when such an entry carries its id, which is
+  also what makes the backfill idempotent. No link table exists or is needed.
+- **`resolveStockMovementBusiness`** — the ONE place a movement's business is decided
+  (items belong to a company, entries need a business): derived when the company has
+  exactly one, refused by name when it has more. Reversing it is a one-line change.
+- **`occurredOn`** dates the JOURNAL ENTRY only. `stock_movements.occurred_at` stays
+  the insertion instant because `getStockLayers` consumes FIFO `ORDER BY occurred_at`
+  — a back-dated layer would re-measure COGS already posted.
+- **`planStockJournalBackfill` / `backfillStockJournals` + `POST /inventory/journal-backfill`**
+  — for movements entered before R4c. **Dry run unless `apply: true`**, idempotent,
+  refuses locked years and lists each refusal, posts the ORIGINAL layer value, and
+  COUNTS source-less PURCHASE movements as uncovered rather than implying a tie-out.
+- **`web/src/App.tsx`** — the Add stock card names the reason and states what it will
+  post before submission; a second card shows the inventory-vs-stock tie-out and runs
+  the backfill (check-only first). Reports load on mount, so the tie-out is never read
+  off an empty trial balance. Still no UI tests, and `web/` is still ungated (S6-4).
+
 ## Prototype vs spec — known divergences (ARCH §6)
 - One `invoices` table for drafts/quotes/finalised/cancelled (ARCH §6 wants a
   deliberate choice; target uses a common `documents` header).
