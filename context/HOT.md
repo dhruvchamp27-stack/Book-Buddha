@@ -2,9 +2,9 @@
 
 ## Last session
 2026-11-17 (session 7), branch `autonomous/book-buddha-finish`. **R4c IS BUILT AND ON SCREEN
-(figures unconfirmed).** Last commit `732e903` (code). **EVERY commit here is unpushed — count with
-`git log --oneline @{u}..HEAD | wc -l`; only the owner's terminal can push.** Gates: **458/458
-vitest, 37 files, tsc clean (unpiped), vite build clean.** Rulings **S7-1, S7-2**.
+(figures unconfirmed);** last code commit `732e903`; rulings **S7-1, S7-2**. **EVERY commit here is
+unpushed — count with `git log --oneline @{u}..HEAD | wc -l`; only the owner's terminal can push.**
+Gates: **458/458 vitest, 37 files, tsc clean (unpiped), vite build clean.**
 
 ## What session 7 did
 1. **`b932d26` — R4c.** Opening stock posts `Dr INVENTORY / Cr OPENING_BALANCE_EQUITY`, an
@@ -17,9 +17,8 @@ vitest, 37 files, tsc clean (unpiped), vite build clean.** Rulings **S7-1, S7-2*
 2. **`c844e90` + `8556daf` — `book-buddha/R4C-WORKINGS.md`** (the sign-off document) plus three
    self-review fixes: the route had never executed in a test; the doc wrongly called scenario 2 his
    real data; S7-2 found. **Five mutations proved the new tests can fail.**
-3. **`732e903` — R4c ON SCREEN** (`web/src/App.tsx`): Add stock picks the reason and says what it
-   will post before you press; a new card shows the inventory-vs-stock tie-out and runs the backfill
-   (check-only first; posting disabled until then). Reports load on arrival, money Indian-grouped.
+3. **`732e903` — R4c ON SCREEN** (`web/src/App.tsx`): Add stock names the reason and says what it
+   will post; a new card shows the tie-out and runs the backfill (check-only first, then posting).
 
 ## NEXT STEP — in this order
 1. **R5-rem** — presentation only: split the derived `RETAINED_EARNINGS` into brought-forward and
@@ -29,8 +28,8 @@ vitest, 37 files, tsc clean (unpiped), vite build clean.** Rulings **S7-1, S7-2*
    reports in **S5-7**; new ones read `getOpenCustomerItems`/`getOpenSupplierItems`. **Settle
    `GeneralLedgerRow.date` here:** it shows POSTING time, so a back-dated opening entry appears
    under today's date — visible in the R4c screenshots.
-3. **R8** purchase returns/refunds/payment cancellation/bill discount · R10 import-export · R11
-   backup · R12 banking · R13 cash flow · R14 archive.
+3. **R8** returns/refunds/payment cancellation/bill discount · R10 import-export · R11 backup ·
+   R12 banking · R13 cash flow · R14 archive.
 
 ## Owner action / carried
 **R4C-WORKINGS.md HAS FOUR DECISIONS FOR HIM** (business derivation · dating the entry not the
