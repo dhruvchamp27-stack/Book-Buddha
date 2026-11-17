@@ -241,6 +241,16 @@ const stockMovementInput = z.object({
   unitCostPaise: z.number().int().nonnegative(),
   movementType: z.enum(["OPENING", "PURCHASE", "ADJUSTMENT"]),
   fairId: id.optional(),
+  /** R4c: whose ledger an OPENING/ADJUSTMENT movement posts to. Optional only when there is one. */
+  businessId: id.optional(),
+  /** R4c: the date the journal entry carries. The stock layer itself stays append-only. */
+  occurredOn: z.string().date().optional(),
+});
+/** R4c: posting the journal entries that hand-entered stock movements never got. */
+const stockBackfillInput = z.object({
+  businessId: id,
+  /** Absent or false = DRY RUN. Nothing is written unless this is explicitly true. */
+  apply: z.boolean().optional(),
 });
 const creditNoteInput = z.object({
   invoiceId: id,
@@ -837,7 +847,19 @@ export function buildApi(
       quantity: input.quantity,
       unitCostPaise: input.unitCostPaise,
       ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+      ...(input.businessId === undefined ? {} : { businessId: input.businessId }),
+      ...(input.occurredOn === undefined ? {} : { occurredOn: input.occurredOn }),
     }));
+  });
+
+  /**
+   * R4c. A DRY RUN by default: it reports what it would post and writes nothing. Only
+   * `apply: true` posts, and even then it refuses movements dated inside a locked year and lists
+   * them. Running it twice is safe - the second run finds nothing left to post.
+   */
+  app.post("/inventory/journal-backfill", async (request) => {
+    const input = parseBody(stockBackfillInput, request.body);
+    return repository.backfillStockJournals({ businessId: input.businessId, dryRun: input.apply !== true });
   });
 
   app.get<{ Querystring: { itemId?: string } }>(

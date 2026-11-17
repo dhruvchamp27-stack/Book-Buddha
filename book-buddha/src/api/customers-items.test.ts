@@ -50,7 +50,16 @@ describe("customers / items / inventory API", () => {
       })).json<{ id: string }>().id;
       expect((await app.inject({ method: "POST", url: "/items", payload: { companyId, name: "Bad", unit: "each", mrpPaise: -1 } })).statusCode).toBe(400);
       expect((await app.inject({ method: "PATCH", url: `/items/${itemId}`, payload: { costPricePaise: 300 } })).statusCode).toBe(200);
-      await app.inject({ method: "POST", url: "/inventory/movements", payload: { itemId, quantity: 4, unitCostPaise: 300, movementType: "OPENING" } });
+      // R4c: opening stock now POSTS (Dr INVENTORY / Cr OPENING_BALANCE_EQUITY), and a journal
+      // entry needs a business - so without one the movement is REFUSED, in plain words, rather
+      // than silently moving stock the ledger knows nothing about.
+      const noBusiness = await app.inject({ method: "POST", url: "/inventory/movements", payload: { itemId, quantity: 4, unitCostPaise: 300, movementType: "OPENING" } });
+      expect(noBusiness.statusCode).toBe(400);
+      expect(noBusiness.json<{ error?: string }>().error).toMatch(/needs a business first/);
+      await app.inject({ method: "POST", url: "/businesses", payload: { companyId, name: "Books" } });
+      const movement = await app.inject({ method: "POST", url: "/inventory/movements", payload: { itemId, quantity: 4, unitCostPaise: 300, movementType: "OPENING" } });
+      expect(movement.statusCode).toBe(201);
+      expect(movement.json<{ journalEntryId?: string }>().journalEntryId).toMatch(/^je-stock-movement-/);
 
       const items = (await app.inject({ method: "GET", url: `/items?companyId=${companyId}` })).json<Array<Record<string, unknown>>>();
       expect(items[0]).toMatchObject({ sellingPricePaise: 500, costPricePaise: 300, reorderThreshold: 10, active: true });

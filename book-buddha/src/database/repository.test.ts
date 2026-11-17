@@ -334,7 +334,13 @@ describe("AccountingRepository", () => {
         expect.objectContaining({ account: "COGS", debitPaise: 3500 }),
         expect.objectContaining({ account: "INVENTORY", creditPaise: 3500 }),
       ]));
-      expect(repository.listJournalEntries()).toHaveLength(2);
+      // 2 before R4c (the invoice and its cost). The OPENING movement above now posts a third
+      // (Dr INVENTORY 2000 / Cr OPENING_BALANCE_EQUITY); the bare PURCHASE still posts nothing.
+      expect(repository.listJournalEntries()).toHaveLength(3);
+      expect(repository.getTrialBalance().find((r) => r.account === "OPENING_BALANCE_EQUITY"))
+        .toMatchObject({ debitPaise: 0, creditPaise: 2000 }); // 2 @ 1000
+      // The P&L is untouched by it: opening stock is EQUITY, never income or expense (S5-3).
+      expect(repository.getProfitAndLoss().netProfitPaise).toBe(9000 - 3500);
 
       const another = { ...invoice, id: "stock-invoice-2", number: "INV-STOCK-2" };
       repository.saveDraft(another);

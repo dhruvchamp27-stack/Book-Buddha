@@ -80,7 +80,19 @@ export interface JournalLine {
  * view walks documents by source type, and an opening set is not an invoice. It is also why the
  * cash view does not see opening income today - see the pinned test in opening-balances.test.ts.
  */
-export type JournalSourceType = "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "SUPPLIER_PAYMENT" | "OPENING_BALANCE";
+export type JournalSourceType =
+  | "INVOICE"
+  | "PURCHASE_BILL"
+  | "EXPENSE"
+  | "SUPPLIER_PAYMENT"
+  | "OPENING_BALANCE"
+  /**
+   * Hand-entered opening stock and stock adjustments (R4c). `source_id` is the stock movement's
+   * own id, which is also what makes the backfill idempotent: a movement has been posted exactly
+   * when a STOCK_MOVEMENT entry carries its id, so no link table and no new migration is needed.
+   * `source_type` has no CHECK constraint in SQLite, so this is a TypeScript widening only.
+   */
+  | "STOCK_MOVEMENT";
 
 export interface JournalEntry {
   readonly id: string;

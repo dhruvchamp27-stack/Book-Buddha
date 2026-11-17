@@ -169,7 +169,7 @@ describe("items", () => {
   });
 });
 
-describe("inventory reports (read-only, no journals)", () => {
+describe("inventory reports (read-only; the OPENING movements themselves now post - R4c)", () => {
   it("values stock FIFO, flags low stock, and totals sales by item", () => {
     const { repository, companyId, businessId } = setup();
     try {
@@ -180,7 +180,13 @@ describe("inventory reports (read-only, no journals)", () => {
       repository.addStockMovement({ itemId: tracked, movementType: "OPENING", quantity: 10, unitCostPaise: 100 });
       repository.addStockMovement({ itemId: tracked, movementType: "PURCHASE", quantity: 5, unitCostPaise: 120 });
       repository.addStockMovement({ itemId: noThreshold, movementType: "OPENING", quantity: 1, unitCostPaise: 10 });
-      expect(journalCount(repository)).toBe(0);
+      // CHANGED BY R4c, DELIBERATELY. This used to assert 0: hand-entered stock moved inventory
+      // with no GL effect at all, which is the carry-over R4c retires (owner ruling S5-3). The two
+      // OPENING movements now post Dr INVENTORY / Cr OPENING_BALANCE_EQUITY; the bare PURCHASE
+      // still posts nothing, because a real purchase posts its GL on the bill.
+      expect(journalCount(repository)).toBe(2);
+      expect(repository.getTrialBalance({ businessId }).find((r) => r.account === "OPENING_BALANCE_EQUITY"))
+        .toMatchObject({ debitPaise: 0, creditPaise: 1000 + 10 });
 
       const before = repository.getInventoryValuation();
       expect(before).toEqual([
@@ -188,7 +194,8 @@ describe("inventory reports (read-only, no journals)", () => {
         { itemId: noThreshold, itemName: "Pen", unit: "each", quantity: 1, valuePaise: 10 },
       ]);
       expect(repository.getLowStockItems()).toEqual([]);
-      expect(journalCount(repository)).toBe(0);
+      // The REPORTS still post nothing of their own: reading never writes.
+      expect(journalCount(repository)).toBe(2);
 
       repository.saveDraft({
         id: "inv-1", number: "INV-1", businessId, customerId, paymentAccount: "CASH", status: "DRAFT",

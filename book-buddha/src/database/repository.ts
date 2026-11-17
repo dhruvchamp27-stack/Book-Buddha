@@ -544,16 +544,66 @@ export interface FairSalesRow {
 
 export type StockMovementType = "OPENING" | "PURCHASE" | "ADJUSTMENT";
 
+/**
+ * What a hand-entered stock movement credits, per the owner's ruling S5-3. INVENTORY is always the
+ * debit. `PURCHASE` is `undefined` on purpose — NOT an oversight: a real purchase posts its GL on
+ * the bill, so posting here too would double-count the stock (R4c).
+ */
+const STOCK_MOVEMENT_OFFSET_ACCOUNT: Readonly<Record<StockMovementType, string | undefined>> = {
+  OPENING: OPENING_BALANCE_EQUITY_CODE,
+  ADJUSTMENT: "STOCK_ADJUSTMENT",
+  PURCHASE: undefined,
+};
+
 export interface StockMovement {
   readonly id: string;
   readonly itemId: string;
   readonly sourceId: string | null;
   /** Reporting tag only (one shared stock pool): the project this movement belongs to, if any. */
   readonly fairId?: string;
+  /** The journal entry this movement posted, when it posted one (OPENING and ADJUSTMENT, R4c). */
+  readonly journalEntryId?: string;
   readonly movementType: StockMovementType | "SALE" | "SALE_REVERSAL" | "PURCHASE_REVERSAL";
   readonly quantityDelta: number;
   readonly unitCostPaise: number;
   readonly occurredAt: string;
+}
+
+/** One hand-entered stock movement the R4c backfill would post, or has nothing to post for. */
+export interface StockJournalBackfillRow {
+  readonly movementId: string;
+  readonly itemId: string;
+  readonly itemName: string;
+  readonly movementType: StockMovementType;
+  readonly quantity: number;
+  readonly unitCostPaise: number;
+  /** quantity x unit cost: the ORIGINAL value of the layer, never what is left of it. */
+  readonly valuePaise: number;
+  /** The IST date of the movement, which is the date its journal entry carries. */
+  readonly entryDate: string;
+  readonly offsetAccount: string;
+  readonly fairId?: string;
+}
+
+export interface StockJournalBackfillRefusal extends StockJournalBackfillRow {
+  readonly reason: string;
+}
+
+export interface StockJournalBackfillPlan {
+  readonly businessId: string;
+  readonly toPost: readonly StockJournalBackfillRow[];
+  readonly refused: readonly StockJournalBackfillRefusal[];
+  /** Zero-value movements: nothing to post, not a refusal. */
+  readonly nothingToPost: readonly StockJournalBackfillRow[];
+  /** Source-less PURCHASE movements: inventory that moved with no journal entry and never will. */
+  readonly uncoveredPurchaseMovements: number;
+  readonly totalPaise: number;
+}
+
+export interface StockJournalBackfillResult extends StockJournalBackfillPlan {
+  readonly dryRun: boolean;
+  readonly postedCount: number;
+  readonly postedPaise: number;
 }
 
 export interface StockBalance {
@@ -1101,6 +1151,27 @@ export class AccountingRepository {
     }));
   }
 
+  /**
+   * Stock entered by hand (R4c). OPENING and ADJUSTMENT movements now post a journal entry, which
+   * retires the standing carry-over that hand-entered stock changed inventory with NO GL effect.
+   *
+   * S5-3 (owner ruling): opening stock is EQUITY (`Dr INVENTORY / Cr OPENING_BALANCE_EQUITY`),
+   * because it was bought before the books began; a mid-year ADJUSTMENT is a CURRENT-YEAR event
+   * (`Dr INVENTORY / Cr STOCK_ADJUSTMENT`, the expense account seeded at v13), so a recount
+   * reaches this year's P&L instead of sitting in equity for ever.
+   *
+   * A bare `PURCHASE` through this door still posts NOTHING, deliberately and unchanged: real
+   * purchases carry their GL on the BILL (`finalizePurchaseBill`), so posting here as well would
+   * double-count the inventory. A source-less PURCHASE movement is therefore the one remaining
+   * way inventory can move without a journal entry; `planStockJournalBackfill` counts those rows
+   * separately so nobody is told the ledger ties when it does not.
+   *
+   * DATE. `occurredOn` dates the JOURNAL ENTRY only. `stock_movements.occurred_at` stays the real
+   * insertion instant, because FIFO consumes layers `ORDER BY occurred_at` (`getStockLayers`): a
+   * back-dated layer would jump ahead of layers already consumed and silently re-measure COGS
+   * that is already posted. So the ledger can be dated truthfully while the stock layers stay
+   * strictly append-only. The financial-year lock applies through the door, on `occurredOn`.
+   */
   public addStockMovement(input: {
     itemId: string;
     movementType: StockMovementType;
@@ -1108,6 +1179,14 @@ export class AccountingRepository {
     unitCostPaise: number;
     /** Reporting tag only; OPENING and ADJUSTMENT movements only. Never affects FIFO or quantity. */
     fairId?: string;
+    /**
+     * Which business's ledger this posts to. Items belong to a COMPANY, not a business, so this
+     * cannot be derived from the item alone. Omitted, it is resolved by
+     * `resolveStockMovementBusiness` — which only succeeds when the company has exactly one.
+     */
+    businessId?: string;
+    /** The date the journal entry carries (YYYY-MM-DD, IST). Defaults to today. */
+    occurredOn?: string;
   }): StockMovement {
     if (input.fairId !== undefined && input.movementType === "PURCHASE") {
       throw new RepositoryValidationError("A project can be tagged on an opening or adjustment movement; purchases take the fair of their bill.");
@@ -1118,15 +1197,31 @@ export class AccountingRepository {
     if (!Number.isInteger(input.unitCostPaise) || input.unitCostPaise < 0) {
       throw new RepositoryValidationError("Stock cost must be a non-negative whole number of paise.");
     }
-    const item = this.db.prepare("SELECT track_stock FROM items WHERE id = ?").get(input.itemId) as { track_stock: number } | undefined;
+    const item = this.db.prepare("SELECT track_stock, company_id FROM items WHERE id = ?").get(input.itemId) as
+      | { track_stock: number; company_id: string }
+      | undefined;
     if (item === undefined) {
       throw new RepositoryValidationError(`Item ${input.itemId} was not found.`);
     }
     if (item.track_stock !== 1) {
       throw new RepositoryValidationError("Stock movements require an item with stock tracking enabled.");
     }
+    if (input.occurredOn !== undefined) this.assertIsoDate("The stock movement date", input.occurredOn);
+    if (input.fairId !== undefined) this.assertFairExists(input.fairId);
+
+    const valuePaise = input.quantity * input.unitCostPaise;
+    const offsetAccount = STOCK_MOVEMENT_OFFSET_ACCOUNT[input.movementType];
+    // Nothing to post for a bare PURCHASE (the bill posts it) or for a zero-value movement: the
+    // door rightly refuses a line with neither a debit nor a credit above zero.
+    const posts = offsetAccount !== undefined && valuePaise > 0;
+    const businessId = posts
+      ? this.resolveStockMovementBusiness(item.company_id, input.businessId, input.movementType)
+      : undefined;
+    const entryDate = input.occurredOn ?? istDateOf();
+    const movementId = randomUUID();
+    const journalEntryId = `je-stock-movement-${movementId}`;
     const movement: StockMovement = {
-      id: randomUUID(),
+      id: movementId,
       itemId: input.itemId,
       sourceId: null,
       movementType: input.movementType,
@@ -1134,13 +1229,182 @@ export class AccountingRepository {
       unitCostPaise: input.unitCostPaise,
       occurredAt: new Date().toISOString(),
       ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+      ...(posts ? { journalEntryId } : {}),
     };
-    if (input.fairId !== undefined) this.assertFairExists(input.fairId);
-    this.db.prepare(
-      "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(movement.id, movement.itemId, null, movement.movementType, movement.quantityDelta, movement.unitCostPaise, movement.occurredAt, input.fairId ?? null);
-    this.insertAuditEvent({ action: "stock.movement_added", entityId: movement.itemId, occurredAt: movement.occurredAt });
-    return movement;
+    // One transaction: either the movement AND its journal entry land, or neither does. A door
+    // refusal (a locked year, a deactivated account) must leave no stock row behind.
+    return this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(movement.id, movement.itemId, null, movement.movementType, movement.quantityDelta, movement.unitCostPaise, movement.occurredAt, input.fairId ?? null);
+      if (posts && offsetAccount !== undefined && businessId !== undefined) {
+        this.insertJournalEntry(
+          {
+            id: journalEntryId,
+            sourceId: movement.id,
+            sourceType: "STOCK_MOVEMENT",
+            description: `${input.movementType === "OPENING" ? "Opening stock" : "Stock adjustment"} as at ${entryDate}`,
+            isReversal: false,
+            lines: [
+              { account: "INVENTORY", debitPaise: valuePaise, creditPaise: 0 },
+              { account: offsetAccount, debitPaise: 0, creditPaise: valuePaise },
+            ],
+          },
+          { businessId, entryDate, ...fairDim(input.fairId) },
+        );
+      }
+      this.insertAuditEvent({ action: "stock.movement_added", entityId: movement.itemId, occurredAt: movement.occurredAt });
+      return movement;
+    })();
+  }
+
+  /**
+   * The ONE place a hand-entered stock movement's business is decided, live and in the backfill,
+   * so reversing this rule is a one-line change. Items belong to a company; journal entries need
+   * a business. Named explicitly, the business must exist and belong to the item's own company.
+   * Omitted, it is derived ONLY when the company has exactly one business — with two or more there
+   * is no honest guess to make, so it refuses and names them.
+   */
+  private resolveStockMovementBusiness(companyId: string, businessId: string | undefined, movementType: string): string {
+    if (businessId !== undefined) {
+      const { companyId: ownerCompanyId } = this.requireBusinessCompany(businessId);
+      if (ownerCompanyId !== companyId) {
+        throw new RepositoryValidationError("That business belongs to another company than the item.");
+      }
+      return businessId;
+    }
+    const businesses = this.db
+      .prepare("SELECT id, name FROM businesses WHERE company_id = ? ORDER BY name, id")
+      .all(companyId) as Array<{ id: string; name: string }>;
+    const only = businesses[0];
+    if (businesses.length === 1 && only !== undefined) return only.id;
+    if (businesses.length === 0) {
+      throw new RepositoryValidationError(
+        `A ${movementType === "OPENING" ? "opening stock" : "stock adjustment"} movement posts to the ledger, so this company needs a business first.`,
+      );
+    }
+    throw new RepositoryValidationError(
+      `This company has ${businesses.length} businesses (${businesses.map((b) => b.name).join(", ")}), so say which one this stock belongs to.`,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // The R4c backfill: give the OPENING and ADJUSTMENT movements already in a live database the
+  // journal entry they were never given. It goes through the ONE door like everything else, is
+  // IDEMPOTENT (a movement is "done" exactly when a STOCK_MOVEMENT entry carries its id, so a
+  // second run posts nothing), and REFUSES rather than forces a movement whose date falls in a
+  // locked financial year — listing each refusal instead of stopping at the first.
+  //
+  // Old movements have nothing to attribute them to: `stock_movements` has no business column and
+  // items belong to a company. So the caller NAMES the business, and only movements whose item
+  // belongs to that business's company are touched.
+  // ---------------------------------------------------------------------------
+
+  public planStockJournalBackfill(input: { businessId: string }): StockJournalBackfillPlan {
+    const { companyId } = this.requireBusinessCompany(input.businessId);
+    const rows = this.db
+      .prepare(
+        `SELECT m.id, m.item_id, m.movement_type, m.quantity_delta, m.unit_cost_paise, m.occurred_at, m.fair_id,
+                i.name AS item_name, i.company_id
+           FROM stock_movements m JOIN items i ON i.id = m.item_id
+          WHERE m.movement_type IN ('OPENING', 'ADJUSTMENT')
+            AND NOT EXISTS (
+                  SELECT 1 FROM journal_entries je
+                   WHERE je.source_type = 'STOCK_MOVEMENT' AND je.source_id = m.id)
+          ORDER BY m.occurred_at, m.rowid`,
+      )
+      .all() as Array<{
+        id: string; item_id: string; movement_type: string; quantity_delta: number; unit_cost_paise: number;
+        occurred_at: string; fair_id: string | null; item_name: string; company_id: string;
+      }>;
+    const toPost: StockJournalBackfillRow[] = [];
+    const refused: StockJournalBackfillRefusal[] = [];
+    const nothingToPost: StockJournalBackfillRow[] = [];
+    for (const row of rows) {
+      const valuePaise = row.quantity_delta * row.unit_cost_paise;
+      const entryDate = istDateOf(row.occurred_at);
+      const offsetAccount = STOCK_MOVEMENT_OFFSET_ACCOUNT[row.movement_type as StockMovementType];
+      const planned: StockJournalBackfillRow = {
+        movementId: row.id,
+        itemId: row.item_id,
+        itemName: row.item_name,
+        movementType: row.movement_type as StockMovementType,
+        quantity: row.quantity_delta,
+        unitCostPaise: row.unit_cost_paise,
+        valuePaise,
+        entryDate,
+        offsetAccount: offsetAccount ?? "",
+        ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
+      };
+      if (row.company_id !== companyId) {
+        // Another company's stock: not this business's to post, and silently posting it would put
+        // one company's inventory into another's ledger.
+        refused.push({ ...planned, reason: "The item belongs to another company than this business." });
+        continue;
+      }
+      if (offsetAccount === undefined) {
+        refused.push({ ...planned, reason: `A ${row.movement_type} movement has no offset account.` });
+        continue;
+      }
+      // A zero-value movement is not a refusal: there is simply no entry to post, now or ever.
+      if (valuePaise === 0) {
+        nothingToPost.push(planned);
+        continue;
+      }
+      if (!this.isPeriodOpen(input.businessId, entryDate)) {
+        refused.push({ ...planned, reason: `The financial year covering ${entryDate} is locked.` });
+        continue;
+      }
+      toPost.push(planned);
+    }
+    // Source-less PURCHASE movements are the one way inventory still moves with no journal entry
+    // (they are not bill-sourced, so nothing posted them). Counted, never posted, so a tie-out
+    // report can never claim the ledger agrees with the stock when it does not.
+    const uncovered = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM stock_movements m JOIN items i ON i.id = m.item_id
+          WHERE m.movement_type = 'PURCHASE' AND m.source_id IS NULL AND i.company_id = ?`,
+      )
+      .get(companyId) as { count: number };
+    return {
+      businessId: input.businessId,
+      toPost,
+      refused,
+      nothingToPost,
+      uncoveredPurchaseMovements: uncovered.count,
+      totalPaise: toPost.reduce((sum, row) => sum + row.valuePaise, 0),
+    };
+  }
+
+  /**
+   * Posts the plan above. `dryRun` defaults to TRUE: calling this without saying otherwise changes
+   * nothing and only reports what WOULD be posted.
+   */
+  public backfillStockJournals(input: { businessId: string; dryRun?: boolean }): StockJournalBackfillResult {
+    const plan = this.planStockJournalBackfill({ businessId: input.businessId });
+    const dryRun = input.dryRun !== false;
+    if (dryRun || plan.toPost.length === 0) return { ...plan, dryRun, postedCount: 0, postedPaise: 0 };
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      for (const row of plan.toPost) {
+        this.insertJournalEntry(
+          {
+            id: `je-stock-movement-${row.movementId}`,
+            sourceId: row.movementId,
+            sourceType: "STOCK_MOVEMENT",
+            description: `${row.movementType === "OPENING" ? "Opening stock" : "Stock adjustment"} as at ${row.entryDate} (backfilled)`,
+            isReversal: false,
+            lines: [
+              { account: "INVENTORY", debitPaise: row.valuePaise, creditPaise: 0 },
+              { account: row.offsetAccount, debitPaise: 0, creditPaise: row.valuePaise },
+            ],
+          },
+          { businessId: input.businessId, entryDate: row.entryDate, ...fairDim(row.fairId) },
+        );
+        this.insertAuditEvent({ action: "stock.journal_backfilled", entityId: row.movementId, occurredAt: now });
+      }
+    })();
+    return { ...plan, dryRun: false, postedCount: plan.toPost.length, postedPaise: plan.totalPaise };
   }
 
   public listStockMovements(itemId?: string): readonly StockMovement[] {

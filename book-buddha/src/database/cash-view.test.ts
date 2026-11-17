@@ -77,6 +77,22 @@ function sumOf(repository: AccountingRepository, account: string, filter: { from
     .reduce((total, r) => total + r.amountPaise, 0);
 }
 
+/**
+ * What ONE document put into an account, as against the account's whole balance. R4c gave the
+ * opening stock in `world()` a journal entry of its own, so the bill's contribution has to be
+ * measured on the bill's own entries for the owner's bill figures to stay exactly as he confirmed.
+ */
+function inventoryFromBillPaise(repository: AccountingRepository, billId: string): number {
+  const row = repository.db
+    .prepare(
+      `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS net
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE jl.account = 'INVENTORY' AND je.source_id = ?`,
+    )
+    .get(billId) as { net: number };
+  return row.net;
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -134,7 +150,13 @@ describe("cash view: the owner's acceptance figures", () => {
         const found = w.repository.getTrialBalance().find((r) => r.account === account);
         return (found?.debitPaise ?? 0) - (found?.creditPaise ?? 0);
       };
-      expect(tb("INVENTORY")).toBe(500000);
+      // THE OWNER'S FIGURE, UNCHANGED: the BILL puts 500000 paise of stock on the books. It is
+      // now measured on the bill's OWN entries, because R4c made the opening stock this test's
+      // `world()` seeds (30 x 60000 = 1800000) post to INVENTORY as well - it used to post
+      // nothing. The account total is asserted separately below so neither figure can drift.
+      expect(inventoryFromBillPaise(w.repository, billId)).toBe(500000);
+      expect(tb("INVENTORY")).toBe(500000 + 1_800_000); // the bill, plus the opening stock (R4c)
+      expect(tb("OPENING_BALANCE_EQUITY")).toBe(-1_800_000); // credited with that opening stock
       expect(tb("INPUT_IGST")).toBe(108000);
       // Payable outstanding unchanged by the toggle: 354000.
       expect(w.repository.getPayables().reduce((t, r) => t + r.outstandingPaise, 0)).toBe(354000);

@@ -8,13 +8,15 @@ import { stockMovementReport, transactionDetailByAccount, transactionListByDate 
  * R7 part one: the transaction and stock-movement reports. Money is paise (Rs 1 = 100 paise).
  *
  * THE WORKED WORLD (Rs). Items: Atlas and Banyan, both stock-tracked. Only `Date` is faked.
- *   01 Mar  Opening stock: Atlas 10 @ 50, Banyan 5 @ 20          (stock only - no journal entry)
- *   05 Mar  Purchase of Atlas 5 @ 60                            (stock only)
+ *   01 Mar  Opening stock: Atlas 10 @ 50 = 500 (Books A), Banyan 5 @ 20 = 100 (Books B)
+ *   05 Mar  Purchase of Atlas 5 @ 60                            (stock only - the bill posts GL)
  *   10 Mar  INV-S1  Alpha, Books A, Fair One: 4 Atlas @ 100 = 400. Cost 4 x 50 = 200.
  *   11 Mar  INV-S2  Beta, Books B, no fair:   2 Banyan @ 40 = 80.  Cost 2 x 20 = 40.
- *   12 Mar  Adjustment: +2 Atlas @ 55, tagged Fair One. Alpha pays 150 against INV-S1.
+ *   12 Mar  Adjustment: +2 Atlas @ 55 = 110, Books A, tagged Fair One. Alpha pays 150 on INV-S1.
  *   15 Mar  CN-S1 on INV-S1 returns 1 Atlas @ 100 (stock back at its cost of 50).
- * Seven journal entries result (invoice + cost for each sale, the payment, the note + its stock).
+ * TEN journal entries result: invoice + cost for each sale, the payment, the note + its stock
+ * (seven), and - new in R4c - the two opening-stock entries and the adjustment. A bare PURCHASE
+ * movement still posts nothing, because a real purchase posts its GL on the bill.
  */
 const PAISE = (rupees: number): number => rupees * 100;
 const at = (date: string): void => { vi.setSystemTime(new Date(`${date}T06:00:00.000Z`)); };
@@ -45,8 +47,10 @@ function world() {
     });
     repository.finalizeInvoice(id);
   };
-  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 10, unitCostPaise: PAISE(50) });
-  repository.addStockMovement({ itemId: banyan, movementType: "OPENING", quantity: 5, unitCostPaise: PAISE(20) });
+  // R4c: these now POST, so the business is named - this company has two, and the repository
+  // refuses to guess between them rather than picking one silently.
+  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 10, unitCostPaise: PAISE(50), businessId: bizA });
+  repository.addStockMovement({ itemId: banyan, movementType: "OPENING", quantity: 5, unitCostPaise: PAISE(20), businessId: bizB });
   at("2026-03-05");
   repository.addStockMovement({ itemId: atlas, movementType: "PURCHASE", quantity: 5, unitCostPaise: PAISE(60) });
   at("2026-03-10");
@@ -54,7 +58,7 @@ function world() {
   at("2026-03-11");
   invoice("INV-S2", bizB, beta, banyan, 2, 40, "2026-03-11");
   at("2026-03-12");
-  repository.addStockMovement({ itemId: atlas, movementType: "ADJUSTMENT", quantity: 2, unitCostPaise: PAISE(55), fairId: fair1 });
+  repository.addStockMovement({ itemId: atlas, movementType: "ADJUSTMENT", quantity: 2, unitCostPaise: PAISE(55), fairId: fair1, businessId: bizA });
   repository.recordPayment("INV-S1", PAISE(150), "2026-03-12");
   at("2026-03-15");
   repository.saveCreditNote({
@@ -99,40 +103,50 @@ describe("transactionListByDate", () => {
   it("lists every posted entry once, in date order, with its total value", () => {
     const w = world();
     const rows = transactionListByDate(w.repository.db);
-    expect(rows.map((r) => [r.date, r.entryId.replace(/payment-.*/, "payment-*"), r.description, r.sourceType, r.businessName, r.fairName, r.totalPaise])).toEqual([
+    expect(rows.map((r) => [r.date, r.entryId.replace(/payment-.*/, "payment-*").replace(/stock-movement-.*/, "stock-movement-*"), r.description, r.sourceType, r.businessName, r.fairName, r.totalPaise])).toEqual([
+      // R4c: opening stock and the recount now appear here, because they are now posted entries.
+      // They are listed under the business they were entered for, on their own transaction date.
+      ["2026-03-01", "je-stock-movement-*", "Opening stock as at 2026-03-01", "STOCK_MOVEMENT", "Books A", "(No fair)", PAISE(500)],
+      ["2026-03-01", "je-stock-movement-*", "Opening stock as at 2026-03-01", "STOCK_MOVEMENT", "Books B", "(No fair)", PAISE(100)],
       ["2026-03-10", "je-INV-S1", "Invoice INV-S1", "INVOICE", "Books A", "Fair One", PAISE(400)],
       ["2026-03-10", "je-inventory-INV-S1", expect.any(String), "INVOICE", "Books A", "Fair One", PAISE(200)],
       ["2026-03-11", "je-INV-S2", "Invoice INV-S2", "INVOICE", "Books B", "(No fair)", PAISE(80)],
       ["2026-03-11", "je-inventory-INV-S2", expect.any(String), "INVOICE", "Books B", "(No fair)", PAISE(40)],
+      ["2026-03-12", "je-stock-movement-*", "Stock adjustment as at 2026-03-12", "STOCK_MOVEMENT", "Books A", "Fair One", PAISE(110)],
       ["2026-03-12", "je-payment-*", expect.any(String), "INVOICE", "Books A", "Fair One", PAISE(150)],
       ["2026-03-15", "je-credit-note-CN-S1", expect.any(String), "INVOICE", "Books A", "Fair One", PAISE(100)],
       ["2026-03-15", "je-credit-note-inventory-CN-S1", expect.any(String), "INVOICE", "Books A", "Fair One", PAISE(50)],
     ]);
-    expect(rows[2]).toMatchObject({ businessId: w.bizB, fairId: null, isReversal: false, sourceId: "INV-S2" });
+    // Was rows[2] before R4c put the two opening-stock entries ahead of the invoices.
+    expect(rows[4]).toMatchObject({ businessId: w.bizB, fairId: null, isReversal: false, sourceId: "INV-S2" });
   });
 
   it("orders on the transaction date, not the posting timestamp", () => {
     const w = world();
-    // Posted today (the faked clock says 15 Mar) but DATED 1 Mar: it must sort first, not last.
+    // Posted today (the faked clock says 15 Mar) but DATED 1 Feb: it must sort first, not last.
+    // Dated 1 FEBRUARY, not 1 March, only to keep it clear of the opening-stock entries R4c now
+    // posts on 1 March - the point being tested is the ordering, not the tie-break.
     postJournalEntry(w.repository.db, {
       id: "je-backdated", sourceId: "INV-S1", description: "Back-dated", isReversal: false,
       lines: [{ account: "CASH", debitPaise: 100, creditPaise: 0 }, { account: "SALES", debitPaise: 0, creditPaise: 100 }],
-    }, { businessId: w.bizA, entryDate: "2026-03-01" });
+    }, { businessId: w.bizA, entryDate: "2026-02-01" });
     const rows = transactionListByDate(w.repository.db);
-    expect(rows[0]).toMatchObject({ entryId: "je-backdated", date: "2026-03-01" });
+    expect(rows[0]).toMatchObject({ entryId: "je-backdated", date: "2026-02-01" });
   });
 
-  it("each filter narrows it; omitting every filter returns all seven, untagged included", () => {
+  it("each filter narrows it; omitting every filter returns all ten, untagged included", () => {
     const w = world();
     const by = (f: Parameters<typeof transactionListByDate>[1]) => transactionListByDate(w.repository.db, f).length;
-    expect(by({})).toBe(7);
-    expect(by({ businessId: w.bizB })).toBe(2);
-    expect(by({ fairId: w.fair1 })).toBe(5);
-    expect(by({ customerId: w.beta })).toBe(2);
+    // 7 before R4c; the two opening-stock entries and the adjustment make 10.
+    expect(by({})).toBe(10);
+    expect(by({ businessId: w.bizB })).toBe(3); // + Banyan's opening stock
+    expect(by({ fairId: w.fair1 })).toBe(6); // + the adjustment, which is tagged Fair One
+    expect(by({ customerId: w.beta })).toBe(2); // a customer filter cannot match stock entries
     expect(by({ customerId: w.alpha })).toBe(5);
-    expect(by({ fromDate: "2026-03-12" })).toBe(3);
-    expect(by({ toDate: "2026-03-10" })).toBe(2);
+    expect(by({ fromDate: "2026-03-12" })).toBe(4); // + the adjustment on 12 Mar
+    expect(by({ toDate: "2026-03-10" })).toBe(4); // + both opening entries on 1 Mar
     expect(by({ fromDate: "2026-03-11", toDate: "2026-03-11" })).toBe(2);
+    expect(by({ fromDate: "2026-03-01", toDate: "2026-03-01" })).toBe(2); // the opening stock alone
   });
 
   it("refuses a reversed range, a bad date and an item filter", () => {
@@ -160,7 +174,12 @@ describe("transactionDetailByAccount", () => {
   it("groups journal lines by account with a running balance in the account's natural direction", () => {
     const w = world();
     const groups = transactionDetailByAccount(w.repository.db);
-    expect(groups.map((g) => g.account)).toEqual(["CASH", "COGS", "INVENTORY", "RECEIVABLES", "SALES"]);
+    // R4c added OPENING_BALANCE_EQUITY and STOCK_ADJUSTMENT: the opening stock and the recount
+    // now have a GL side, where before they moved stock and touched no account at all.
+    expect(groups.map((g) => g.account)).toEqual(["CASH", "COGS", "INVENTORY", "OPENING_BALANCE_EQUITY", "RECEIVABLES", "SALES", "STOCK_ADJUSTMENT"]);
+    // Opening stock: Atlas 500 + Banyan 100 credited to equity; the recount 110 to the expense.
+    expect(account(groups, "OPENING_BALANCE_EQUITY")).toMatchObject({ type: "EQUITY", totalDebitPaise: 0, totalCreditPaise: PAISE(600) });
+    expect(account(groups, "STOCK_ADJUSTMENT")).toMatchObject({ type: "EXPENSE", totalDebitPaise: 0, totalCreditPaise: PAISE(110) });
     // RECEIVABLES (an asset, debit-natural): +400, +80, -150 paid, -100 note.
     const receivables = account(groups, "RECEIVABLES");
     expect(receivables).toMatchObject({ accountName: expect.any(String), type: "ASSET", openingBalancePaise: 0, totalDebitPaise: PAISE(480), totalCreditPaise: PAISE(250), closingBalancePaise: PAISE(230) });
@@ -197,11 +216,12 @@ describe("transactionDetailByAccount", () => {
     const lines = (f: Parameters<typeof transactionDetailByAccount>[1]) =>
       transactionDetailByAccount(w.repository.db, f).reduce((t, g) => t + g.rows.length, 0);
     const all = lines({});
-    expect(all).toBe(14);
-    expect(lines({ businessId: w.bizB })).toBe(4);
-    expect(lines({ fairId: w.fair1 })).toBe(10);
-    expect(lines({ customerId: w.beta })).toBe(4);
-    expect(lines({ toDate: "2026-03-10" })).toBe(4);
+    // 14 before R4c; the three new entries are two lines each, so 20.
+    expect(all).toBe(20);
+    expect(lines({ businessId: w.bizB })).toBe(6); // + Banyan's opening stock (2 lines)
+    expect(lines({ fairId: w.fair1 })).toBe(12); // + the adjustment, tagged Fair One
+    expect(lines({ customerId: w.beta })).toBe(4); // unchanged: no customer behind a stock entry
+    expect(lines({ toDate: "2026-03-10" })).toBe(8); // + both opening entries on 1 Mar
     expect(lines({ fromDate: "2026-03-15" })).toBe(4);
   });
 
