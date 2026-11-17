@@ -905,8 +905,8 @@ describe("payment dates: a payment can be entered after the fact with its real d
  * THE SPLIT NOTE - the one shape every other test misses. S4-6 covers a note that is wholly
  * refundable, S4-3 one that is wholly offset; this is a note that is BOTH, which is the only
  * case that exercises the pro-rata division of a note's lines between what came off the bill
- * and what is owed back. That division is the assistant's modelling choice, so the figures here
- * are UNCONFIRMED until the owner works them by hand.
+ * and what is owed back. That division was the assistant's modelling choice; the owner CONFIRMED
+ * the figures on 2026-11-17 (S5-9) after reviewing the derivation in R3-WORKINGS.md.
  *
  * Invoice Rs 15,000 - goods Rs 10,000 costing Rs 6,000, plus freight Rs 5,000 carrying no cost.
  * Rs 14,000 collected in January. In February the freight is credited: only Rs 1,000 was still

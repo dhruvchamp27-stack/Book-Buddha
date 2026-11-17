@@ -316,8 +316,9 @@ describe("refunding a credit note", () => {
  * S4-5: setting a credit note against a LATER invoice instead of refunding it. Per S1-6 the
  * reduction is recognised when the credit is USED.
  *
- * FIGURES UNCONFIRMED. The owner ruled that this route ships in R3 but gave no worked example,
- * so the arithmetic below is the assistant's and needs his nod before it counts as acceptance.
+ * FIGURES CONFIRMED by the owner 2026-11-17 (S5-9), after he reviewed the derivation in
+ * R3-WORKINGS.md. His condition: the part of the target invoice the credit does NOT settle is
+ * recognised when it is COLLECTED - guarded at the end of the ACCEPTANCE test below.
  */
 describe("applying a credit note to a later invoice", () => {
   beforeEach(() => {
