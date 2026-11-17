@@ -237,6 +237,40 @@ describe("R8: cancelling a customer payment", () => {
     }
   });
 
+  it("holds up when the invoice was paid IN FULL first and the note became customer credit", () => {
+    const w = setup();
+    try {
+      w.repository.saveDraft(invoice(w, "INV-1", "2026-05-10", 100000));
+      w.repository.finalizeInvoice("INV-1");
+      // Paid in full FIRST, so the later note cannot reduce an outstanding balance -- it has to
+      // go to customer credit instead. This is the ordering that would expose a cancelled
+      // payment being counted in one place and not another.
+      const payment = w.repository.recordPayment("INV-1", 100000, "2026-05-20");
+      w.repository.saveCreditNote({
+        id: "cn1", invoiceId: "INV-1", number: "CN-1", reason: "Returned", status: "DRAFT",
+        lines: [{ itemId: w.itemId, description: "Returned", quantity: 1, unitPricePaise: 40000 }],
+      });
+      w.repository.finalizeCreditNote("cn1");
+
+      const openTotal = (): number => w.repository.getReceivables().reduce((sum, row) => sum + row.outstandingPaise, 0);
+      expect(openTotal()).toBe(balancePaise(w.repository, "RECEIVABLES"));
+
+      w.repository.cancelPayment(payment.id);
+
+      // The two definitions of "owed" still agree after the receipt is undone.
+      expect(openTotal()).toBe(balancePaise(w.repository, "RECEIVABLES"));
+      expect(w.repository.getReceivablesAgeing().totalOutstandingPaise).toBe(openTotal());
+
+      // And the guard that matters: cancelling the INVOICE now would reverse the whole 100,000
+      // of SALES while a 40,000 note stands against it, leaving SALES in DEBIT -- the exact
+      // defect cancelInvoice's own comment describes. It must refuse.
+      expect(() => w.repository.cancelInvoice("INV-1")).toThrow();
+      expect(balancePaise(w.repository, "SALES")).toBeLessThanOrEqual(0); // credit-normal: never debit
+    } finally {
+      w.repository.close();
+    }
+  });
+
   it("refuses to cancel into a locked year, because the reversal is dated today", () => {
     const w = setup();
     try {
@@ -329,6 +363,16 @@ describe("R8: cancelling a supplier payment", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]?.cancelledAt).not.toBeNull();
       expect(rows[0]?.cancellationReason).toBe("Paid twice by mistake");
+
+      // The supplier STATEMENT must agree with getPayables. listSupplierPayments keeps the
+      // cancelled row (nothing is deleted), so a statement that counted it would go on
+      // reducing the closing balance and quietly disagree with what is owed.
+      const statement = w.repository.getSupplierStatement(w.supplierId);
+      expect(statement.closingBalancePaise).toBe(70000);
+      expect(statement.rows.filter((row) => row.type === "PAYMENT")).toEqual([]);
+      expect(statement.closingBalancePaise)
+        .toBe(w.repository.getPayables().reduce((sum, row) => sum + row.outstandingPaise, 0));
+
       expect(() => w.repository.cancelPurchaseBill(bill.id)).not.toThrow();
 
       expect(() => w.repository.cancelSupplierPayment(payment.id)).toThrow(/already been cancelled/);

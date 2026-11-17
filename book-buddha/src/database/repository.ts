@@ -2369,6 +2369,19 @@ export class AccountingRepository {
           `This invoice has ${creditedPaise} paise of credit notes against it and cannot be cancelled: the cancellation would reverse more than the invoice still owes. Cancel its credit notes first, newest first.`,
         );
       }
+      // R8 — the guard above counts credit notes against the SETTLEMENT account, and on an
+      // invoice that was already paid in full a note does not go there: it posts to
+      // CUSTOMER_CREDITS instead, so that sum reads nil and this slipped straight through.
+      // Before R8 the path was unreachable, because a paid invoice could not be cancelled and
+      // the payment could not be undone. cancelPayment opens it, so it has to be closed here.
+      // Measured: pay 100,000, credit 40,000, cancel the payment, cancel the invoice -- SALES
+      // ended on a 40,000 DEBIT balance while CUSTOMER_CREDITS still owed the customer 40,000.
+      const liveNotes = this.listCreditNotes({ invoiceId, status: "FINALIZED" });
+      if (liveNotes.length > 0) {
+        throw new RepositoryValidationError(
+          `This invoice has ${liveNotes.length} finalized credit note${liveNotes.length === 1 ? "" : "s"} against it and cannot be cancelled: the cancellation would reverse the whole invoice while the credit still stands. Cancel ${liveNotes.length === 1 ? "it" : "them"} first, newest first.`,
+        );
+      }
       const originalEntry = this.getOriginalJournalEntry(invoiceId);
       const result = cancelInvoice(invoice, originalEntry);
       const inventoryCostPaise = this.restoreInvoiceStock(invoiceId, invoice.fairId);
@@ -4943,6 +4956,10 @@ export class AccountingRepository {
       items.push({ date: expense.expenseDate, type: "EXPENSE", documentId: expense.id, reference: expense.number, amountPaise: expense.totalPaise, order: 0 });
     }
     for (const payment of this.listSupplierPayments({ supplierId })) {
+      // R8: a CANCELLED payment never settled anything. listSupplierPayments returns it (the row
+      // is kept, never deleted), so the statement has to skip it here -- otherwise it would go
+      // on reducing the closing balance and the statement would disagree with getPayables.
+      if (payment.cancelledAt !== null) continue;
       const documentId = (payment.billId ?? payment.expenseId) as string;
       const reference = payment.billId !== null ? this.getPurchaseBill(payment.billId).number : this.getExpense(documentId).number;
       items.push({ date: payment.paidAt, type: "PAYMENT", documentId, reference, amountPaise: -payment.amountPaise, order: 1 });
