@@ -7,10 +7,22 @@ Resume Book Buddha — autonomous backend finish, session 9.
 properly. Build backend only. Screenshots are still wanted, but only of something that genuinely
 works — if a slice has no screen, say so plainly rather than sending a picture of something else.
 
+**THE ORDER HE SET FOR THIS SESSION, 2026-11-17, in his own words:**
+> "first will fix fair-sales first then R8 and R9 if possible or R8 with another R which small to
+> complete."
+
+So: **fair-sales → R8 → R9 if possible; if R9 turns out not to be possible, R8 plus a different
+small R.** Do not reorder this on your own judgement. BUILD ORDER below says what each means.
+
+**R<n> IS S<n> in `book-buddha/REMAINING_BUILD_PLAN.md`.** "R9" appears nowhere in `spec/` or
+`context/` — the letter changed, the numbering did not. R9 = S9 Attachments, R10 = S10
+Import/export, R11 = S11 Backup, R12 = S12 Banking, R13 = S13 Cash flow, R14 = S14 Archive.
+
 **MODEL USE (his instruction):** Sonnet writes code, Opus (the orchestrator) does the testing,
 Haiku with CBM updates and searches files and docs. **Session 8 did NOT follow this** — every
 slice landed in `repository.ts` and only one agent may hold that file at a time, so the
-orchestrator wrote it all. If you delegate, give Sonnet work OUTSIDE `repository.ts`.
+orchestrator wrote it all. **This session finally has work outside that file: `src/attachments/`
+(R9) is self-contained — that is the slice to hand to Sonnet.**
 
 **NEXT MIGRATION VERSION IS v18. v17 IS TAKEN** (`payment_cancellation`, session 8).
 
@@ -24,10 +36,12 @@ test files separately before changing any signature. `repository.ts` line 53 fai
 
 ## ORIENT
 1. `context/HOT.md` — auto-loaded, accurate as of session 8. Trust it.
-2. `git branch --show-current` must be `autonomous/book-buddha-finish`; tip **`f4773ab`** or later.
+2. `git branch --show-current` must be `autonomous/book-buddha-finish`; tip **`4427078`** or later.
 3. `context/decisions.md` — read **S8-1 … S8-4**, then S7-1, S7-2. S5-x and S6-x still apply.
-4. **~59 commits are UNPUSHED and that is deliberate.** A tool shell CANNOT push (no tty for the
-   credential manager). Only the owner pushes, from his own terminal. **Ask, never retry.**
+4. **EVERY commit on this branch is UNPUSHED and that is deliberate.** Count it, never quote a
+   number out of this file: `git log --oneline @{u}..HEAD | wc -l`. A tool shell CANNOT push (no
+   tty for the credential manager). Only the owner pushes, from his own terminal. **Ask, never
+   retry.**
 5. Gates (npm is NOT on PATH), from `book-buddha/`:
    `./node_modules/.bin/vitest.cmd run --root .` · `tsc.cmd` · `vite.cmd build`
    **Baseline: 41 files, 487 tests, tsc clean, build clean.**
@@ -69,29 +83,64 @@ test files separately before changing any signature. `repository.ts` line 53 fai
   when a note had gone to CUSTOMER_CREDITS, and the supplier statement kept counting a cancelled
   payment. Proved live on a genuine v16→v17 upgrade of a throwaway database.
 
-## BUILD ORDER
-1. **Finish R8.** Payment cancellation is done; three remain.
-   - **Bill discount** — header-level discount / extra charge on a purchase bill, mirroring the
-     invoice. Needs its own migration, **v18**. On a bill with tracked-stock lines, check the
-     INVENTORY ledger still equals the stock-layer value afterwards.
-   - **Supplier refunds** — the mirror of `recordCreditNoteRefund`.
-   - **Purchase returns — BLOCKED on S7-2.** They take stock OUT, and a stock movement still
-     cannot be reversed or entered negative. **Put S7-2 to the owner before starting.**
-2. **R7b leftovers.** `/reports/fair-sales` and `/reports/sales-by-item` still ignore credit notes
-   and have no filters, so **`/reports/fair-sales` answers 60,000 where the new
-   `/reports/sales-by-fair` answers 40,000 on the same books — two routes, two answers.** Fix or
-   retire the old ones. There is a `getSupplierStatement` with no customer equivalent.
-3. **R10** import/export · **R11** backup/restore · **R12** banking · **R13** cash flow ·
-   **R14** archive.
+## BUILD ORDER — his order, not yours to change
+### 1. FIX fair-sales. This is first.
+`/reports/fair-sales` (`server.ts:1390`) and `/reports/sales-by-item` (`server.ts:1355`) ignore
+credit notes and take no filters, so **`/reports/fair-sales` answers 60,000 where the newer
+`/reports/sales-by-fair` answers 40,000 on the same books — two routes, two answers to the same
+question.** He said **fix**, so fix them; do not retire or delete a route to make the discrepancy
+go away.
+- **Reproduce both figures before changing a line.** Seed the books, call both routes, write the
+  two numbers down. You cannot prove a fix you never saw fail.
+- **Before changing any response shape, grep `web/src` AND every test file for both route paths
+  and both method names.** `web/` is in no gate, so a renamed field there fails silently at
+  runtime; CBM's `fast` index does not see test files at all.
+- **If an `ACCEPTANCE …` figure moves, STOP and look.** Do not edit the expectation. In session 8
+  a red test was right and the new code was wrong.
+- `getSupplierStatement` still has no customer equivalent. Worth adding here if time allows; say
+  so plainly if you skip it.
+
+### 2. R8 — three of four AT BEST, and that is not R8 closed.
+- **Bill discount** — header-level discount / extra charge on a purchase bill, mirroring the
+  invoice. Needs its own migration, **v18**. On a bill with tracked-stock lines, check the
+  INVENTORY ledger still equals the stock-layer value afterwards.
+- **Supplier refunds** — the mirror of `recordCreditNoteRefund`.
+- **Purchase returns — BLOCKED on S7-2.** They take stock OUT, and a stock movement still cannot
+  be reversed or entered negative. **R8 cannot be reported as finished until he rules on S7-2.**
+  Put it to him in finance terms early in the session; do not start purchase returns without it.
+
+### 3. R9 attachments — CONDITIONAL, and genuinely small. Check the gate FIRST.
+The storage engine **already exists and was built in session 2** (`4033ecb`, migration v7):
+`src/attachments/attachments.ts`, 267 lines — `storeAttachment`, `listAttachments`,
+`getAttachment`, `getAttachmentPath`, `deleteAttachment`, plus `ATTACHMENT_ENTITY_TYPES` and a
+10 MB default cap. Its table is in `src/database/attachments-schema.ts` and is already migrated.
+**It has NO importer anywhere outside its own folder — zero routes, zero repository calls.** This
+is exactly the hole R7b had: built, tested, unreachable. What remains is wiring plus HTTP tests,
+which is why it is the small one.
+- **FIRST STEP, before planning anything: grep `book-buddha/package.json` for `multipart` and
+  `busboy`. There is no `@fastify/multipart` and no multipart parser of any kind.** So a real file
+  upload needs either a dependency install — **which needs his say-so, so ask and wait** — or a
+  base64 JSON body, which is honest for a 10 MB offline app and needs no install.
+- **If it needs an install and he is not there to approve it, this is where his fallback applies:
+  "or R8 with another R which small to complete."** Say plainly that R9 is gated on an install and
+  take the smallest other R instead, rather than installing anything unasked.
+- `src/attachments/` is **outside `repository.ts`** — the one slice this session can hand to Sonnet
+  without two agents fighting over the same file.
+
+### 4. After that
+**R10** import/export · **R11** backup/restore · **R12** banking · **R13** cash flow ·
+**R14** archive. Their one-paragraph definitions are in `book-buddha/REMAINING_BUILD_PLAN.md`
+under S10–S14.
 
 ## OWNER ACTION OUTSTANDING
+- **S7-2 is the one to put to him first this session**, because it is what stops R8 closing: a
+  stock movement cannot be reversed, deleted or entered negative, so a mistyped opening quantity
+  is wrong in equity with no correction path — and purchase returns cannot be built over it.
 - **`book-buddha/R4C-WORKINGS.md` HAS FOUR DECISIONS FOR HIM**, plus the R4c acceptance figures.
 - **S8-1 — put this to him in finance terms:** cancelling a receipt corrects the ACCRUAL books
   today, but the CASH view is derived rather than posted, so **the cash-basis profit of the month
   the money came in changes retrospectively**, and the financial-year lock does not stop it
   because nothing is posted for the lock to refuse. Pinned in a test, deliberately not changed.
-- **S7-2** — a stock movement cannot be reversed, deleted or entered negative, so a mistyped
-  opening quantity is wrong in equity with no correction path. Blocks purchase returns.
 - **S8-4** — a credit note has no date of its own, so a return cannot be back-dated; it always
   lands in today's month.
 - **ACCEPTANCE for 7d, 8c, R1, R2, R4, R4b, R4c, R5 and R7 all await him. Only R3 is signed off.**
@@ -124,6 +173,10 @@ test files separately before changing any signature. `repository.ts` line 53 fai
 - **`perl -i -pe` interpolates `$` in the replacement.** Session 8 silently ate a `${item.date}`
   this way and tsc still passed, because the result was valid TypeScript and simply wrong. Use
   the Edit tool or a Python patch for anything containing `$`.
+- **Write these markdown files with the Write tool, not a shell heredoc.** They are full of
+  backticks and apostrophes; session 8 tried a heredoc here and bash died on an unmatched quote,
+  and an UNQUOTED heredoc would have been worse — it runs each backticked span as a command and
+  silently replaces it with the output. Same class as the `perl` trap, and nothing gates markdown.
 
 ## HOW TO WORK (this is what worked in sessions 6–8 — keep doing it)
 - **Reproduce every suspected defect before fixing it**, and **mutation-test the important ones**:
@@ -159,7 +212,7 @@ Roughly **52% of a first working MVP**, about **82% of the backend**. **17 migra
 ledger; the sales and transaction reports are finally reachable; receivables and payables age
 properly; a payment can be undone. The UI is still ONE proof-of-concept page plus the login gate —
 **and that is deliberate: the owner will build the frontend himself.** PDF/print, import, export,
-backup and restore do not exist at all.
+backup and restore do not exist at all, and attachments exist but cannot be reached over the API.
 
 REALISM — fewer slices done properly beats all of them rushed. Say exactly where you stopped and
 what is unverified; **report nothing as done that is not gated.**
