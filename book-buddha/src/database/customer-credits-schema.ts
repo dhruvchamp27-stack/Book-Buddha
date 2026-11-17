@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { ACCOUNT_ROLES, ACCOUNT_TYPES, SEED_ACCOUNTS } from "./chart-accounts-schema.js";
+import { ACCOUNT_ROLES, ACCOUNT_TYPES, V11_SEED_ACCOUNTS } from "./chart-accounts-schema.js";
 
 /**
  * v11 and v12 - the credit-discharge slice (S4-1, S4-4, S4-5).
@@ -133,7 +133,8 @@ function seedAccountsAddedSinceV9(db: Database.Database): void {
   const insert = db.prepare(
     "INSERT INTO chart_accounts (code, company_id, name, type, role, parent_code, active, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?)",
   );
-  for (const account of SEED_ACCOUNTS) {
+  // The FROZEN v11 list, never the live SEED_ACCOUNTS: see V11_SEED_ACCOUNTS for why.
+  for (const account of V11_SEED_ACCOUNTS) {
     const row = existing.get(account.code);
     if (row === undefined) {
       insert.run(account.code, account.name, account.type, account.role ?? null, now, now);

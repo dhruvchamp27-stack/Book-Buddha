@@ -35,6 +35,7 @@ import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { reportConditions } from "./report-filters-sql.js";
 import { ACCOUNT_TYPES, SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
+import { OPENING_BALANCE_EQUITY_CODE, OPENING_CONTROL_ROLES } from "./opening-balances-schema.js";
 import type {
   ExpenseCategoryRecord,
   ExpenseInput,
@@ -652,6 +653,27 @@ export class AuthenticationError extends RepositoryValidationError {
     this.statusCode = statusCode;
     this.name = "AuthenticationError";
   }
+}
+
+/** One typed opening line: the owner supplies exactly one of the two sides. */
+export interface OpeningBalanceLineInput {
+  readonly account: string;
+  readonly debitPaise: number;
+  readonly creditPaise: number;
+}
+
+export interface OpeningBalanceSet {
+  readonly id: string;
+  readonly businessId: string;
+  readonly asAt: string;
+  readonly journalEntryId: string;
+  /** The date the set was reversed, or null while it is live. */
+  readonly reversedAt: string | null;
+  readonly createdAt: string;
+  /** What the owner typed. */
+  readonly lines: readonly OpeningBalanceLineInput[];
+  /** The OPENING_BALANCE_EQUITY line the system added to balance, or null when none was needed. */
+  readonly balancingLine: OpeningBalanceLineInput | null;
 }
 
 export class AccountingRepository {
@@ -4358,6 +4380,191 @@ export class AccountingRepository {
     } catch {
       return false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Opening balances (R4a, section 14). ONE journal entry dated asAt, posted through the one door,
+  // with OPENING_BALANCE_EQUITY as the plug. Corrected by reversal only.
+  // ---------------------------------------------------------------------------
+
+  public saveOpeningBalances(input: {
+    id: string;
+    businessId: string;
+    asAt: string;
+    lines: readonly OpeningBalanceLineInput[];
+  }): string {
+    const { companyId } = this.requireBusinessCompany(input.businessId);
+    this.assertIsoDate("The opening balance date", input.asAt);
+    if (input.lines.length === 0) {
+      throw new RepositoryValidationError("Opening balances need at least one line.");
+    }
+    const classify = this.db.prepare("SELECT code, company_id, role, active FROM chart_accounts WHERE code = ?");
+    for (const line of input.lines) {
+      if (!Number.isInteger(line.debitPaise) || !Number.isInteger(line.creditPaise) || line.debitPaise < 0 || line.creditPaise < 0) {
+        throw new RepositoryValidationError(`Opening balance for ${line.account} must be a non-negative whole number of paise.`);
+      }
+      if ((line.debitPaise > 0) === (line.creditPaise > 0)) {
+        throw new RepositoryValidationError(`Opening balance for ${line.account} must have exactly one of debit or credit above zero.`);
+      }
+      if (line.account === OPENING_BALANCE_EQUITY_CODE) {
+        throw new RepositoryValidationError(
+          "Opening Balance Equity cannot be typed in: it is the plug the system fills in to balance the other lines.",
+        );
+      }
+      // Role comes from the CHART by lookup, never from a list of codes.
+      const account = classify.get(line.account) as
+        | { code: string; company_id: string | null; role: AccountRole | null; active: number }
+        | undefined;
+      if (account === undefined) {
+        throw new RepositoryValidationError(`Account ${line.account} does not exist in the chart of accounts.`);
+      }
+      if (account.active === 0) {
+        throw new RepositoryValidationError(`Account ${line.account} is not active. Reactivate it, or pick another account.`);
+      }
+      if (account.company_id !== null && account.company_id !== companyId) {
+        throw new RepositoryValidationError(`Account ${line.account} belongs to another company.`);
+      }
+      if (account.role !== null && (OPENING_CONTROL_ROLES as readonly string[]).includes(account.role)) {
+        throw new RepositoryValidationError(
+          `Account ${line.account} cannot be opened here: its balance comes from its own sub-ledger (opening customer balances, supplier balances or stock). Entering it here would leave the ledger out of step with that sub-ledger.`,
+        );
+      }
+    }
+    if (this.db.prepare("SELECT 1 FROM opening_balances WHERE id = ?").get(input.id) !== undefined) {
+      throw new RepositoryValidationError(`Opening balance set ${input.id} already exists.`);
+    }
+    const live = this.db
+      .prepare("SELECT id FROM opening_balances WHERE business_id = ? AND reversed_at IS NULL")
+      .get(input.businessId) as { id: string } | undefined;
+    if (live !== undefined) {
+      throw new RepositoryValidationError(
+        `This business already has opening balances (${live.id}). Reverse them first, then enter the corrected set.`,
+      );
+    }
+
+    const debitTotal = input.lines.reduce((total, line) => total + line.debitPaise, 0);
+    const creditTotal = input.lines.reduce((total, line) => total + line.creditPaise, 0);
+    const gap = debitTotal - creditTotal; // > 0: debits exceed credits, so the plug is a credit
+    const plug: JournalEntry["lines"] =
+      gap === 0
+        ? []
+        : [{ account: OPENING_BALANCE_EQUITY_CODE, debitPaise: gap < 0 ? -gap : 0, creditPaise: gap > 0 ? gap : 0 }];
+
+    const journalEntryId = `je-opening-balance-${input.id}`;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      // sourceType: a type of its own, so the cash view keys it as its own "document" and it can
+      // never be mistaken for an invoice (the default). OPENING_BALANCE is now a member of
+      // JournalSourceType. NOTE: the cash view does not visit this source type at all - it walks
+      // invoices, bills and expenses - so opening INCOME is currently DROPPED from the cash P&L,
+      // not passed through on the opening date. Pinned in opening-balances.test.ts; honouring
+      // S5-2 (income only where opening Sales sit behind a receivable) needs the walk extended.
+      this.insertJournalEntry(
+        {
+          id: journalEntryId,
+          sourceId: input.id,
+          sourceType: "OPENING_BALANCE",
+          description: `Opening balances as at ${input.asAt}`,
+          isReversal: false,
+          lines: [...input.lines.map((l) => ({ account: l.account, debitPaise: l.debitPaise, creditPaise: l.creditPaise })), ...plug],
+        },
+        { businessId: input.businessId, entryDate: input.asAt },
+      );
+      this.db
+        .prepare("INSERT INTO opening_balances (id, business_id, as_at, journal_entry_id, reversed_at, created_at) VALUES (?, ?, ?, ?, NULL, ?)")
+        .run(input.id, input.businessId, input.asAt, journalEntryId, now);
+      const insertLine = this.db.prepare(
+        "INSERT INTO opening_balance_lines (id, opening_balance_id, account, debit_paise, credit_paise) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const line of input.lines) insertLine.run(randomUUID(), input.id, line.account, line.debitPaise, line.creditPaise);
+      appendAuditEvent(this.db, {
+        action: "OPENING_BALANCES_SAVED",
+        entityId: input.id,
+        entityType: "opening_balances",
+        occurredAt: now,
+        afterValues: {
+          businessId: input.businessId,
+          asAt: input.asAt,
+          lines: input.lines.length,
+          debitPaise: debitTotal,
+          creditPaise: creditTotal,
+          balancingPaise: Math.abs(gap),
+        },
+      });
+    })();
+    return input.id;
+  }
+
+  /** Posts the negation of the set's entry, dated `reversedOn`. The original is never touched. */
+  public reverseOpeningBalances(input: { id: string; reversedOn: string }): JournalEntry {
+    const header = this.db
+      .prepare("SELECT id, business_id, as_at, journal_entry_id, reversed_at FROM opening_balances WHERE id = ?")
+      .get(input.id) as
+      | { id: string; business_id: string; as_at: string; journal_entry_id: string; reversed_at: string | null }
+      | undefined;
+    if (header === undefined) throw new RepositoryValidationError(`Opening balance set ${input.id} was not found.`);
+    if (header.reversed_at !== null) {
+      throw new RepositoryValidationError(`Opening balance set ${input.id} has already been reversed on ${header.reversed_at}.`);
+    }
+    this.assertIsoDate("The reversal date", input.reversedOn);
+    if (input.reversedOn < header.as_at) {
+      throw new RepositoryValidationError(`The reversal date cannot be before the opening balance date ${header.as_at}.`);
+    }
+    return this.db.transaction(() => {
+      const lines = this.db
+        .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
+        .all(header.journal_entry_id) as Array<{ account: string; debit_paise: number; credit_paise: number }>;
+      const reversal: JournalEntry = {
+        id: `je-opening-balance-reversal-${header.id}`,
+        sourceId: header.id,
+        sourceType: "OPENING_BALANCE",
+        description: `Reversal of opening balances as at ${header.as_at}`,
+        isReversal: true,
+        lines: lines.map((l) => ({ account: l.account, debitPaise: l.credit_paise, creditPaise: l.debit_paise })),
+      };
+      this.insertJournalEntry(reversal, { businessId: header.business_id, entryDate: input.reversedOn });
+      this.db.prepare("UPDATE opening_balances SET reversed_at = ? WHERE id = ?").run(input.reversedOn, header.id);
+      appendAuditEvent(this.db, {
+        action: "OPENING_BALANCES_REVERSED",
+        entityId: header.id,
+        entityType: "opening_balances",
+        occurredAt: new Date().toISOString(),
+        beforeValues: { reversedAt: null },
+        afterValues: { reversedAt: input.reversedOn },
+      });
+      return reversal;
+    })();
+  }
+
+  /** Every set for the business, oldest first (a reversed one stays as history), with its lines. */
+  public getOpeningBalances(businessId: string): readonly OpeningBalanceSet[] {
+    this.requireBusiness(businessId);
+    const headers = this.db
+      .prepare(
+        "SELECT id, business_id, as_at, journal_entry_id, reversed_at, created_at FROM opening_balances WHERE business_id = ? ORDER BY created_at, rowid",
+      )
+      .all(businessId) as Array<{ id: string; business_id: string; as_at: string; journal_entry_id: string; reversed_at: string | null; created_at: string }>;
+    const linesOf = this.db.prepare(
+      "SELECT account, debit_paise, credit_paise FROM opening_balance_lines WHERE opening_balance_id = ? ORDER BY rowid",
+    );
+    const plugOf = this.db.prepare(
+      "SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? AND account = ?",
+    );
+    type Row = { account: string; debit_paise: number; credit_paise: number };
+    const asLine = (r: Row): OpeningBalanceLineInput => ({ account: r.account, debitPaise: r.debit_paise, creditPaise: r.credit_paise });
+    return headers.map((h) => {
+      const plug = plugOf.get(h.journal_entry_id, OPENING_BALANCE_EQUITY_CODE) as Row | undefined;
+      return {
+        id: h.id,
+        businessId: h.business_id,
+        asAt: h.as_at,
+        journalEntryId: h.journal_entry_id,
+        reversedAt: h.reversed_at,
+        createdAt: h.created_at,
+        lines: (linesOf.all(h.id) as Row[]).map(asLine),
+        balancingLine: plug === undefined ? null : asLine(plug),
+      };
+    });
   }
 
   private requireBusiness(businessId: string): void {

@@ -75,7 +75,12 @@ export interface JournalLine {
   readonly creditPaise: number;
 }
 
-export type JournalSourceType = "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "SUPPLIER_PAYMENT";
+/**
+ * OPENING_BALANCE is deliberately its own source type rather than defaulting to INVOICE: the cash
+ * view walks documents by source type, and an opening set is not an invoice. It is also why the
+ * cash view does not see opening income today - see the pinned test in opening-balances.test.ts.
+ */
+export type JournalSourceType = "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "SUPPLIER_PAYMENT" | "OPENING_BALANCE";
 
 export interface JournalEntry {
   readonly id: string;

@@ -101,8 +101,8 @@ const V9_SEED_ACCOUNTS: readonly SeedAccount[] = [
 ];
 
 /**
- * The live chart: what should exist TODAY. FROZEN v9 list above, plus everything later migrations
- * add. v11 adds two accounts:
+ * FROZEN AT v11 - do not add to this list, ever. It is what v11 (`applyCustomerCreditsSchema`)
+ * seeds: the frozen v9 list with UNCATEGORIZED renamed, plus the two accounts v11 added.
  *
  * - CUSTOMER_CREDITS - money owed BACK to a customer, created when a credit note is worth more
  *   than the invoice still owes (S4-1). It is a liability, and it is discharged either by
@@ -110,12 +110,34 @@ const V9_SEED_ACCOUNTS: readonly SeedAccount[] = [
  * - UNCATEGORIZED_INCOME - the owner's S4-4 ruling. UNCATEGORIZED keeps its code (codes are
  *   immutable under S2-1) and becomes explicitly the EXPENSE side; an uncategorised bank RECEIPT
  *   now has somewhere of its own to land instead of reading as a negative expense.
+ *
+ * WHY FROZEN: v11 used to loop over the live SEED_ACCOUNTS. Appending an account there would hand
+ * it to every FRESH database at v11, so the migration that is meant to add it would never run its
+ * seeding in any test, and its insert would execute for the first time on the owner's real
+ * database. This is the same trap V9_ACCOUNT_ROLES / V9_SEED_ACCOUNTS were frozen to prevent.
+ * Accounts added later belong in a V<n>_ADDED_ACCOUNTS list seeded by the migration that adds them.
  */
-export const SEED_ACCOUNTS: readonly SeedAccount[] = [
+export const V11_SEED_ACCOUNTS: readonly SeedAccount[] = [
   ...V9_SEED_ACCOUNTS.map((a) => (a.code === "UNCATEGORIZED" ? { ...a, name: "Uncategorised Expense" } : a)),
   { code: "CUSTOMER_CREDITS", name: "Customer Credits", type: "LIABILITY", role: "CUSTOMER_CREDITS" },
   { code: "UNCATEGORIZED_INCOME", name: "Uncategorised Income", type: "INCOME" },
 ];
+
+/**
+ * FROZEN AT v13 - the accounts v13 (`applyOpeningBalancesSchema`) seeds, and ONLY those. v13 reads
+ * this list, never the live one, for the reason given on V11_SEED_ACCOUNTS.
+ *
+ * - STOCK_ADJUSTMENT - S5-3: a mid-year stock ADJUSTMENT posts against this EXPENSE account, while
+ *   OPENING stock posts Dr INVENTORY / Cr OPENING_BALANCE_EQUITY. EXPENSE with NO role, so the
+ *   role CHECK needs no widening and v13 needs no table rebuild. This slice only seeds the
+ *   account; the stock posting itself is a later slice.
+ */
+export const V13_ADDED_ACCOUNTS: readonly SeedAccount[] = [
+  { code: "STOCK_ADJUSTMENT", name: "Stock Adjustment", type: "EXPENSE" },
+];
+
+/** The live chart: what should exist TODAY. The frozen lists above, in migration order. */
+export const SEED_ACCOUNTS: readonly SeedAccount[] = [...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [
   "chart_accounts_no_delete",

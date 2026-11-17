@@ -128,9 +128,10 @@ describe("v11 rebuild over a realistic chart", () => {
         expect(after).toEqual(before);
       }
     }
-    // And exactly the two new system accounts were added, nothing else.
+    // And exactly the new system accounts were added, nothing else: v11's two (CUSTOMER_CREDITS,
+    // UNCATEGORIZED_INCOME) plus v13's one (STOCK_ADJUSTMENT, S5-3), because this runs the FULL list.
     const addedCodes = rowsAfter.filter((r) => !rowsBefore.some((b) => b.code === r.code)).map((r) => r.code);
-    expect(addedCodes.sort()).toEqual(["CUSTOMER_CREDITS", "UNCATEGORIZED_INCOME"]);
+    expect(addedCodes.sort()).toEqual(["CUSTOMER_CREDITS", "STOCK_ADJUSTMENT", "UNCATEGORIZED_INCOME"]);
 
     // Integrity.
     expect(db.pragma("foreign_key_check")).toEqual([]);

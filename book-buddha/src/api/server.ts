@@ -88,6 +88,14 @@ const accountRenameInput = z.object({ name: name });
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be a date written as YYYY-MM-DD");
 const financialYearInput = z.object({ businessId: id, startsOn: isoDate, endsOn: isoDate });
 const lockInput = z.object({ locked: z.boolean(), reason: z.string().trim().min(1).optional() });
+const openingBalanceInput = z.object({
+  businessId: id,
+  asAt: isoDate,
+  lines: z
+    .array(z.object({ account: id, debitPaise: z.number().int().nonnegative(), creditPaise: z.number().int().nonnegative() }))
+    .min(1),
+});
+const openingBalanceReverseInput = z.object({ reversedOn: isoDate });
 const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
@@ -537,6 +545,25 @@ export function buildApi(repository: AccountingRepository): FastifyInstance {
     const input = parseBody(lockInput, request.body);
     repository.setFinancialYearLocked(request.params.id, input.locked, input.reason);
     return { ok: true };
+  });
+
+  /** Opening balances (R4a): one journal entry dated `asAt`, OPENING_BALANCE_EQUITY as the plug. */
+  app.post("/opening-balances", async (request, reply) => {
+    const input = parseBody(openingBalanceInput, request.body);
+    const openingId = repository.saveOpeningBalances({ id: randomUUID(), ...input });
+    return reply.code(201).send({ id: openingId });
+  });
+
+  app.get<{ Querystring: { businessId?: string } }>("/opening-balances", async (request) => {
+    const businessId = request.query.businessId;
+    if (businessId === undefined) throw new RepositoryValidationError("businessId is required.");
+    return repository.getOpeningBalances(businessId);
+  });
+
+  /** Correction is by reversal only: the original set and its journal entry are never edited or deleted. */
+  app.post<{ Params: { id: string } }>("/opening-balances/:id/reverse", async (request) => {
+    const input = parseBody(openingBalanceReverseInput, request.body);
+    return { journalEntry: repository.reverseOpeningBalances({ id: request.params.id, reversedOn: input.reversedOn }) };
   });
 
   app.get<{ Querystring: { companyId?: string; includeInactive?: string } }>("/accounts", async (request) => {

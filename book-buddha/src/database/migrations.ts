@@ -8,6 +8,7 @@ import { applyAuditChainSchema } from "./audit-chain-schema.js";
 import { applyChartOfAccountsSchema } from "./chart-accounts-schema.js";
 import { applyFinancialYearsSchema } from "./financial-years-schema.js";
 import { applyCreditDischargeSchema, applyCustomerCreditsSchema } from "./customer-credits-schema.js";
+import { applyOpeningBalancesSchema } from "./opening-balances-schema.js";
 
 export interface Migration {
   version: number;
@@ -179,6 +180,17 @@ export const migrations: readonly Migration[] = [
     // against a later invoice (S4-5) - plus credit_notes.refundable_paise, which persists how
     // much of a note was NOT set against an open balance. Default (transactional).
     up: applyCreditDischargeSchema,
+  },
+  {
+    version: 13,
+    name: "opening_balances",
+    // Additive: the opening-balance set and its lines (S14), plus the accounts added since v11 -
+    // STOCK_ADJUSTMENT, the expense side of a mid-year stock adjustment (S5-3). It seeds from the
+    // FROZEN V13_ADDED_ACCOUNTS, never the live list: v11 reads V11_SEED_ACCOUNTS for the same
+    // reason, so a fresh database and the owner's take the identical path. The role CHECK is
+    // untouched (STOCK_ADJUSTMENT is an EXPENSE with no role), so no table rebuild is needed and
+    // this can stay transactional.
+    up: applyOpeningBalancesSchema,
   },
 ];
 
