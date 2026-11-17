@@ -110,6 +110,13 @@ export interface Payment {
   readonly amountPaise: number;
   readonly paymentAccount: "CASH";
   readonly paidAt: string;
+  /**
+   * R8. When this payment was cancelled, or null while it stands. A cancelled payment is NEVER
+   * deleted: the row stays, its original journal entry stays exactly as posted, and a reversing
+   * entry is posted beside it. Every sum of what has been paid excludes a cancelled row.
+   */
+  readonly cancelledAt: string | null;
+  readonly cancellationReason: string | null;
 }
 
 export interface AuditEvent {
@@ -148,4 +155,7 @@ export interface SupplierPayment {
   readonly amountPaise: number;
   readonly paymentAccount: "CASH";
   readonly paidAt: string;
+  /** R8. The supplier mirror of Payment.cancelledAt. */
+  readonly cancelledAt: string | null;
+  readonly cancellationReason: string | null;
 }

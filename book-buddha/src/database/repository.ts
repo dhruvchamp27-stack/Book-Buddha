@@ -2427,6 +2427,8 @@ export class AccountingRepository {
         amountPaise,
         paymentAccount: "CASH",
         paidAt,
+        cancelledAt: null,
+        cancellationReason: null,
       };
       this.db
         .prepare("INSERT INTO payments (id, invoice_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?)")
@@ -2452,16 +2454,135 @@ export class AccountingRepository {
     return payment;
   }
 
+  /**
+   * The reversal of an entry that was ACTUALLY POSTED: its own lines, flipped.
+   *
+   * Deliberately not re-derived from the document. recordPayment hardcodes CASH today (S5-8),
+   * and the day that becomes a choice of account, a reversal rebuilt from the document would
+   * credit the wrong one and leave the books out by the payment. Flipping what is on the
+   * ledger cannot drift from it.
+   */
+  private reversalOfPostedEntry(
+    postedEntryId: string, reversalId: string, sourceId: string, description: string,
+  ): JournalEntry {
+    const lines = this.db
+      .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
+      .all(postedEntryId) as Array<{ account: string; debit_paise: number; credit_paise: number }>;
+    if (lines.length === 0) {
+      throw new RepositoryValidationError(`Journal entry ${postedEntryId} has no lines to reverse.`);
+    }
+    return {
+      id: reversalId,
+      sourceId,
+      description,
+      isReversal: true,
+      lines: lines.map((line) => ({
+        account: line.account,
+        debitPaise: line.credit_paise,
+        creditPaise: line.debit_paise,
+      })),
+    };
+  }
+
+  /**
+   * R8 — cancel a customer payment by reversal. The money goes back to being owed.
+   *
+   * Until now a payment could not be undone at all: the only ways out were to delete the row,
+   * destroying the record, or to leave a wrong receipt standing for good. Both sit badly
+   * against cancel-with-reversal, a fixed rule here.
+   *
+   * NOTHING IS DELETED and the original entry is never touched. The row is marked cancelled,
+   * a reversing entry is posted beside the original dated TODAY (never the payment's own date,
+   * which would rewrite a settled period), and every sum of what has been paid skips the
+   * cancelled row — so the invoice goes straight back to outstanding and the receivables
+   * ageing follows without a special case.
+   */
+  public cancelPayment(paymentId: string, reason?: string): JournalEntry {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare("SELECT id, invoice_id, amount_paise, paid_at, cancelled_at FROM payments WHERE id = ?")
+        .get(paymentId) as { id: string; invoice_id: string; amount_paise: number; paid_at: string; cancelled_at: string | null } | undefined;
+      if (row === undefined) throw new RepositoryValidationError(`Payment ${paymentId} was not found.`);
+      if (row.cancelled_at !== null) {
+        throw new RepositoryValidationError("This payment has already been cancelled.");
+      }
+      const invoice = this.getInvoice(row.invoice_id);
+      // The cancellation is dated today, so TODAY is the period that has to be open. The
+      // original payment's own period stays untouched, which is the point of reversing.
+      const cancelledOn = istDateOf();
+      assertPeriodOpen(this.db, invoice.businessId, cancelledOn);
+
+      const reversal = this.reversalOfPostedEntry(
+        `je-payment-${row.id}`,
+        `je-payment-${row.id}-reversal`,
+        invoice.id,
+        `Cancelled payment for invoice ${invoice.number}`,
+      );
+      this.db
+        .prepare("UPDATE payments SET cancelled_at = ?, cancellation_reason = ? WHERE id = ?")
+        .run(new Date().toISOString(), reason ?? null, row.id);
+      this.insertJournalEntry(reversal, {
+        businessId: invoice.businessId, entryDate: cancelledOn, ...fairDim(invoice.fairId),
+      });
+      this.insertAuditEvent({
+        action: "invoice.payment_cancelled",
+        entityId: invoice.id,
+        occurredAt: new Date().toISOString(),
+      });
+      return reversal;
+    })();
+  }
+
+  /** R8 — the supplier mirror of cancelPayment. What was paid goes back to being owed. */
+  public cancelSupplierPayment(paymentId: string, reason?: string): JournalEntry {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare("SELECT id, bill_id, expense_id, amount_paise, cancelled_at FROM supplier_payments WHERE id = ?")
+        .get(paymentId) as { id: string; bill_id: string | null; expense_id: string | null; amount_paise: number; cancelled_at: string | null } | undefined;
+      if (row === undefined) throw new RepositoryValidationError(`Supplier payment ${paymentId} was not found.`);
+      if (row.cancelled_at !== null) {
+        throw new RepositoryValidationError("This supplier payment has already been cancelled.");
+      }
+      const document = row.bill_id !== null
+        ? (() => { const bill = this.getPurchaseBill(row.bill_id as string); return { id: bill.id, businessId: bill.businessId, fairId: bill.fairId, number: bill.number }; })()
+        : (() => { const expense = this.getExpense(row.expense_id as string); return { id: expense.id, businessId: expense.businessId, fairId: expense.fairId, number: expense.number }; })();
+
+      const cancelledOn = istDateOf();
+      assertPeriodOpen(this.db, document.businessId, cancelledOn);
+
+      const reversal = this.reversalOfPostedEntry(
+        `je-supplier-payment-${row.id}`,
+        `je-supplier-payment-${row.id}-reversal`,
+        document.id,
+        `Cancelled supplier payment for ${document.number}`,
+      );
+      this.db
+        .prepare("UPDATE supplier_payments SET cancelled_at = ?, cancellation_reason = ? WHERE id = ?")
+        .run(new Date().toISOString(), reason ?? null, row.id);
+      this.insertJournalEntry(reversal, {
+        businessId: document.businessId, entryDate: cancelledOn, ...fairDim(document.fairId),
+      });
+      this.insertAuditEvent({
+        action: "supplier.payment_cancelled",
+        entityId: document.id,
+        occurredAt: new Date().toISOString(),
+      });
+      return reversal;
+    })();
+  }
+
   public listPayments(invoiceId: string): readonly Payment[] {
     const rows = this.db
-      .prepare("SELECT id, invoice_id, amount_paise, payment_account, paid_at FROM payments WHERE invoice_id = ? ORDER BY paid_at, id")
-      .all(invoiceId) as Array<{ id: string; invoice_id: string; amount_paise: number; payment_account: "CASH"; paid_at: string }>;
+      .prepare("SELECT id, invoice_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason FROM payments WHERE invoice_id = ? ORDER BY paid_at, id")
+      .all(invoiceId) as Array<{ id: string; invoice_id: string; amount_paise: number; payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null }>;
     return rows.map((row) => ({
       id: row.id,
       invoiceId: row.invoice_id,
       amountPaise: row.amount_paise,
       paymentAccount: row.payment_account,
       paidAt: row.paid_at,
+      cancelledAt: row.cancelled_at,
+      cancellationReason: row.cancellation_reason,
     }));
   }
 
@@ -2859,10 +2980,10 @@ export class AccountingRepository {
       const list = paymentsOf.get(key);
       if (list === undefined) paymentsOf.set(key, [{ amountPaise, paidAt }]); else list.push({ amountPaise, paidAt });
     };
-    for (const p of this.db.prepare("SELECT invoice_id, amount_paise, paid_at FROM payments ORDER BY paid_at, rowid").all() as Array<{ invoice_id: string; amount_paise: number; paid_at: string }>) {
+    for (const p of this.db.prepare("SELECT invoice_id, amount_paise, paid_at FROM payments WHERE cancelled_at IS NULL ORDER BY paid_at, rowid").all() as Array<{ invoice_id: string; amount_paise: number; paid_at: string }>) {
       addPayment(`INVOICE|${p.invoice_id}`, p.amount_paise, p.paid_at);
     }
-    for (const p of this.db.prepare("SELECT bill_id, expense_id, amount_paise, paid_at FROM supplier_payments ORDER BY paid_at, rowid").all() as Array<{ bill_id: string | null; expense_id: string | null; amount_paise: number; paid_at: string }>) {
+    for (const p of this.db.prepare("SELECT bill_id, expense_id, amount_paise, paid_at FROM supplier_payments WHERE cancelled_at IS NULL ORDER BY paid_at, rowid").all() as Array<{ bill_id: string | null; expense_id: string | null; amount_paise: number; paid_at: string }>) {
       addPayment(p.bill_id !== null ? `PURCHASE_BILL|${p.bill_id}` : `EXPENSE|${p.expense_id}`, p.amount_paise, p.paid_at);
     }
 
@@ -3819,7 +3940,7 @@ export class AccountingRepository {
    */
   private invoiceSettledPaise(invoiceId: string): number {
     const paid = this.db
-      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM payments WHERE invoice_id = ?")
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL")
       .get(invoiceId) as { total: number };
     const applied = this.db
       .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM credit_note_applications WHERE invoice_id = ?")
@@ -4469,7 +4590,7 @@ export class AccountingRepository {
     const subtotalPaise = lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
     const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(subtotalPaise * row.tax_rate_basis_points / 10000);
     const paid = this.db
-      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE bill_id = ?")
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE bill_id = ? AND cancelled_at IS NULL")
       .get(billId) as { paid: number };
     return {
       id: row.id, businessId: row.business_id, supplierId: row.supplier_id, number: row.number,
@@ -4649,7 +4770,7 @@ export class AccountingRepository {
     if (row === undefined) throw new RepositoryValidationError(`Expense ${expenseId} was not found.`);
     const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(row.amount_paise * row.tax_rate_basis_points / 10000);
     const paid = this.db
-      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE expense_id = ?")
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE expense_id = ? AND cancelled_at IS NULL")
       .get(expenseId) as { paid: number };
     return {
       id: row.id, businessId: row.business_id, supplierId: row.supplier_id, categoryId: row.category_id,
@@ -4745,6 +4866,8 @@ export class AccountingRepository {
         amountPaise: input.amountPaise,
         paymentAccount: "CASH",
         paidAt,
+        cancelledAt: null,
+        cancellationReason: null,
       };
       this.db
         .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -4770,16 +4893,17 @@ export class AccountingRepository {
     if (filter.supplierId !== undefined) { conditions.push("supplier_id = ?"); params.push(filter.supplierId); }
     const rows = this.db
       .prepare(
-        `SELECT id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at FROM supplier_payments
+        `SELECT id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason FROM supplier_payments
          ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY paid_at, rowid`,
       )
       .all(...params) as Array<{
       id: string; supplier_id: string; bill_id: string | null; expense_id: string | null; amount_paise: number;
-      payment_account: "CASH"; paid_at: string;
+      payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null;
     }>;
     return rows.map((row) => ({
       id: row.id, supplierId: row.supplier_id, billId: row.bill_id, expenseId: row.expense_id,
       amountPaise: row.amount_paise, paymentAccount: row.payment_account, paidAt: row.paid_at,
+      cancelledAt: row.cancelled_at, cancellationReason: row.cancellation_reason,
     }));
   }
 
@@ -5847,7 +5971,7 @@ export class AccountingRepository {
                 i.tax_rate_basis_points,
                 (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
                   + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
-                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id), 0)
+                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id AND p.cancelled_at IS NULL), 0)
                   + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
            FROM invoices i
            JOIN invoice_lines il ON il.invoice_id = i.id

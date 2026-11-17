@@ -88,6 +88,9 @@ const accountRenameInput = z.object({ name: name });
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be a date written as YYYY-MM-DD");
 const financialYearInput = z.object({ businessId: id, startsOn: isoDate, endsOn: isoDate });
 const lockInput = z.object({ locked: z.boolean(), reason: z.string().trim().min(1).optional() });
+/** R8. Cancelling a payment: an optional reason, recorded on the row beside the reversal. */
+const cancellationInput = z.object({ reason: z.string().trim().min(1).optional() })
+  .strict().transform((value) => definedOnly(value));
 const openingBalanceInput = z.object({
   businessId: id,
   asAt: isoDate,
@@ -1114,6 +1117,26 @@ export function buildApi(
   app.get<{ Params: { invoiceId: string } }>(
     "/invoices/:invoiceId/payments",
     async (request) => repository.listPayments(request.params.invoiceId),
+  );
+
+  /**
+   * R8. Cancel a recorded payment. Nothing is deleted: the row is marked cancelled and a
+   * reversing entry is posted beside the original, so the invoice goes back to outstanding.
+   */
+  app.post<{ Params: { paymentId: string } }>(
+    "/payments/:paymentId/cancel",
+    async (request) => {
+      const input = parseBody(cancellationInput, request.body ?? {});
+      return { reversalEntry: repository.cancelPayment(request.params.paymentId, input.reason) };
+    },
+  );
+
+  app.post<{ Params: { paymentId: string } }>(
+    "/supplier-payments/:paymentId/cancel",
+    async (request) => {
+      const input = parseBody(cancellationInput, request.body ?? {});
+      return { reversalEntry: repository.cancelSupplierPayment(request.params.paymentId, input.reason) };
+    },
   );
 
   app.post<{ Params: { invoiceId: string } }>(

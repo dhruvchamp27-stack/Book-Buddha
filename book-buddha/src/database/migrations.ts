@@ -12,6 +12,7 @@ import { applyOpeningBalancesSchema } from "./opening-balances-schema.js";
 import { applyOpeningSubLedgerSchema } from "./opening-sub-ledger-schema.js";
 import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
 import { applyRecoveryCodeSchema } from "./recovery-code-schema.js";
+import { applyPaymentCancellationSchema } from "./payment-cancellation-schema.js";
 
 export interface Migration {
   version: number;
@@ -225,6 +226,16 @@ export const migrations: readonly Migration[] = [
     // v16 keeps a NULL, and recovery on such a row refuses rather than falling back to the old
     // email match. Default (transactional).
     up: applyRecoveryCodeSchema,
+  },
+  {
+    version: 17,
+    name: "payment_cancellation",
+    // Additive: two nullable columns on payments and supplier_payments, marking a payment
+    // cancelled without deleting it (R8). No table is rebuilt, so no trigger needs replaying,
+    // and nothing is backfilled -- every payment that exists today is a live one, which is
+    // exactly what `cancelled_at IS NULL` means. The reversing journal entry is posted by the
+    // repository through the normal door, never by this migration. Default (transactional).
+    up: applyPaymentCancellationSchema,
   },
 ];
 
