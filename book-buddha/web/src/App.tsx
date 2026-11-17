@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { authHeaders } from "./session.js";
 
 type Account = "CASH" | "RECEIVABLES";
 type InvoiceStatus = "DRAFT" | "QUOTATION" | "FINALIZED" | "CANCELLED";
@@ -47,7 +48,10 @@ interface JournalEntry {
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
-    headers: { "content-type": "application/json" }, ...init,
+    ...init,
+    // Headers go last so the session token cannot be dropped by a caller's own
+    // `init`, and so a caller's headers are merged rather than replacing these.
+    headers: { "content-type": "application/json", ...authHeaders(), ...init?.headers },
   });
   const body: unknown = await response.json();
   if (!response.ok) throw new Error((body as { error?: string }).error ?? "The request failed.");
