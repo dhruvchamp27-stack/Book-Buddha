@@ -853,34 +853,26 @@ describe("cancelling respects FINALIZE order, not draft order", () => {
 });
 
 /**
- * OPEN, PINNED, AWAITING THE OWNER'S RULING (2026-11-17).
+ * S4-8, RULED BY THE OWNER 2026-11-17: a credit note is dated at FINALIZE.
  *
- * A credit note is dated by its DRAFT's created_at, not by when it is finalized. Draft one in
- * January, finalize it in February, and it is back-dated into January - where it re-measures any
- * payment that fell between the two dates. That breaks S1-6 ("never rewrite a month already
- * reported") through an entirely ordinary workflow: raise the paperwork, finalize it later.
+ * This test previously pinned a DEFECT. The entry date came from the note's created_at, which is
+ * stamped when the DRAFT is saved, so a note drafted in January and finalized in February was
+ * back-dated into January - where it re-measured any payment falling between the two dates.
+ * That broke S1-6 ("never rewrite a month already reported") through an entirely ordinary
+ * workflow: raise the paperwork, finalize it later. Reproduced before anything was changed, on
+ * exactly the figures below: January's cash expenses jumped from 2,400 to 3,257.14 the moment
+ * the note was finalized in February.
  *
- * Reproduced, not theorised. Invoice 15,000 (goods 10,000 costing 6,000 plus freight 5,000 with
- * no cost), two payments of 3,000 on 20 and 30 January, then a freight note DRAFTED on 25 January
- * and FINALIZED on 10 February. January's cash expenses jump from 2,400 to 3,257.14 the moment
- * the note is finalized - a month that had already been reported, moved by a February action.
- *
- * The cause is one line in finalizeCreditNote: the entry date comes from the note's created_at.
- * The fix is NOT the assistant's to choose, because it decides what date a credit note HAS:
- *   (a) date it at FINALIZE - simple, and January can never move, but a note raised late then
- *       lands in the month it was entered rather than the month it belongs to;
- *   (b) give a credit note its own document date, as an invoice has, defaulting to today - most
- *       faithful to how the paperwork actually works, but a schema change and a new input;
- *   (c) keep draft dating and REFUSE to finalize into a month already reported.
- *
- * This test pins what the code does TODAY so the behaviour cannot drift unnoticed. When the
- * owner rules, it becomes the acceptance test for whichever rule he picks.
+ * The owner chose dating at FINALIZE over giving a note its own document date, and over refusing
+ * to finalize into a reported month. The trade-off he accepted: a note finalized late lands in
+ * the month it was FINALIZED, not the month the goods came back. In exchange, a closed month can
+ * never move - which is the property S1-6 exists to protect.
  */
-describe("credit notes are dated at the DRAFT, which can move a reported month (open question)", () => {
+describe("ACCEPTANCE S4-8: a credit note is dated at FINALIZE, so a reported month cannot move", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("moves January when a January draft is finalized in February", () => {
+  it("leaves January untouched when a January draft is finalized in February", () => {
     const repository = new AccountingRepository();
     try {
       vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
@@ -919,19 +911,31 @@ describe("credit notes are dated at the DRAFT, which can move a reported month (
       vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
       repository.finalizeCreditNote("CN");
 
-      // The entry carries the DRAFT's date, not February's.
+      // The entry carries FEBRUARY - when it was finalized - not the January draft date.
       const entry = repository.db
         .prepare("SELECT entry_date FROM journal_entries WHERE id = 'je-credit-note-CN'")
         .get() as { entry_date: string };
-      expect(entry.entry_date).toBe("2026-01-25");
+      expect(entry.entry_date).toBe("2026-02-10");
 
-      // THE DEFECT: January moved. Income is unchanged, but the cost of what was collected on
-      // 30 January is re-measured against the re-based balance - 120,000 from the first payment
-      // plus 205,714 from the second, where it had been 240,000 in total.
-      expect(january()).toMatchObject({ totalIncomePaise: 600000, totalExpensesPaise: 325714 });
-      // And February, the month the note was actually raised in, shows nothing at all.
+      // THE POINT: January is byte-for-byte what it was. Under draft dating it moved to 325,714.
+      expect(january()).toMatchObject({ totalIncomePaise: 600000, totalExpensesPaise: 240000 });
+      // February recognises nothing by itself either - S2-2 still governs the note's own lines,
+      // and no money moved. The note's effect is entirely in the FUTURE of the reported month.
       expect(repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-02-01", toDate: "2026-02-28" }))
         .toMatchObject({ totalIncomePaise: 0, totalExpensesPaise: 0 });
+
+      // And the re-based remainder still converges: 1,500,000 billed less the 500,000 freight
+      // credited less 600,000 already paid leaves 400,000, and paying it lands on accrual.
+      vi.setSystemTime(new Date("2026-03-10T06:00:00.000Z"));
+      repository.recordPayment("INV", 400000, "2026-03-10");
+      expect(() => repository.recordPayment("INV", 1, "2026-03-10")).toThrow(/outstanding balance of 0 paise/);
+      const accrual = repository.getProfitAndLoss({ basis: "ACCRUAL" });
+      const cash = repository.getProfitAndLoss({ basis: "CASH" });
+      expect(accrual).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 600000 });
+      expect(cash.totalIncomePaise).toBe(1000000);
+      expect(cash.totalExpensesPaise).toBe(600000);
+      // January STILL untouched after all of it.
+      expect(january()).toMatchObject({ totalIncomePaise: 600000, totalExpensesPaise: 240000 });
     } finally {
       repository.close();
     }

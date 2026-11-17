@@ -1382,8 +1382,20 @@ export class AccountingRepository {
         ],
       };
       const inventoryCost = this.restoreCreditNoteStock(note, invoice.fairId);
-      const noteRow = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
-      const dims = { businessId: invoice.businessId, entryDate: istDateOf(noteRow.created_at), ...fairDim(invoice.fairId) };
+      // S4-8 (owner, 2026-11-17): a credit note is dated at FINALIZE, never at the draft.
+      //
+      // This used to read created_at, which is stamped when the DRAFT is saved. A note drafted in
+      // January and finalized in February was therefore back-dated into January, where it
+      // re-measured any payment falling between the two dates - a month already reported, moved
+      // by a February action. Reproduced before it was changed: two payments of 3,000 on 20 and
+      // 30 January and a freight note drafted 25 January, finalized 10 February, pushed January's
+      // cash expenses from 2,400 to 3,257.14. That is S1-6 broken by an entirely ordinary
+      // workflow - raise the paperwork, finalize it later.
+      //
+      // The owner chose this over giving a note its own document date: the trade-off he accepted
+      // is that a note finalized late lands in the month it was FINALIZED rather than the month
+      // the goods came back. The cash-view walk reads these entry dates, so it follows for free.
+      const dims = { businessId: invoice.businessId, entryDate: istDateOf(), ...fairDim(invoice.fairId) };
       this.insertJournalEntry(entry, dims);
       if (inventoryCost > 0) {
         this.insertJournalEntry({
@@ -1402,6 +1414,21 @@ export class AccountingRepository {
       this.insertAuditEvent({ action: "credit_note.finalized", entityId: note.id, occurredAt: new Date().toISOString() });
       return entry;
     })();
+  }
+
+  /**
+   * The date a credit note actually took effect: the date on its posted journal entry, set when
+   * it was FINALIZED (S4-8). Never created_at, which is when the draft was saved - the gap
+   * between the two is exactly what let a February note rewrite January.
+   */
+  private creditNoteEntryDate(creditNoteId: string): string {
+    const row = this.db
+      .prepare("SELECT entry_date FROM journal_entries WHERE id = ?")
+      .get(`je-credit-note-${creditNoteId}`) as { entry_date: string } | undefined;
+    if (row === undefined) {
+      throw new RepositoryValidationError(`Credit note ${creditNoteId} has no posted entry to date from.`);
+    }
+    return row.entry_date;
   }
 
   /**
@@ -1460,11 +1487,10 @@ export class AccountingRepository {
         throw new RepositoryValidationError("A refund must be a whole number of paise above zero.");
       }
       const invoice = this.getInvoice(note.invoiceId);
-      const row = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
       // Validated as a real date, not merely string-compared: "garbage" sorts after every ISO
       // date, so it would clear the check below and land straight in entryDate.
       this.assertIsoDate("Refund date", input.refundedOn);
-      const noteDate = istDateOf(row.created_at);
+      const noteDate = this.creditNoteEntryDate(note.id);
       if (input.refundedOn < noteDate) {
         throw new RepositoryValidationError(`A refund cannot predate its credit note (${noteDate}).`);
       }
@@ -1547,9 +1573,8 @@ export class AccountingRepository {
       if (target.businessId !== source.businessId) {
         throw new RepositoryValidationError("A credit can only be applied to an invoice in the same business.");
       }
-      const row = this.db.prepare("SELECT created_at FROM credit_notes WHERE id = ?").get(note.id) as { created_at: string };
       this.assertIsoDate("Application date", input.appliedOn);
-      const noteDate = istDateOf(row.created_at);
+      const noteDate = this.creditNoteEntryDate(note.id);
       if (input.appliedOn < noteDate) {
         throw new RepositoryValidationError(`A credit cannot be applied before its credit note (${noteDate}).`);
       }
