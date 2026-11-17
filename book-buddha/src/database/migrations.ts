@@ -10,6 +10,7 @@ import { applyFinancialYearsSchema } from "./financial-years-schema.js";
 import { applyCreditDischargeSchema, applyCustomerCreditsSchema } from "./customer-credits-schema.js";
 import { applyOpeningBalancesSchema } from "./opening-balances-schema.js";
 import { applyOpeningSubLedgerSchema } from "./opening-sub-ledger-schema.js";
+import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
 
 export interface Migration {
   version: number;
@@ -202,6 +203,17 @@ export const migrations: readonly Migration[] = [
     // way. An opening customer balance carries the income figure behind it (S5-2), which is what
     // the cash view recognises proportionately on each receipt. Default (transactional).
     up: applyOpeningSubLedgerSchema,
+  },
+  {
+    version: 15,
+    name: "inter_fair_clearing",
+    // Additive: seeds INTER_FAIR_CLEARING (S5-11), the account a cross-fair credit application
+    // passes through so CUSTOMER_CREDITS nets to zero inside the fair that created it. An ASSET
+    // with no role, so the role CHECK is untouched and no table is rebuilt. Seeds from the FROZEN
+    // V15_ADDED_ACCOUNTS for the same reason v11 and v13 do: a live list would hand the account to
+    // a fresh database at an EARLIER version, this migration's guard would then skip, and its
+    // first real run would be on the owner's database. Default (transactional).
+    up: applyInterFairClearingSchema,
   },
 ];
 

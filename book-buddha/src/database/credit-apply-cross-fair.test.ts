@@ -2,38 +2,35 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountingRepository } from "./repository.js";
 
 /**
- * R3 check (c): what happens when a credit raised at Fair A is applied to an invoice at Fair B.
+ * S5-11 (owner ruling): applying a credit note across fairs is posted through INTER_FAIR_CLEARING.
  *
- * PINNED (open ruling). This file records what the code does TODAY. It is an OPEN QUESTION for
- * the owner, NOT a confirmed defect and NOT accepted behaviour. Nothing here was fixed.
+ * This file began as R3 check (c), a PINNED measurement of the old behaviour that said in its own
+ * header it was an open question. The owner has now ruled: fix it with clearing entries, not a
+ * schema change. The assertions below describe the CONFIRMED behaviour.
  *
  * IN PLAIN ENGLISH
  * A customer buys Rs 1,000 at Fair A and pays in full. Rs 400 comes back as a credit note, so
- * the shop now owes the customer Rs 400 (the "customer credits" liability, tagged Fair A).
- * Later the same customer buys Rs 1,000 at Fair B, and the Rs 400 is set against that invoice.
- * That settling entry is tagged with Fair B (the invoice's fair), not Fair A (the note's fair).
- * So the Rs 400 liability was CREATED in Fair A but CLEARED in Fair B. Fair by fair, neither
- * fair's customer-credits balance returns to zero; only the two together (the whole company) do.
+ * the shop owes the customer Rs 400 (the "customer credits" liability, tagged Fair A). Later the
+ * same customer buys Rs 1,000 at Fair B and the Rs 400 is set against that invoice.
+ * Journal dimensions are per ENTRY, so one entry cannot carry both fairs. When the two fairs
+ * differ the application is therefore TWO balanced entries that meet in a clearing account:
+ *   1. tagged the NOTE's fair:     Dr CUSTOMER_CREDITS / Cr INTER_FAIR_CLEARING
+ *   2. tagged the INVOICE's fair:  Dr INTER_FAIR_CLEARING / Cr RECEIVABLES
+ * The liability now closes inside the fair that created it, the receivable closes inside the fair
+ * whose invoice it settles, and the movement between the two is visible in a named account.
  *
- * FIGURES AFTER THE APPLICATION (paise; Rs = paise / 100)
- *   Customer credits (liability), net:
- *       Fair A  Rs 400 owed (credit 40,000)    Fair B  Rs 400 debit (a "negative liability", 40,000)
- *       Whole company  Rs 0
- *   Receivables, net debit:
- *       Fair A  Rs 0        Fair B  Rs 600 (the Rs 1,000 invoice less the Rs 400 credit)
- *       Whole company  Rs 600. Receivables nets correctly per fair: B's invoice is settled in B.
- *   Trial Balance: balances overall AND inside each fair (every entry is itself balanced).
- *   Profit, ACCRUAL: unchanged by the application. Fair A Rs 600, Fair B Rs 1,000.
- *   Profit, CASH:    Fair A Rs 1,000 -> Rs 600 (-400); Fair B Rs 0 -> Rs 400 (+400).
- *       So on the cash basis Rs 400 of profit MOVES from Fair A to Fair B when the credit is used.
- *       Whether that is right is the owner's call.
- *   Balance Sheet: cannot be filtered by fair (the spec exempts it), so the phantom liability in
- *       Fair A and the debit in Fair B are only visible on the fair-filtered Trial Balance.
- *       The unfiltered Balance Sheet shows customer credits Rs 0, which is right.
+ * FIGURES AFTER THE APPLICATION (paise; Rs = paise / 100). Before the change, in brackets.
+ *   CUSTOMER_CREDITS net:   Fair A 0 (was -40,000)   Fair B 0 (was +40,000)   company 0
+ *   RECEIVABLES net debit:  Fair A 0                 Fair B 60,000             company 60,000
+ *   INTER_FAIR_CLEARING:    Fair A -40,000 (credit)  Fair B +40,000 (debit)    company 0
+ *   Profit, ACCRUAL: unchanged. Fair A 60,000, Fair B 100,000.
+ *   Profit, CASH:    unchanged by the change. Fair A 60,000, Fair B 40,000 (the cash view reads
+ *       applications from the credit_note_applications TABLE, not from journal-entry ids).
  *
- * Journal dimensions are PER ENTRY (journal_entries.fair_id); journal_lines has no fair column.
+ * WHEN IT SPLITS: only when the note's fair and the invoice's fair differ, and untagged counts as
+ * different from tagged. Same fair, or both untagged, stays ONE entry with no clearing account.
  */
-describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoice", () => {
+describe("S5-11: applying a credit note across fairs posts through INTER_FAIR_CLEARING", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
@@ -42,7 +39,9 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     vi.useRealTimers();
   });
 
-  function world() {
+  type Tag = "A" | "B" | null;
+  /** sourceTag = fair of the invoice the note is raised against; targetTag = fair of the invoice it is applied to. */
+  function world(sourceTag: Tag = "A", targetTag: Tag = "B") {
     const repository = new AccountingRepository();
     const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
     const businessId = repository.createBusiness({ companyId, name: "Business" });
@@ -50,16 +49,17 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     const itemId = repository.createItem({ companyId, name: "Item", unit: "each", trackStock: false });
     const fairA = repository.createFair({ companyId, hostCustomerId: customerId, name: "Fair A" });
     const fairB = repository.createFair({ companyId, hostCustomerId: customerId, name: "Fair B" });
-    const invoice = (id: string, totalPaise: number, invoiceDate: string, fairId: string): void => {
+    const fairFor = (tag: Tag): string | undefined => (tag === "A" ? fairA : tag === "B" ? fairB : undefined);
+    const invoice = (id: string, totalPaise: number, invoiceDate: string, fairId: string | undefined): void => {
       repository.saveDraft({
         id, number: `INV-${id}`, businessId, customerId, invoiceDate, status: "DRAFT", paymentAccount: "RECEIVABLES",
-        taxType: "NONE", taxRateBasisPoints: 0, fairId,
+        taxType: "NONE", taxRateBasisPoints: 0, ...(fairId === undefined ? {} : { fairId }),
         lines: [{ itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
       });
       repository.finalizeInvoice(id);
     };
     // Fair A: Rs 1,000 invoice, collected in full.
-    invoice("A", 100000, "2026-01-10", fairA);
+    invoice("A", 100000, "2026-01-10", fairFor(sourceTag));
     repository.recordPayment("A", 100000, "2026-01-20");
     // February: Rs 400 comes back as a credit note (tagged Fair A, the source invoice's fair).
     vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
@@ -69,7 +69,7 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     });
     repository.finalizeCreditNote("cn1");
     // Fair B: Rs 1,000 invoice, same customer, same business, not yet paid.
-    invoice("B", 100000, "2026-02-11", fairB);
+    invoice("B", 100000, "2026-02-11", fairFor(targetTag));
     const apply = (): void => {
       repository.applyCreditNote({ id: "ap1", creditNoteId: "cn1", invoiceId: "B", amountPaise: 40000, appliedOn: "2026-02-12" });
     };
@@ -86,7 +86,22 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
   const profit = (w: W, which: "ALL" | "A" | "B", basis: "ACCRUAL" | "CASH"): number =>
     w.repository.getProfitAndLoss({ ...scope(w, which), basis }).netProfitPaise;
 
-  it("PINNED (open ruling): before applying, the Fair A credit sits wholly in Fair A", () => {
+  /** Every entry the application posted, with its fair and lines. Matches the apply id scheme only. */
+  const applyEntries = (w: W) => {
+    const entries = w.repository.db
+      .prepare("SELECT id, fair_id FROM journal_entries WHERE id LIKE 'je-credit-apply-%' ORDER BY id")
+      .all() as Array<{ id: string; fair_id: string | null }>;
+    return entries.map((e) => ({
+      ...e,
+      lines: w.repository.db
+        .prepare("SELECT account, debit_paise AS debit, credit_paise AS credit FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
+        .all(e.id) as Array<{ account: string; debit: number; credit: number }>,
+    }));
+  };
+  const hasClearingLine = (w: W): boolean =>
+    w.repository.db.prepare("SELECT 1 FROM journal_lines WHERE account = 'INTER_FAIR_CLEARING'").get() !== undefined;
+
+  it("before applying, the Fair A credit sits wholly in Fair A", () => {
     const w = world();
     try {
       expect(net(w, "A", "CUSTOMER_CREDITS")).toBe(-40000);
@@ -103,32 +118,56 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     }
   });
 
-  it("PINNED (open ruling): the application is not blocked, and is tagged with the TARGET invoice's fair", () => {
+  it("the application is not blocked, and posts two entries: one per fair, each balanced", () => {
     const w = world();
     try {
-      w.apply(); // no throw: cross-customer and cross-business are refused, cross-fair is not
+      w.apply();
+      const entries = applyEntries(w);
+      expect(entries.map((e) => e.id)).toEqual(["je-credit-apply-ap1-source", "je-credit-apply-ap1-target"]);
+      const [source, target] = entries;
+      // SOURCE entry: the NOTE's fair (A). Dr CUSTOMER_CREDITS / Cr INTER_FAIR_CLEARING.
+      expect(source?.fair_id).toBe(w.fairA);
+      expect(source?.lines).toEqual([
+        { account: "CUSTOMER_CREDITS", debit: 40000, credit: 0 },
+        { account: "INTER_FAIR_CLEARING", debit: 0, credit: 40000 },
+      ]);
+      // TARGET entry: the INVOICE's fair (B). Dr INTER_FAIR_CLEARING / Cr RECEIVABLES.
+      expect(target?.fair_id).toBe(w.fairB);
+      expect(target?.lines).toEqual([
+        { account: "INTER_FAIR_CLEARING", debit: 40000, credit: 0 },
+        { account: "RECEIVABLES", debit: 0, credit: 40000 },
+      ]);
+      for (const e of entries) {
+        expect(e.lines.reduce((t, l) => t + l.debit, 0)).toBe(e.lines.reduce((t, l) => t + l.credit, 0));
+        // Neither id may start with the note's own prefix: invoiceCreditedPaise sums that prefix.
+        expect(e.id.startsWith("je-credit-note-")).toBe(false);
+      }
+      // The note's own entry is untouched and still Fair A.
       const fairOf = (id: string) =>
         (w.repository.db.prepare("SELECT fair_id FROM journal_entries WHERE id = ?").get(id) as { fair_id: string }).fair_id;
-      expect(fairOf("je-credit-note-cn1")).toBe(w.fairA); // SOURCE
-      expect(fairOf("je-credit-apply-ap1")).toBe(w.fairB); // TARGET
+      expect(fairOf("je-credit-note-cn1")).toBe(w.fairA);
+      // The application row and the audit event are as before.
+      const row = w.repository.db.prepare("SELECT amount_paise, applied_on FROM credit_note_applications WHERE id = 'ap1'").get();
+      expect(row).toEqual({ amount_paise: 40000, applied_on: "2026-02-12" });
+      expect(w.repository.db.prepare("SELECT 1 FROM audit_events WHERE action = 'credit_note.applied'").get()).toBeDefined();
     } finally {
       w.repository.close();
     }
   });
 
-  it("PINNED (open ruling): CUSTOMER_CREDITS does NOT net to zero inside either fair, only company-wide", () => {
+  it("CUSTOMER_CREDITS nets to ZERO in Fair A, in Fair B and company-wide", () => {
     const w = world();
     try {
       w.apply();
-      expect(net(w, "A", "CUSTOMER_CREDITS")).toBe(-40000); // Rs 400 still "owed" in Fair A
-      expect(net(w, "B", "CUSTOMER_CREDITS")).toBe(40000); // Rs 400 debit in Fair B
+      expect(net(w, "A", "CUSTOMER_CREDITS")).toBe(0);
+      expect(net(w, "B", "CUSTOMER_CREDITS")).toBe(0);
       expect(net(w, "ALL", "CUSTOMER_CREDITS")).toBe(0);
     } finally {
       w.repository.close();
     }
   });
 
-  it("PINNED (open ruling): RECEIVABLES nets correctly per fair (the invoice is settled in its own fair)", () => {
+  it("RECEIVABLES is 0 in Fair A and 60,000 in Fair B (the invoice is settled in its own fair)", () => {
     const w = world();
     try {
       w.apply();
@@ -140,7 +179,19 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     }
   });
 
-  it("PINNED (open ruling): the Trial Balance still balances, overall and inside each fair", () => {
+  it("INTER_FAIR_CLEARING shows the movement: credit in Fair A, debit in Fair B, zero company-wide", () => {
+    const w = world();
+    try {
+      w.apply();
+      expect(net(w, "A", "INTER_FAIR_CLEARING")).toBe(-40000);
+      expect(net(w, "B", "INTER_FAIR_CLEARING")).toBe(40000);
+      expect(net(w, "ALL", "INTER_FAIR_CLEARING")).toBe(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("the Trial Balance still balances, overall and inside each fair", () => {
     const w = world();
     try {
       w.apply();
@@ -153,22 +204,39 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     }
   });
 
-  it("PINNED (open ruling): accrual profit does not move; CASH profit moves Rs 400 from Fair A to Fair B", () => {
+  it("accrual profit does not move, and CASH profit is unchanged by the clearing entries (A 60,000, B 40,000)", () => {
     const w = world();
     try {
       w.apply();
       expect(profit(w, "A", "ACCRUAL")).toBe(60000);
       expect(profit(w, "B", "ACCRUAL")).toBe(100000);
       expect(profit(w, "ALL", "ACCRUAL")).toBe(160000);
-      expect(profit(w, "A", "CASH")).toBe(60000); // was 100,000: -40,000
-      expect(profit(w, "B", "CASH")).toBe(40000); // was 0:       +40,000
-      expect(profit(w, "ALL", "CASH")).toBe(100000); // unchanged company-wide
+      // The cash view reads applications from the credit_note_applications TABLE, so splitting the
+      // journal entry cannot move these. They are the figures the old single entry gave.
+      expect(profit(w, "A", "CASH")).toBe(60000); // was 100,000 before applying: -40,000
+      expect(profit(w, "B", "CASH")).toBe(40000); // was 0 before applying:        +40,000
+      expect(profit(w, "ALL", "CASH")).toBe(100000);
     } finally {
       w.repository.close();
     }
   });
 
-  it("PINNED (open ruling): the Balance Sheet cannot show the per-fair phantom; the whole-company one is clean", () => {
+  it("receivables and the cancel rule are unaffected: B owes 60,000 and the applied note cannot be cancelled", () => {
+    const w = world();
+    try {
+      w.apply();
+      const row = w.repository.getReceivables().find((r) => r.invoiceId === "B");
+      expect(row?.outstandingPaise).toBe(60000);
+      expect(row?.paidPaise).toBe(40000); // the application, read from the credit_note_applications table
+      expect(row?.creditedPaise).toBe(0); // the je-credit-note-% prefix sum does not see the new ids
+      // S4-7 rule 2: an applied note is not cancellable, so these entries never need reversing.
+      expect(() => w.repository.cancelCreditNote("cn1")).toThrow();
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("the whole-company Balance Sheet is clean; a per-fair one is still refused", () => {
     const w = world();
     try {
       w.apply();
@@ -181,7 +249,7 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     }
   });
 
-  it("PINNED (open ruling): journal dimensions are per ENTRY, not per line", () => {
+  it("journal dimensions are per ENTRY, not per line (which is why the split is needed)", () => {
     const w = world();
     try {
       const columns = (table: string) =>
@@ -191,5 +259,64 @@ describe("PINNED (open ruling): applying a Fair A credit note to a Fair B invoic
     } finally {
       w.repository.close();
     }
+  });
+
+  describe("all fair combinations (untagged counts as different from tagged)", () => {
+    const cases: Array<{ name: string; source: Tag; target: Tag; splits: boolean }> = [
+      { name: "A -> B splits", source: "A", target: "B", splits: true },
+      { name: "B -> B does not split", source: "B", target: "B", splits: false },
+      { name: "untagged -> B splits", source: null, target: "B", splits: true },
+      { name: "B -> untagged splits", source: "B", target: null, splits: true },
+      { name: "untagged -> untagged does not split", source: null, target: null, splits: false },
+    ];
+    for (const c of cases) {
+      it(c.name, () => {
+        const w = world(c.source, c.target);
+        try {
+          w.apply();
+          const entries = applyEntries(w);
+          const fair = (t: Tag) => (t === "A" ? w.fairA : t === "B" ? w.fairB : null);
+          if (c.splits) {
+            expect(entries.map((e) => e.id)).toEqual(["je-credit-apply-ap1-source", "je-credit-apply-ap1-target"]);
+            expect(entries[0]?.fair_id).toBe(fair(c.source));
+            expect(entries[1]?.fair_id).toBe(fair(c.target));
+            expect(entries[0]?.lines.map((l) => l.account)).toEqual(["CUSTOMER_CREDITS", "INTER_FAIR_CLEARING"]);
+            expect(entries[1]?.lines.map((l) => l.account)).toEqual(["INTER_FAIR_CLEARING", "RECEIVABLES"]);
+            expect(net(w, "ALL", "INTER_FAIR_CLEARING")).toBe(0);
+          } else {
+            // Byte-for-byte what it was: ONE entry, the old id, tagged with the (shared) fair.
+            expect(entries).toHaveLength(1);
+            expect(entries[0]?.id).toBe("je-credit-apply-ap1");
+            expect(entries[0]?.fair_id).toBe(fair(c.target));
+            expect(entries[0]?.lines).toEqual([
+              { account: "CUSTOMER_CREDITS", debit: 40000, credit: 0 },
+              { account: "RECEIVABLES", debit: 0, credit: 40000 },
+            ]);
+            expect(hasClearingLine(w)).toBe(false);
+          }
+          // Whatever the shape, CUSTOMER_CREDITS closes inside the fair that created it...
+          expect(net(w, "ALL", "CUSTOMER_CREDITS")).toBe(0);
+          if (c.source !== null) expect(net(w, c.source, "CUSTOMER_CREDITS")).toBe(0);
+          // ...and every entry balances, so the whole ledger does.
+          for (const e of entries) expect(e.lines.reduce((t, l) => t + l.debit - l.credit, 0)).toBe(0);
+          const rows = w.repository.getTrialBalance();
+          expect(rows.reduce((t, r) => t + r.debitPaise, 0)).toBe(rows.reduce((t, r) => t + r.creditPaise, 0));
+        } finally {
+          w.repository.close();
+        }
+      });
+    }
+
+    it("untagged -> B: under a Fair B filter CUSTOMER_CREDITS shows no bare debit", () => {
+      const w = world(null, "B");
+      try {
+        w.apply();
+        expect(net(w, "B", "CUSTOMER_CREDITS")).toBe(0);
+        expect(net(w, "B", "INTER_FAIR_CLEARING")).toBe(40000);
+        expect(net(w, "B", "RECEIVABLES")).toBe(60000);
+      } finally {
+        w.repository.close();
+      }
+    });
   });
 });

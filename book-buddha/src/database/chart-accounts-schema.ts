@@ -136,8 +136,22 @@ export const V13_ADDED_ACCOUNTS: readonly SeedAccount[] = [
   { code: "STOCK_ADJUSTMENT", name: "Stock Adjustment", type: "EXPENSE" },
 ];
 
+/**
+ * FROZEN AT v15 - the accounts v15 (`applyInterFairClearingSchema`) seeds, and ONLY those. v15 reads
+ * this list, never the live one, for the reason given on V11_SEED_ACCOUNTS.
+ *
+ * - INTER_FAIR_CLEARING - S5-11: when a credit note raised at one fair is applied to an invoice at
+ *   another (or tagged vs untagged), the application is posted as TWO single-fair entries that
+ *   meet in this account, so CUSTOMER_CREDITS nets to zero inside the fair that created it. ASSET
+ *   with NO role, so the role CHECK needs no widening and v15 needs no table rebuild. It nets to
+ *   zero company-wide by construction; a non-zero company-wide balance would be a bug.
+ */
+export const V15_ADDED_ACCOUNTS: readonly SeedAccount[] = [
+  { code: "INTER_FAIR_CLEARING", name: "Inter-fair Clearing", type: "ASSET" },
+];
+
 /** The live chart: what should exist TODAY. The frozen lists above, in migration order. */
-export const SEED_ACCOUNTS: readonly SeedAccount[] = [...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS];
+export const SEED_ACCOUNTS: readonly SeedAccount[] = [...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS, ...V15_ADDED_ACCOUNTS];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [
   "chart_accounts_no_delete",

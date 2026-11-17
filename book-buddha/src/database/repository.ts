@@ -1670,24 +1670,67 @@ export class AccountingRepository {
           `Invoice ${target.number} only owes ${targetOutstandingPaise} paise; applying ${input.amountPaise} paise would take it past settled.`,
         );
       }
-      const entry: JournalEntry = {
-        // Not a `je-credit-note-` id: that prefix belongs to a note's own two entries, which the
-        // cash-view walk matches by exact id. This one is sourced at the TARGET, whose receivable
-        // it settles.
-        id: `je-credit-apply-${input.id}`,
-        sourceId: target.id,
-        description: `Credit note ${note.number} applied to invoice ${target.number}`,
-        isReversal: false,
-        lines: [
-          { account: "CUSTOMER_CREDITS", debitPaise: input.amountPaise, creditPaise: 0 },
-          { account: "RECEIVABLES", debitPaise: 0, creditPaise: input.amountPaise },
-        ],
-      };
-      this.insertJournalEntry(entry, {
-        businessId: target.businessId,
-        entryDate: input.appliedOn,
-        ...fairDim(target.fairId),
-      });
+      // S5-11: journal dimensions are per ENTRY, so one entry cannot carry two fairs. When the
+      // note's fair and the invoice's fair differ, post TWO single-fair entries that meet in
+      // INTER_FAIR_CLEARING, so CUSTOMER_CREDITS nets to zero inside the fair that created it and
+      // RECEIVABLES nets inside the fair whose invoice was settled. Untagged counts as different
+      // from tagged (null vs non-null splits); null vs null, or the same fair, stays ONE entry.
+      // `?? null` first: a missing fair may read back as undefined or null, and they are the same.
+      const sourceFair = source.fairId ?? null;
+      const targetFair = target.fairId ?? null;
+      const description = `Credit note ${note.number} applied to invoice ${target.number}`;
+      // None of these ids may begin `je-credit-note-`: that prefix belongs to a note's own two
+      // entries, which the cash-view walk matches by exact id and which invoiceCreditedPaise sums
+      // by prefix. They are sourced at the TARGET invoice, whose receivable they settle.
+      let entry: JournalEntry;
+      if (sourceFair === targetFair) {
+        entry = {
+          id: `je-credit-apply-${input.id}`,
+          sourceId: target.id,
+          description,
+          isReversal: false,
+          lines: [
+            { account: "CUSTOMER_CREDITS", debitPaise: input.amountPaise, creditPaise: 0 },
+            { account: "RECEIVABLES", debitPaise: 0, creditPaise: input.amountPaise },
+          ],
+        };
+        this.insertJournalEntry(entry, {
+          businessId: target.businessId,
+          entryDate: input.appliedOn,
+          ...fairDim(target.fairId),
+        });
+      } else {
+        const sourceEntry: JournalEntry = {
+          id: `je-credit-apply-${input.id}-source`,
+          sourceId: target.id,
+          description,
+          isReversal: false,
+          lines: [
+            { account: "CUSTOMER_CREDITS", debitPaise: input.amountPaise, creditPaise: 0 },
+            { account: "INTER_FAIR_CLEARING", debitPaise: 0, creditPaise: input.amountPaise },
+          ],
+        };
+        entry = {
+          id: `je-credit-apply-${input.id}-target`,
+          sourceId: target.id,
+          description,
+          isReversal: false,
+          lines: [
+            { account: "INTER_FAIR_CLEARING", debitPaise: input.amountPaise, creditPaise: 0 },
+            { account: "RECEIVABLES", debitPaise: 0, creditPaise: input.amountPaise },
+          ],
+        };
+        this.insertJournalEntry(sourceEntry, {
+          businessId: target.businessId,
+          entryDate: input.appliedOn,
+          ...fairDim(source.fairId),
+        });
+        this.insertJournalEntry(entry, {
+          businessId: target.businessId,
+          entryDate: input.appliedOn,
+          ...fairDim(target.fairId),
+        });
+      }
       this.db
         .prepare(
           "INSERT INTO credit_note_applications (id, credit_note_id, invoice_id, amount_paise, applied_on, created_at) VALUES (?, ?, ?, ?, ?, ?)",

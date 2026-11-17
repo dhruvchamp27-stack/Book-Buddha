@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrations, runMigrations } from "./migrations.js";
-import { CHART_ACCOUNTS_TRIGGER_NAMES, V9_SEED_ACCOUNTS, V11_SEED_ACCOUNTS } from "./chart-accounts-schema.js";
+import { CHART_ACCOUNTS_TRIGGER_NAMES, SEED_ACCOUNTS, V9_SEED_ACCOUNTS, V11_SEED_ACCOUNTS } from "./chart-accounts-schema.js";
 import { applyCustomerCreditsSchema } from "./customer-credits-schema.js";
 
 /**
@@ -128,10 +128,14 @@ describe("v11 rebuild over a realistic chart", () => {
         expect(after).toEqual(before);
       }
     }
-    // And exactly the new system accounts were added, nothing else: v11's two (CUSTOMER_CREDITS,
-    // UNCATEGORIZED_INCOME) plus v13's one (STOCK_ADJUSTMENT, S5-3), because this runs the FULL list.
+    // And exactly the new system accounts were added, nothing else. This runs the FULL list from
+    // v10, so "new" means every code in the live chart that the frozen v9 chart did not have. It is
+    // DERIVED, not a literal: the literal went stale at v13 and would again at every later
+    // migration that adds an account, and said nothing about v11. It stays an exact comparison.
     const addedCodes = rowsAfter.filter((r) => !rowsBefore.some((b) => b.code === r.code)).map((r) => r.code);
-    expect(addedCodes.sort()).toEqual(["CUSTOMER_CREDITS", "STOCK_ADJUSTMENT", "UNCATEGORIZED_INCOME"]);
+    const expectedAdded = SEED_ACCOUNTS.map((a) => a.code).filter((c) => !V9_SEED_ACCOUNTS.some((a) => a.code === c));
+    expect(expectedAdded).toContain("CUSTOMER_CREDITS"); // guard: the derivation is not vacuously empty
+    expect(addedCodes.sort()).toEqual([...expectedAdded].sort());
 
     // Integrity.
     expect(db.pragma("foreign_key_check")).toEqual([]);
