@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { AccountingRepository, RepositoryValidationError, istDateOf } from "./repository.js";
 import { verifyAuditChain } from "./audit-log.js";
+import { buildApi } from "../api/server.js";
 
 /**
  * R4c - opening stock and stock adjustments reach the GENERAL LEDGER (owner ruling S5-3), and the
@@ -440,6 +441,66 @@ describe("R4c - opening stock and stock adjustments post to the ledger", () => {
         expect(() => w.repository.planStockJournalBackfill({ businessId: "nope" })).toThrow(RepositoryValidationError);
       } finally {
         w.repository.close();
+      }
+    });
+
+    it("carries a movement's project (fair) through the backfill too", () => {
+      const w = world();
+      const r = w.repository;
+      try {
+        const fairId = r.createFair({ companyId: w.companyId, hostCustomerId: w.customerId, name: "Fair A" });
+        const tagged = insertGlLessMovement(r, { itemId: w.itemId, movementType: "ADJUSTMENT", quantity: 4, unitCostPaise: 25_000, occurredAt: "2026-08-15T04:00:00.000Z", fairId });
+        const untagged = insertGlLessMovement(r, { itemId: w.itemId, movementType: "OPENING", quantity: 1, unitCostPaise: 25_000, occurredAt: "2026-04-01T04:00:00.000Z" });
+        expect(r.planStockJournalBackfill({ businessId: w.businessId }).toPost.map((row) => row.fairId)).toEqual([undefined, fairId]);
+        r.backfillStockJournals({ businessId: w.businessId, dryRun: false });
+        const fairOf = (movementId: string): string | null =>
+          (r.db.prepare("SELECT fair_id FROM journal_entries WHERE source_id = ?").get(movementId) as { fair_id: string | null }).fair_id;
+        expect(fairOf(tagged)).toBe(fairId);
+        expect(fairOf(untagged)).toBeNull();
+      } finally {
+        r.close();
+      }
+    });
+  });
+
+  describe("over the API, which is the only way the owner can reach any of this today", () => {
+    it("POST /inventory/journal-backfill is a DRY RUN unless apply is true, and is idempotent", async () => {
+      const w = world();
+      const r = w.repository;
+      const app = buildApi(r, { __unsafeDisableAuthForTests: true });
+      try {
+        insertGlLessMovement(r, { itemId: w.itemId, movementType: "OPENING", quantity: 40, unitCostPaise: 25_000, occurredAt: "2026-04-01T04:00:00.000Z" }); // Rs 10,000
+        insertGlLessMovement(r, { itemId: w.itemId, movementType: "ADJUSTMENT", quantity: 5, unitCostPaise: 25_000, occurredAt: "2026-08-15T04:00:00.000Z" }); // Rs 1,250
+
+        const post = async (payload: Record<string, unknown>) =>
+          app.inject({ method: "POST", url: "/inventory/journal-backfill", payload });
+
+        // No `apply` at all: it must report and write NOTHING. This default is the whole guard on
+        // "never run it on my data without my say-so", so it is pinned here.
+        const dry = await post({ businessId: w.businessId });
+        expect(dry.statusCode).toBe(200);
+        expect(dry.json()).toMatchObject({ dryRun: true, postedCount: 0, totalPaise: 1_125_000, uncoveredPurchaseMovements: 0 });
+        expect(journalCount(r)).toBe(0);
+        // `apply: false` is the same as omitting it.
+        await post({ businessId: w.businessId, apply: false });
+        expect(journalCount(r)).toBe(0);
+
+        const applied = await post({ businessId: w.businessId, apply: true });
+        expect(applied.json()).toMatchObject({ dryRun: false, postedCount: 2, postedPaise: 1_125_000 });
+        expect(journalCount(r)).toBe(2);
+        expect(inventoryLedgerPaise(r, w.businessId)).toBe(valuationPaise(r));
+
+        const again = await post({ businessId: w.businessId, apply: true });
+        expect(again.json()).toMatchObject({ postedCount: 0, toPost: [] });
+        expect(journalCount(r)).toBe(2);
+
+        // An unknown business is refused, in words, not with a silent empty plan.
+        const unknown = await post({ businessId: "11111111-1111-1111-1111-111111111111", apply: true });
+        expect(unknown.statusCode).toBe(400);
+        expect(unknown.json<{ error?: string }>().error).toMatch(/was not found/);
+      } finally {
+        await app.close();
+        r.close();
       }
     });
   });

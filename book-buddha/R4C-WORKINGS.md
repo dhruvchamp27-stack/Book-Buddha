@@ -111,11 +111,15 @@ A recount moves no money, so the cash-basis view does not recognise it. **This i
 
 ---
 
-## Scenario 2: the stock already in your database, with no accounts behind it
+## Scenario 2: stock already entered, with no accounts behind it
 
 ### The story
-This is **your database's actual situation**. Three movements were entered before R4c existed, so
-none of them posted anything:
+**These figures are invented, and I have never seen your database.** What this scenario copies is
+its *shape*: any opening stock or adjustment you entered before today posted nothing, so the same
+gap exists in your books — in your own quantities, not these. I can run the **dry run** against
+your real database and show you your actual numbers, read-only, whenever you say so.
+
+Three movements, entered before R4c existed, so none of them posted anything:
 
 | Date | Movement | Quantity | Value |
 |---|---|---|---|
@@ -201,19 +205,23 @@ the stock-movement report shows such a movement in entry order rather than its b
 Rs 2,750, cash Rs 1,500). *Recommendation: leave it out.* No money moved, so a cash-basis statement
 has nothing to recognise. Say the word and the cash view can be extended to include it.
 
-**4. Shrinkage and breakage still cannot be entered at all.** A movement must be a **positive**
-quantity, so stock can only ever be adjusted **upward** — your own examples (shrinkage, breakage)
-have no way in. It is a real gap, and it is **not in R4c**. *Recommendation: a small slice of its
-own* — allow a negative adjustment, post `Dr Stock Adjustment / Cr Inventory`, and refuse to take
-more stock than the FIFO layers hold.
+**4. Shrinkage, breakage — and a mistyped quantity — still cannot be entered or undone.** A
+movement must be a **positive** quantity, so stock can only ever be adjusted **upward**; your own
+examples (shrinkage, breakage) have no way in. Worse, I checked: there is **no way to reverse or
+delete a stock movement at all** — the only public operations are "add" and "list". So a mistyped
+opening quantity is now wrong in the stock **and** in equity, with no correction path. That sits
+badly against cancel-with-reversal, which is one of this project's fixed rules, and R4c has made it
+matter more than it did. It is **not** in R4c. *Recommendation: a small slice of its own* — a
+negative adjustment and a reversal for a movement, posting `Dr Stock Adjustment / Cr Inventory`,
+refusing to take out more than the FIFO layers hold, and refusing to touch a locked year.
 
 ---
 
 ## How this was proved, and what is not proved
 
-**Proved.** 456 tests in 37 files pass; type check and build clean. 14 of those tests are new and
-cover this slice. Four of them were **mutation-tested** — the code was deliberately broken and the
-test watched to go red, then restored byte-identically:
+**Proved.** The whole suite passes; type check and build clean. **16 tests are new** and cover this
+slice, one of them driving the backfill **through its API route**. Five were **mutation-tested** —
+the code was deliberately broken and the test watched to go red, then restored byte-identically:
 
 | What was broken | What went red |
 |---|---|
@@ -221,11 +229,12 @@ test watched to go red, then restored byte-identically:
 | The backfill's "already posted?" check removed | three backfill tests, including idempotency |
 | The stock layer back-dated along with the entry | the first-in-first-out protection test |
 | The movement and its entry no longer one transaction | the locked-year rollback test |
+| The route writes even when `apply` is omitted | the API dry-run test |
 
 Both scenarios above were then run **outside the test harness**: scenario 1 over HTTP against the
 real API (signed in, real routes, throwaway database), scenario 2 through the real compiled code.
 
-**Not proved.** There is **no screen** for any of this — opening stock, adjustments and the backfill
-are API calls only, as the rest of the app's data entry still is. The backfill has **never been run
-against your real database** and will not be without your explicit say-so. And the figures above
-are mine, not yours: **until you check them, this slice is "built, figures unconfirmed."**
+**Not proved.** The backfill has **never been run against your real database** and will not be
+without your explicit say-so. Scenario 2's figures are **invented**, not read from your books. And
+the figures throughout are mine, not yours: **until you check them, this slice is "built, figures
+unconfirmed"** — the same standing as R1, R2, R4a, R4b and R5, of which only R3 is signed off.

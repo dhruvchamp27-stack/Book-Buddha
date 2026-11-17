@@ -7,6 +7,35 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S7-2 (2026-11-17) — ASSISTANT FINDING, NOT FIXED: a stock movement cannot be reversed,
+  deleted or entered negative, and R4c makes that hurt more.** The only public operations are
+  `addStockMovement` and `listStockMovements`; there is no reversal and quantity must be positive
+  (the upward-only gap first flagged in **S5-3**). Before R4c a mistyped opening quantity was wrong
+  in the stock reports alone; now it is also wrong in `OPENING_BALANCE_EQUITY`, with no correction
+  path — which sits badly against **cancel-with-reversal**, a fixed rule of this project.
+  **Recommended as its own small slice** (negative adjustment + movement reversal, `Dr
+  STOCK_ADJUSTMENT / Cr INVENTORY`, refusing to remove more than the FIFO layers hold and refusing
+  a locked year). Put to the owner as decision 4 of `book-buddha/R4C-WORKINGS.md`. **Not built.**
+- **S7-1 (2026-11-17) — R4c AS BUILT (`b932d26`, `c844e90`): hand-entered stock reaches the ledger.
+  FOUR CHOICES WERE THE ASSISTANT'S, inside the owner's S5-3 ruling, and all four are open to
+  reversal — they are decisions 1–4 of `book-buddha/R4C-WORKINGS.md`, awaiting his word.**
+  (a) **NO MIGRATION, so v17 is still free.** `journal_entries.source_type` has no CHECK in SQLite,
+  so `"STOCK_MOVEMENT"` is a TypeScript widening; a movement counts as posted exactly when an entry
+  carries its id, which is also what makes the backfill idempotent — no link table needed.
+  (b) **`businessId` is derived when the item's company has exactly one business, and REFUSED
+  (naming them) when it has more.** Items belong to a company; a journal entry needs a business.
+  Consequence: **opening stock can no longer be entered before a business exists** — refused in
+  plain words, now asserted at the API level. The rule lives in ONE helper
+  (`resolveStockMovementBusiness`) so reversing it is a one-line change.
+  (c) **`occurredOn` dates the JOURNAL ENTRY only; `stock_movements.occurred_at` stays the
+  insertion instant.** FIFO consumes layers `ORDER BY occurred_at`, so a back-dated layer would
+  jump the queue and silently re-measure COGS already posted on issued invoices. The FY lock
+  applies through the door on `occurredOn`.
+  (d) **A bare `PURCHASE` movement still posts nothing** (the bill posts it, so posting here would
+  double-count) — and that is now the ONE remaining way inventory moves with no entry, so the
+  backfill plan **counts those rows** rather than letting a tie-out report claim agreement.
+  Also: the cash-basis walk never visits these entries, so a recount shows on accrual and is absent
+  from cash. **Pinned in a test, deliberately not changed** — decision 3 for the owner.
 - **S6-5 (2026-11-17) — ASSISTANT FINDING, CORRECTED: headroom cannot compress in the Claude
   DESKTOP app at all, so a zero compression count is not evidence an agent ignored it.**
   *First diagnosis in this session was WRONG and is corrected here.* The MCP tool initially
