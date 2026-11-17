@@ -577,6 +577,51 @@ export interface OpeningSupplierBalanceRecord {
   readonly paidPaise: number;
 }
 
+/**
+ * R7b. One age band of what is owed. `toDays` null means "and older".
+ * Ages are measured from the document's own date to the report's as-at date, INCLUSIVE of
+ * neither end being guessed: the as-at date is passed in, never read from the clock, so the
+ * same books asked the same question twice give the same answer.
+ */
+export interface AgeingBucket {
+  readonly label: string;
+  readonly fromDays: number;
+  readonly toDays: number | null;
+  readonly outstandingPaise: number;
+  readonly documentCount: number;
+}
+
+/** What one customer or supplier owes, split into age bands. */
+export interface AgeingPartyRow {
+  readonly partyId: string;
+  readonly partyName: string;
+  readonly outstandingPaise: number;
+  readonly buckets: readonly AgeingBucket[];
+}
+
+/**
+ * R7b. Ageing of what is owed, read from the SAME open-items query as `getReceivables` and
+ * `getOpenCustomerItems` (and their supplier mirrors), so there is one definition of what is
+ * outstanding and these cannot drift apart from the Balance Sheet control account.
+ */
+export interface AgeingReport {
+  /**
+   * The date everything was aged against. Always present, even when the caller gave none.
+   *
+   * KNOWN LIMIT, say it plainly rather than imply otherwise: documents dated after this date
+   * are excluded, but SETTLEMENT is counted as it stands today. So this answers "how old is
+   * what is still owed, counted from this date", not "what was owed on this date". An invoice
+   * raised in March and paid last week shows as settled even when asked as at April. Making it
+   * a true as-at position needs the open-items query to date settlements too, which is a
+   * change to that query and not to this report.
+   */
+  readonly asAtDate: string;
+  readonly rows: readonly AgeingPartyRow[];
+  /** The same bands, totalled across every party. */
+  readonly buckets: readonly AgeingBucket[];
+  readonly totalOutstandingPaise: number;
+}
+
 export interface ReceivableRow {
   /** INVOICE, or OPENING for an opening customer balance (then invoiceId is the opening balance's id). */
   readonly kind: "INVOICE" | "OPENING";
@@ -2420,12 +2465,21 @@ export class AccountingRepository {
     }));
   }
 
-  public getReceivables(): readonly ReceivableRow[] {
+  /**
+   * R7b: this took NO filters and aged against the wall clock, so it could not answer "what was
+   * owed at the year end" and gave a different answer each day it was run. It now takes the same
+   * filters as the open-items query it reads, and ages against `asAtDate` (today when omitted),
+   * which is passed in rather than read from the clock.
+   */
+  public getReceivables(filter: { businessId?: string; customerId?: string; asAtDate?: string } = {}): readonly ReceivableRow[] {
     // One definition of "what a customer still owes": the shared open-items query, which reads
     // invoices (less payments, applied credit and credit notes from the POSTED journal) and
     // opening balances alike. This method only reshapes its rows.
-    const now = Date.now();
-    return this.openCustomerItemRows({}).map((item) => ({
+    const now = Date.parse(`${this.asAtOrToday(filter.asAtDate)}T00:00:00.000Z`);
+    return this.openCustomerItemRows({
+      ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
+      ...(filter.customerId === undefined ? {} : { customerId: filter.customerId }),
+    }).map((item) => ({
       kind: item.kind,
       invoiceId: item.documentId,
       invoiceNumber: item.number,
@@ -2435,8 +2489,110 @@ export class AccountingRepository {
       paidPaise: item.paidPaise,
       creditedPaise: item.creditedPaise,
       outstandingPaise: item.outstandingPaise,
-      ageDays: Math.max(0, Math.floor((now - Date.parse(item.date)) / 86400000)),
+      ageDays: Math.max(0, Math.floor((now - Date.parse(`${item.date}T00:00:00.000Z`)) / 86400000)),
     }));
+  }
+
+  /** The as-at date a report should use: the caller's, validated, or today in IST. */
+  private asAtOrToday(asAtDate?: string): string {
+    if (asAtDate === undefined) return istDateOf();
+    if (!isValidIsoDate(asAtDate)) {
+      throw new RepositoryValidationError("As-at date must be a real date written as YYYY-MM-DD.");
+    }
+    return asAtDate;
+  }
+
+  /** The age bands every ageing report uses. One definition, so customer and supplier agree. */
+  private static readonly AGEING_BANDS: ReadonlyArray<{ label: string; fromDays: number; toDays: number | null }> = [
+    { label: "0-30 days", fromDays: 0, toDays: 30 },
+    { label: "31-60 days", fromDays: 31, toDays: 60 },
+    { label: "61-90 days", fromDays: 61, toDays: 90 },
+    { label: "Over 90 days", fromDays: 91, toDays: null },
+  ];
+
+  /**
+   * Age a set of open documents into bands and group them by party. Shared by the customer and
+   * supplier reports so the two cannot drift apart.
+   */
+  private buildAgeingReport(
+    asAtDate: string,
+    documents: ReadonlyArray<{ partyId: string; date: string; outstandingPaise: number }>,
+    names: ReadonlyMap<string, string>,
+  ): AgeingReport {
+    const asAtMs = Date.parse(`${asAtDate}T00:00:00.000Z`);
+    const emptyBuckets = (): AgeingBucket[] =>
+      AccountingRepository.AGEING_BANDS.map((band) => ({ ...band, outstandingPaise: 0, documentCount: 0 }));
+    const byParty = new Map<string, AgeingBucket[]>();
+    const totals = emptyBuckets();
+
+    for (const document of documents) {
+      if (document.outstandingPaise === 0) continue;
+      // A document dated after the as-at date did not exist then, so it cannot be owed then.
+      // Without this an ageing report run as at January listed June's invoices at nil days old.
+      if (document.date > asAtDate) continue;
+      const ageDays = Math.floor((asAtMs - Date.parse(`${document.date}T00:00:00.000Z`)) / 86400000);
+      const index = AccountingRepository.AGEING_BANDS
+        .findIndex((band) => ageDays >= band.fromDays && (band.toDays === null || ageDays <= band.toDays));
+      // The bands run contiguously from 0 with an open top, so this cannot miss. Guarded anyway:
+      // a document silently dropped from an ageing report is the worst thing it could do.
+      if (index === -1) throw new AccountingError(`No ageing band covers ${ageDays} days.`);
+      let buckets = byParty.get(document.partyId);
+      if (buckets === undefined) { buckets = emptyBuckets(); byParty.set(document.partyId, buckets); }
+      const bucket = buckets[index] as AgeingBucket;
+      buckets[index] = { ...bucket, outstandingPaise: bucket.outstandingPaise + document.outstandingPaise, documentCount: bucket.documentCount + 1 };
+      const total = totals[index] as AgeingBucket;
+      totals[index] = { ...total, outstandingPaise: total.outstandingPaise + document.outstandingPaise, documentCount: total.documentCount + 1 };
+    }
+
+    const rows: AgeingPartyRow[] = [...byParty.entries()]
+      .map(([partyId, buckets]) => ({
+        partyId,
+        partyName: names.get(partyId) ?? "(unknown)",
+        outstandingPaise: buckets.reduce((sum, bucket) => sum + bucket.outstandingPaise, 0),
+        buckets,
+      }))
+      .sort((left, right) => left.partyName.localeCompare(right.partyName) || left.partyId.localeCompare(right.partyId));
+
+    return {
+      asAtDate,
+      rows,
+      buckets: totals,
+      totalOutstandingPaise: totals.reduce((sum, bucket) => sum + bucket.outstandingPaise, 0),
+    };
+  }
+
+  /** R7b. What customers owe, aged. Reads the same open items as `getReceivables`. */
+  public getReceivablesAgeing(filter: { businessId?: string; customerId?: string; asAtDate?: string } = {}): AgeingReport {
+    const items = this.openCustomerItemRows({
+      ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
+      ...(filter.customerId === undefined ? {} : { customerId: filter.customerId }),
+    });
+    const names = new Map(
+      (this.db.prepare("SELECT id, name FROM customers").all() as Array<{ id: string; name: string }>)
+        .map((row) => [row.id, row.name] as const),
+    );
+    return this.buildAgeingReport(
+      this.asAtOrToday(filter.asAtDate),
+      items.map((item) => ({ partyId: item.customerId, date: item.date, outstandingPaise: item.outstandingPaise })),
+      names,
+    );
+  }
+
+  /** R7b. The supplier mirror: what is owed to suppliers, aged, from the same open-items query. */
+  public getPayablesAgeing(filter: { businessId?: string; supplierId?: string; asAtDate?: string } = {}): AgeingReport {
+    const items = this.openSupplierItemRows({
+      ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
+      ...(filter.supplierId === undefined ? {} : { supplierId: filter.supplierId }),
+    });
+    const names = new Map(
+      (this.db.prepare("SELECT id, name FROM suppliers").all() as Array<{ id: string; name: string }>)
+        .map((row) => [row.id, row.name] as const),
+    );
+    return this.buildAgeingReport(
+      this.asAtOrToday(filter.asAtDate),
+      items.map((item) => ({ partyId: item.supplierId, date: item.date, outstandingPaise: item.outstandingPaise })),
+      names,
+    );
   }
 
   public getFairSales(fairId?: string): readonly FairSalesRow[] {
@@ -4611,10 +4767,14 @@ export class AccountingRepository {
 
   // ---- purchasing reports
 
-  public getPayables(): readonly PayableRow[] {
+  /** R7b: took no filters and aged against the wall clock, exactly as getReceivables did. */
+  public getPayables(filter: { businessId?: string; supplierId?: string; asAtDate?: string } = {}): readonly PayableRow[] {
     // The supplier mirror of getReceivables: reshapes the shared open-items rows.
-    const now = Date.now();
-    return this.openSupplierItemRows({}).map((item) => ({
+    const now = Date.parse(`${this.asAtOrToday(filter.asAtDate)}T00:00:00.000Z`);
+    return this.openSupplierItemRows({
+      ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
+      ...(filter.supplierId === undefined ? {} : { supplierId: filter.supplierId }),
+    }).map((item) => ({
       documentType: item.kind,
       documentId: item.documentId,
       documentNumber: item.number,
@@ -4623,7 +4783,7 @@ export class AccountingRepository {
       totalPaise: item.totalPaise,
       paidPaise: item.settledPaise,
       outstandingPaise: item.outstandingPaise,
-      ageDays: Math.max(0, Math.floor((now - Date.parse(item.date)) / 86400000)),
+      ageDays: Math.max(0, Math.floor((now - Date.parse(`${item.date}T00:00:00.000Z`)) / 86400000)),
     }));
   }
 

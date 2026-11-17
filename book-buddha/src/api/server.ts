@@ -377,6 +377,22 @@ const creditNoteReportQuery = z.object({
 }).strict().transform((value) => definedOnly(value));
 /** R7b. The day book and account detail. */
 const transactionReportQuery = salesReportQuery;
+/**
+ * R7b. What is still owed, and its ageing. `asAtDate` is the date everything is aged against;
+ * omitted means today. It is passed IN rather than read from the clock so the same books asked
+ * the same question twice give the same answer.
+ */
+const customerOpenItemsQuery = z.object({
+  businessId: id.optional(),
+  customerId: id.optional(),
+  asAtDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+/** The supplier mirror. */
+const openItemsQuery = z.object({
+  businessId: id.optional(),
+  supplierId: id.optional(),
+  asAtDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
 /** R7b. Stock movements, which are keyed on item rather than business. */
 const stockMovementQuery = z.object({
   itemId: id.optional(),
@@ -1290,7 +1306,14 @@ export function buildApi(
     }),
   );
 
-  app.get("/reports/payables", async () => repository.getPayables());
+  app.get("/reports/payables", async (request) =>
+    repository.getPayables(parseBody(openItemsQuery, request.query)));
+  // R7b. Ageing, read from the same open-items query as the two reports above, so what is
+  // outstanding has ONE definition and cannot drift from the Balance Sheet control account.
+  app.get("/reports/receivables-ageing", async (request) =>
+    repository.getReceivablesAgeing(parseBody(customerOpenItemsQuery, request.query)));
+  app.get("/reports/payables-ageing", async (request) =>
+    repository.getPayablesAgeing(parseBody(openItemsQuery, request.query)));
   app.get<{ Querystring: { supplierId?: string } }>("/reports/supplier-statement", async (request) => {
     const supplierId = request.query.supplierId;
     if (supplierId === undefined || supplierId.trim() === "") throw new RepositoryValidationError("supplierId is required.");
@@ -1337,7 +1360,8 @@ export function buildApi(
     repository.getTransactionDetailByAccount(parseBody(transactionReportQuery, request.query)));
   app.get("/reports/stock-movements", async (request) =>
     repository.getStockMovementReport(parseBody(stockMovementQuery, request.query)));
-  app.get("/reports/receivables", async () => repository.getReceivables());
+  app.get("/reports/receivables", async (request) =>
+    repository.getReceivables(parseBody(customerOpenItemsQuery, request.query)));
   app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
   app.get<{ Querystring: { fairId?: string } }>(
     "/reports/fair-sales",
