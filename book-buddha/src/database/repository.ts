@@ -1919,6 +1919,19 @@ export class AccountingRepository {
       addPayment(p.bill_id !== null ? `PURCHASE_BILL|${p.bill_id}` : `EXPENSE|${p.expense_id}`, p.amount_paise, p.paid_at);
     }
 
+    // Credit notes per invoice, read from the TABLE rather than inferred from entry-id prefixes.
+    // One note is TWO journal entries - `je-credit-note-<id>` (its sales and GST) and
+    // `je-credit-note-inventory-<id>` (the stock going back) - and they have to be ONE event. As
+    // two, anything that acts on a note (the settlement true-up, a refund split) can catch one
+    // entry and not the other, stranding COGS on a different date from the sales it belongs to.
+    const notesOf = new Map<string, string[]>();
+    for (const n of this.db.prepare(
+      "SELECT id, invoice_id FROM credit_notes WHERE status = 'FINALIZED' ORDER BY created_at, rowid",
+    ).all() as Array<{ id: string; invoice_id: string }>) {
+      const list = notesOf.get(n.invoice_id);
+      if (list === undefined) notesOf.set(n.invoice_id, [n.id]); else list.push(n.id);
+    }
+
     // The document's own business and fair (documents carry fair_id, as the entries do).
     const businessClause = (filter.businessId === undefined ? "" : " AND business_id = ?") + (filter.fairId === undefined ? "" : " AND fair_id = ?");
     const businessParams = [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.fairId === undefined ? [] : [filter.fairId])];
@@ -1988,28 +2001,40 @@ export class AccountingRepository {
         | { kind: "NOTE"; date: string; lines: readonly Natural[]; inclusivePaise: number }
         | { kind: "PAYMENT"; date: string; amountPaise: number };
 
-      // A credit note's journal entries are `je-credit-note-<id>` (its sales and GST lines) and
-      // `je-credit-note-inventory-<id>` (the stock going back). Everything else is the invoice
-      // itself, plus any reversal. Entry dates are already the notes' own dates, so no extra
-      // query is needed; the note's tax-inclusive value is what it took off the bill, which is
-      // the negated sum of its sales and GST lines (settlement accounts are filtered out above).
-      const noteEntries = new Map<string, Array<(typeof lineRows)[number]>>();
+      // Partition the document's lines by EXACT entry id against the notes the table reports,
+      // never by an id prefix: a prefix test silently swallows any future entry that happens to
+      // start the same way, and a reversal landing in baseRows would become part of the invoice
+      // from day one and re-measure months already reported (the S3-5 defect).
+      const notes = doc.type === "INVOICE" ? notesOf.get(doc.id) ?? [] : [];
+      const noteOfEntry = new Map<string, string>();
+      for (const noteId of notes) {
+        noteOfEntry.set(`je-credit-note-${noteId}`, noteId);
+        noteOfEntry.set(`je-credit-note-inventory-${noteId}`, noteId);
+      }
+      const valueRowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
+      const stockRowsOf = new Map<string, Array<(typeof lineRows)[number]>>();
       const baseRows: Array<(typeof lineRows)[number]> = [];
       for (const row of docLines) {
-        if (row.entry_id.startsWith("je-credit-note-")) {
-          const list = noteEntries.get(row.entry_id);
-          if (list === undefined) noteEntries.set(row.entry_id, [row]); else list.push(row);
-        } else baseRows.push(row);
+        const noteId = noteOfEntry.get(row.entry_id);
+        if (noteId === undefined) { baseRows.push(row); continue; }
+        const target = row.entry_id.startsWith("je-credit-note-inventory-") ? stockRowsOf : valueRowsOf;
+        const list = target.get(noteId);
+        if (list === undefined) target.set(noteId, [row]); else list.push(row);
       }
       const events: Event[] = [];
-      for (const [entryId, rows] of noteEntries) {
-        const lines = sumByAccount(rows);
-        const isStockEntry = entryId.startsWith("je-credit-note-inventory-");
+      for (const noteId of notes) {
+        const valueRows = valueRowsOf.get(noteId) ?? [];
+        const stockRows = stockRowsOf.get(noteId) ?? [];
+        if (valueRows.length === 0 && stockRows.length === 0) continue;
+        const dateRow = (valueRows[0] ?? stockRows[0]) as (typeof lineRows)[number];
         events.push({
           kind: "NOTE",
-          date: (rows[0] as (typeof lineRows)[number]).entry_date,
-          lines,
-          inclusivePaise: isStockEntry ? 0 : -lines.reduce((total, line) => total + line.amountPaise, 0),
+          date: dateRow.entry_date,
+          lines: sumByAccount([...valueRows, ...stockRows]),
+          // The note's tax-inclusive value is what it took off the bill: the negated sum of its
+          // SALES and GST lines. The stock entry moves cost between accounts and takes nothing
+          // off the bill, so it is excluded from this sum but included in the lines above.
+          inclusivePaise: -sumByAccount(valueRows).reduce((total, line) => total + line.amountPaise, 0),
         });
       }
       for (const payment of paymentsOf.get(key) ?? []) {
