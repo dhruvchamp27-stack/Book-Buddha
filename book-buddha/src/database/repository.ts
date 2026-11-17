@@ -34,6 +34,19 @@ import { RepositoryValidationError } from "./errors.js";
 import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { reportConditions } from "./report-filters-sql.js";
+import {
+  salesByBusiness, salesByCustomer, salesByFair, salesByTax, creditNoteReport, salesReturnReport,
+  type SalesReportFilter, type CreditNoteReportFilter, type SalesReport, type CreditNoteReport,
+  type SalesByBusinessRow, type SalesByCustomerRow, type SalesByFairRow, type SalesByTaxRow,
+  type SalesReturnReport,
+} from "./reports-sales.js";
+import {
+  transactionListByDate, transactionDetailByAccount, stockMovementReport,
+  type TransactionReportFilter, type TransactionListRow, type TransactionDetailAccount,
+  type StockMovementFilter, type StockMovementRow,
+} from "./reports-transactions.js";
+export type * from "./reports-sales.js";
+export type * from "./reports-transactions.js";
 import { ACCOUNT_TYPES, SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
 import { OPENING_BALANCE_EQUITY_CODE, OPENING_CONTROL_ROLES } from "./opening-balances-schema.js";
 import type {
@@ -496,9 +509,14 @@ export interface GeneralLedgerRow {
   readonly journalEntryId: string;
   readonly sourceId: string;
   readonly sourceType: JournalSourceType;
-  /** Posting timestamp (when the row was written). The ledger is ORDERED by entryDate. */
-  readonly date: string;
-  /** Transaction date (YYYY-MM-DD, IST) — what the report is read and filtered by. */
+  /**
+   * When the row was WRITTEN - a full timestamp, not a business date. It was called `date`
+   * until R7b, which read as the transaction date and was rendered as one, so a back-dated
+   * opening entry appeared under today. Nothing in a ledger column should be called "date"
+   * unless it is `entryDate`.
+   */
+  readonly postedAt: string;
+  /** Transaction date (YYYY-MM-DD, IST) — what the report is read, ordered and filtered by. */
   readonly entryDate: string;
   readonly description: string;
   readonly isReversal: boolean;
@@ -3219,7 +3237,7 @@ export class AccountingRepository {
       journalEntryId: row.journal_entry_id,
       sourceId: row.source_id,
       sourceType: row.source_type,
-      date: row.created_at,
+      postedAt: row.created_at,
       entryDate: row.entry_date ?? row.created_at.slice(0, 10),
       description: row.description,
       isReversal: row.is_reversal === 1,
@@ -3227,6 +3245,59 @@ export class AccountingRepository {
       debitPaise: row.debit_paise,
       creditPaise: row.credit_paise,
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // R7b. `reports-sales.ts` and `reports-transactions.ts` were written, tested and then never
+  // wired up: nothing outside their own tests imported them, so not one of these reports could
+  // be reached from the running app. These methods are the door. They hold no logic of their
+  // own on purpose - the measurement stays in one place, and this file does not become a
+  // second definition of what a sale is.
+  // ---------------------------------------------------------------------------
+
+  /** Sales by customer, net of credit notes, keyed on entry_date. */
+  public getSalesByCustomer(filter: SalesReportFilter = {}): SalesReport<SalesByCustomerRow> {
+    return salesByCustomer(this.db, filter);
+  }
+
+  /** Sales by business, net of credit notes. */
+  public getSalesByBusiness(filter: SalesReportFilter = {}): SalesReport<SalesByBusinessRow> {
+    return salesByBusiness(this.db, filter);
+  }
+
+  /** Sales by project (fair), net of credit notes - the journal-anchored answer. */
+  public getSalesByFairReport(filter: SalesReportFilter = {}): SalesReport<SalesByFairRow> {
+    return salesByFair(this.db, filter);
+  }
+
+  /** Sales by GST treatment and rate, net of credit notes. */
+  public getSalesByTax(filter: SalesReportFilter = {}): SalesReport<SalesByTaxRow> {
+    return salesByTax(this.db, filter);
+  }
+
+  /** Credit notes with what each one still owes the customer. */
+  public getCreditNoteReport(filter: CreditNoteReportFilter = {}): CreditNoteReport {
+    return creditNoteReport(this.db, filter);
+  }
+
+  /** Sales returns, line by line and summarised by item. */
+  public getSalesReturnReport(filter: CreditNoteReportFilter = {}): SalesReturnReport {
+    return salesReturnReport(this.db, filter);
+  }
+
+  /** Every posted transaction in date order - the day book. */
+  public getTransactionList(filter: TransactionReportFilter = {}): readonly TransactionListRow[] {
+    return transactionListByDate(this.db, filter);
+  }
+
+  /** The same transactions grouped under the accounts they touched. */
+  public getTransactionDetailByAccount(filter: TransactionReportFilter = {}): readonly TransactionDetailAccount[] {
+    return transactionDetailByAccount(this.db, filter);
+  }
+
+  /** Stock movements with their source document. */
+  public getStockMovementReport(filter: StockMovementFilter = {}): readonly StockMovementRow[] {
+    return stockMovementReport(this.db, filter);
   }
 
   private insertJournalEntry(entry: JournalEntry, dimensions: { businessId: string; entryDate: string; fairId?: string }): void {

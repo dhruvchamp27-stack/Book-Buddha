@@ -355,6 +355,37 @@ const trialBalanceQuery = z.object({
   asAtDate: reportDate.optional(),
 }).strict().transform((value) => definedOnly(value));
 
+/** R7b. The sales reports: period filters plus a customer. */
+const salesReportQuery = z.object({
+  businessId: id.optional(),
+  fairId: id.optional(),
+  customerId: id.optional(),
+  fromDate: reportDate.optional(),
+  toDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+/**
+ * The credit-note and returns reports also take an item. The money reports refuse it by name
+ * (sales are posted per invoice, not per item), which is why it is not on `salesReportQuery`.
+ */
+const creditNoteReportQuery = z.object({
+  businessId: id.optional(),
+  fairId: id.optional(),
+  customerId: id.optional(),
+  itemId: id.optional(),
+  fromDate: reportDate.optional(),
+  toDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+/** R7b. The day book and account detail. */
+const transactionReportQuery = salesReportQuery;
+/** R7b. Stock movements, which are keyed on item rather than business. */
+const stockMovementQuery = z.object({
+  itemId: id.optional(),
+  fairId: id.optional(),
+  customerId: id.optional(),
+  fromDate: reportDate.optional(),
+  toDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+
 /** Drops keys whose value is undefined (keeps null, which means "clear"). */
 function definedOnly<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K], undefined> } {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as { [K in keyof T]?: Exclude<T[K], undefined> };
@@ -1285,6 +1316,27 @@ export function buildApi(
     repository.getBalanceSheet(parseBody(asAtReportQuery, request.query)));
   app.get("/reports/general-ledger", async (request) =>
     repository.getGeneralLedger(parseBody(periodReportQuery, request.query)));
+
+  // R7b. reports-sales.ts and reports-transactions.ts had no caller outside their own tests, so
+  // none of these could be reached from the running app. These are the routes that reach them.
+  app.get("/reports/sales-by-customer", async (request) =>
+    repository.getSalesByCustomer(parseBody(salesReportQuery, request.query)));
+  app.get("/reports/sales-by-business", async (request) =>
+    repository.getSalesByBusiness(parseBody(salesReportQuery, request.query)));
+  app.get("/reports/sales-by-fair", async (request) =>
+    repository.getSalesByFairReport(parseBody(salesReportQuery, request.query)));
+  app.get("/reports/sales-by-tax", async (request) =>
+    repository.getSalesByTax(parseBody(salesReportQuery, request.query)));
+  app.get("/reports/credit-notes", async (request) =>
+    repository.getCreditNoteReport(parseBody(creditNoteReportQuery, request.query)));
+  app.get("/reports/sales-returns", async (request) =>
+    repository.getSalesReturnReport(parseBody(creditNoteReportQuery, request.query)));
+  app.get("/reports/transactions", async (request) =>
+    repository.getTransactionList(parseBody(transactionReportQuery, request.query)));
+  app.get("/reports/transaction-detail", async (request) =>
+    repository.getTransactionDetailByAccount(parseBody(transactionReportQuery, request.query)));
+  app.get("/reports/stock-movements", async (request) =>
+    repository.getStockMovementReport(parseBody(stockMovementQuery, request.query)));
   app.get("/reports/receivables", async () => repository.getReceivables());
   app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
   app.get<{ Querystring: { fairId?: string } }>(
