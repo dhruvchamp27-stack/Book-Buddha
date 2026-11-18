@@ -27,14 +27,18 @@ the docs disagree it is listed as an open question, not resolved.*
 - `testing/testing.md` is a **stale draft** — revise before using as a checklist.
 
 ## Open questions awaiting the owner
-> **AS OF 2026-11-18 (S10-7) EVERY ITEM IN THIS SECTION IS IN ONE PLACE: the nineteen numbered
-> questions at the top of `context/RESUME_PROMPT.md`**, each with a default he can approve in a
-> word. He answers them as his opening message in session 11. Treat the entries below as the
-> detail behind those questions, not as a second to-do list — and do not put a question to him
-> from here without checking it against that block first. Already ruled and NOT open: the four
-> R4c decisions (S10-1..S10-4) · S7-2 (closed by S10-4) · R4c scenario 1 (signed off, S10-6) ·
-> Subscriptions (deferred, S1-5). **7d and 8c need only a one-line confirm** — he gave those
-> figures himself on 2026-11-15 and the app reproduces them.
+> **AS OF 2026-11-18 (session 11) THIS SECTION IS CLOSED. He answered all nineteen questions, and
+> every answer is recorded in `context/decisions.md` as S11-1..S11-22, in his own words.** The
+> nineteen-question block has been DELETED from `context/RESUME_PROMPT.md` on purpose — do not go
+> looking for it, and do not re-derive the list. Treat the entries below as historical detail, not
+> as a live to-do list. Already ruled and NOT open: S11-1..S11-22 · the four R4c decisions
+> (S10-1..S10-4) · S7-2 (closed by S10-4) · R4c scenario 1 (signed off, S10-6) · Subscriptions
+> (deferred, S1-5). **7d and 8c are accepted ON TRUST, not hand-verified (S11-13)** — a
+> deliberately lower grade than R3 and R4c; they come back to him if anything contradicts them.
+> **Only three things still wait on him, and they are listed in `context/HOT.md`:** the
+> purchase-return back-dating inconsistency (S11-21), confirming base64 for attachments at R9
+> (S11-19, defaulted and never actually answered), and amending FD §D6 to TWO Uncategorized
+> accounts before R12 (S11-8).
 - ~~**Slice 7 build gate** (1) real cash-basis data? (2) hand-worked cash/accrual figures?
   (3) chart-of-accounts add?~~ **ALL ANSWERED 2026-11-15.** (1) No real data — no `.db` file
   exists, so 7b was a clean refactor (assumption stated: `BOOK_BUDDHA_DATABASE` could point
