@@ -7,6 +7,159 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S10-7 (2026-11-18) — HOW THE REST OF THE BACKLOG GETS CLEARED: he answers it cold, in
+  writing, as the opening message of session 11.** His words: *"Pause on this, I will answer all of
+  them, as my starting prompt in next session."* Session 10 put every remaining open item to him as
+  **one numbered batch of nineteen questions**, each carrying a default he can approve in a word —
+  his own instruction earlier in the session was *"Ask all the queries together"*, which overrode
+  the one-at-a-time rule in `RESUME_PROMPT.md` for this batch. **The nineteen questions, verbatim
+  and with their defaults, are the top block of `context/RESUME_PROMPT.md`.** They are NOT
+  duplicated here, so that there is only ever one copy to go stale. Each answer he gives becomes
+  its own **S11-n** entry in this file, dated, in the words he used; a default he waves through in
+  a batch is recorded as approved by batch, with the default's wording, not written up as though
+  he had argued it out. Items 1, 4, 5 and 9 of that list can change code that already exists, so
+  they get said out loud the moment his answer lands. **Nothing in the batch may be re-asked from
+  scratch and the list must not be re-derived** — it took a session to assemble, and three of its
+  items (Subscriptions, the four R4c decisions, S7-2) were only kept out of it because the record
+  showed he had already ruled.
+- **S10-6 (2026-11-18) — R4c IS SIGNED OFF. OWNER ACCEPTANCE, the SECOND slice to get there after
+  R3.** He reviewed the R4c figures, **rejected one and accepted the rest**. The rejection became
+  S10-5 (the trial balance printed gross movements; now Rs 15,250 a side). The six figures he
+  signed, in his own words "all other validated figures": opening stock **Rs 10,000** credited to
+  `OPENING_BALANCE_EQUITY` · stock adjustment **Rs 1,250** credited to `STOCK_ADJUSTMENT` ·
+  **accrual net profit Rs 2,750** · **cash net profit Rs 1,500** · **closing inventory Rs 8,750**,
+  equal to the stock valuation to the paise · **balance sheet Rs 12,750**. `ACCEPTANCE R4c` in
+  `stock-journal.test.ts` is retitled from "(figures unconfirmed)" to **"(CONFIRMED S10-6)"** and
+  `R4C-WORKINGS.md` is headed APPROVED, with the correction and the old figures kept visible.
+  **With S10-1 to S10-4 settling its four decisions, R4c is fully closed except one thing: the
+  backfill has still never been run against his real database, and must not be without his
+  explicit say-so.** **Acceptance still outstanding for NINE slices** — 7d, 8c, R1, R2, R4, R4b,
+  R5, R7, R8 — **and none of them has a workings document yet**, so none can be signed in
+  conversation until one is written per slice. (Both HOT and the session-9 resume brief said
+  "nine slices await, only R3 signed off"; the list named TEN. The count was wrong, not the list.)
+
+- **S10-5 (2026-11-18) — OWNER-FOUND DEFECT, FIXED: THE TRIAL BALANCE WAS PRINTING GROSS
+  MOVEMENTS, NOT BALANCES. He caught it in the R4c acceptance figures.** Reviewing R4c he said the
+  trial balance must total **Rs 15,250** a side, not Rs 17,750, and that the extra Rs 2,500
+  duplicated on each side had to go while the report still reflected the journal entries.
+  **He was right.** `getTrialBalance` (`repository.ts`) passed `getReportAccountRows` straight
+  through, and that helper returns `SUM(debit_paise)` and `SUM(credit_paise)` **per account** — the
+  gross movement. So INVENTORY read **Dr 11,250 / Cr 2,500** instead of the **Dr 8,750** actually
+  held, and every account with activity on both sides inflated BOTH totals by the same figure.
+  **Why it survived nine sessions and 528 tests: it always balanced.** The R4c acceptance test
+  asserted only `debits === credits`, which is true of a gross trial balance too. A balanced
+  report is not a correct one — the lesson to carry.
+  **THE FIX, presentation only:** `getTrialBalance` now nets each account to `debit - credit` and
+  puts the result on ONE side, zeroing the other. An account netting to exactly nil is **kept at
+  0/0** (his sub-choice, so the report still shows it had activity). **Nothing else changed:** the
+  P&L already netted (`creditPaise - debitPaise`), the balance sheet works from `balancePaise`, and
+  the UI's R4c tie-out computes `debitPaise - creditPaise` — identical before and after. No
+  posting, no migration, no other report.
+  **FOUR tests went red; all four pinned the OLD gross shape and none was an `ACCEPTANCE` test**
+  (every `ACCEPTANCE` test passed untouched, so no figure he has accepted moved):
+  `report-filters` and `report-fair-filter` each compared the report against a raw
+  `SUM/GROUP BY` query — now netted the same way, regression intent unchanged · `purchasing` (API)
+  pinned PAYABLES Dr 3,800 / Cr 11,800, now **Cr 8,000**, and an EXPENSE booked-then-cancelled,
+  now the 0/0 row · `repository.test` pinned INVENTORY Cr 3,500, now **Cr 1,500**.
+  **That last one is worth knowing:** in that fixture inventory nets to a CREDIT while stock is
+  held, because a bare `PURCHASE` movement posts nothing yet FIFO still consumes it (S7-1(d)).
+  Netting makes that hole **visible** instead of hiding it in the gross columns.
+  **The R4c acceptance test now pins Rs 15,250 a side and the INVENTORY row at Dr 8,750** — the
+  assertion that would have caught this. Gates after the fix: **528/528 in 44 files, tsc clean,
+  vite build clean.** `R4C-WORKINGS.md` corrected, with the old figures and the reason kept visible.
+
+- **S10-4 (2026-11-18) — OWNER RULING: BUILD THE STOCK-REVERSAL SLICE, AND BUILD IT BEFORE R9.
+  This closes R4C-WORKINGS decision 4 AND the carried finding S7-2 — one answer, both items.**
+  His words: "Yes, before R9." **The gap:** `addStockMovement` requires a POSITIVE quantity and
+  there is no reversal or delete — the only public operations are add and list. So shrinkage and
+  breakage have no way in, and since R4c a mistyped opening quantity is wrong in the stock reports
+  **and** in `OPENING_BALANCE_EQUITY`, with no correction path. That sits against
+  **cancel-with-reversal**, a fixed rule of this project.
+  **Scope as put to him and accepted:** a negative adjustment plus a reversal for an existing
+  movement, posting `Dr STOCK_ADJUSTMENT / Cr INVENTORY`; **refusing to remove more than the FIFO
+  layers actually hold**; **refusing a locked financial year**. Sized to him as roughly R9's size.
+  **BUILD-ORDER CHANGE, recorded here because it supersedes the session-9 brief:** the order is now
+  **stock reversal → R9 attachments → R10 → R11 backup → R12 banking → R13 cash flow → R14
+  archive.** The slice takes the next free migration version if it needs one (v20 was free at the
+  close of session 9). Note for whoever builds it: the removal side must respect `getStockLayers`'s
+  replay semantics (S10-2) — a reversal is NOT a back-dated layer.
+
+- **S10-3 (2026-11-18) — OWNER RULING: a stock recount STAYS OUT of the cash-basis P&L.**
+  R4C-WORKINGS decision 3 of 4, settled. His words: "Leave it out." The figures put to him are the
+  app's own, from R4C-WORKINGS scenario 1 (produced by running it, not hand arithmetic): a recount
+  finding 5 atlases at Rs 250 credits `STOCK_ADJUSTMENT` Rs 1,250, so **accrual net profit
+  Rs 2,750** while **cash net profit is Rs 1,500** — the recount is absent from the cash view.
+  Rationale accepted: a recount moves no money, so a cash-basis statement has nothing to recognise.
+  This confirms S7-1's "pinned in a test, deliberately not changed" as deliberate POLICY rather
+  than an assistant's default. **No code change, no rework.** If it is ever reversed, the cash-basis
+  walk would have to visit `STOCK_MOVEMENT`-sourced entries, which it never does today.
+
+- **S10-2 (2026-11-18) — OWNER RULING: a back-dated stock entry dates the ENTRY ONLY; the stock
+  LAYER stays at the end of the FIFO queue.** R4C-WORKINGS decision 2 of 4, settled. His words:
+  "Keep it as built." **Why it is not cosmetic, verified in the code this session:**
+  `getStockLayers` (`repository.ts:3886`) stores nothing about which lot a sale consumed — it
+  REPLAYS every movement from scratch, `ORDER BY occurred_at, rowid`, on every call. So a layer's
+  date decides, today and retrospectively, what the app believes a sale months ago consumed.
+  **The figure put to him** (worked from the code, not from a run, and labelled as such when
+  asked): buy 10 @ Rs 250 on 1 Sep, sell all 10 on 20 Sep (COGS Rs 2,500 posted, inventory nil),
+  then on 10 Nov enter 10 older atlases @ Rs 180 as opening stock dated 1 Apr. **As built:** ledger
+  inventory Rs 1,800, stock report Rs 1,800, **out by Rs 0.** **If the layer were back-dated too:**
+  the April lot jumps ahead of the September sale, the stock report says Rs 2,500 against a ledger
+  of Rs 1,800 — **a Rs 700 hole**, with Rs 2,500 of COGS already posted on an issued invoice and no
+  document to explain the gap. Keeping the layer at the end is the only version where the INVENTORY
+  account and the stock valuation agree **by construction**, which is R4c's whole purpose.
+  **The cost he accepted:** the stock-movement report lists such a movement in ENTRY order (10 Nov)
+  while its journal entry is correctly dated 1 Apr, so the two reports disagree about where it sits
+  in time. No figure is wrong; it is presentation, and fixable separately by sorting that report on
+  the entry date. **No code change, no rework: this confirms what is built.**
+
+- **S10-1 (2026-11-18) — OWNER RULING: opening stock KEEPS the one-business rule and the
+  refusal.** R4C-WORKINGS decision 1 of 4, carried five sessions, now settled. An item belongs to a
+  *company* but a journal entry needs a *business*, so R4c's `Dr INVENTORY / Cr
+  OPENING_BALANCE_EQUITY` has to be filed under one business and the item alone does not say which.
+  **As built, and now confirmed:** with exactly ONE business on the company the app uses it
+  silently; with TWO OR MORE it **refuses and names them** rather than guessing. His words: "Keep
+  the refusal." Rationale put to him and accepted: the refusal is the safe half — it never files
+  capital (Rs 10,000 of Opening Balance Equity on the 40-atlas example) under the wrong business.
+  **The consequence he accepted deliberately: opening stock can no longer be entered before a
+  business exists**, and the app says so in plain words. Rejected: always requiring the business to
+  be typed — safer in theory, needlessly fiddly in the common one-business case. The rule stays in
+  the single helper `resolveStockMovementBusiness`, so reversing it is a one-line change.
+  **No code change, no rework: this confirms what is built.**
+
+- **S9-1 (2026-11-18) — ASSISTANT FINDING, OWNER DECISION PENDING: a bill discount (v18) does
+  not reduce what the stock is carried at.** The discount credits its own INCOME account
+  (`PURCHASE_DISCOUNT`) and INVENTORY is debited at FULL line cost. Netting it into the goods cost
+  was ruled out by the data model, not by preference: a stock layer holds an **integer**
+  `unit_cost_paise`, so a header discount cannot be pushed into it exactly, and a bill of pure
+  stock lines has **no expense debit** to net against - netting there drives EXPENSE to a credit
+  balance, the same shape as the SALES-in-debit hole closed in session 8. Debiting INVENTORY in
+  full is also what keeps the INVENTORY ledger equal to the stock-layer value **by construction**.
+  **The trade-off for him to rule on: under AS 2 a trade discount normally reduces the cost of
+  the inventory.** Net profit is identical either way; what differs is the timing (discount income
+  now, versus a lower COGS when the goods sell) and the balance-sheet carrying value.
+
+- **S9-2 (2026-11-18) — ASSISTANT DECISION, OWNER MAY OVERRULE: a purchase return claws back the
+  bill's DISCOUNT in proportion, but NOT its EXTRA CHARGE.** Returning a discounted bill in full
+  must give back exactly what was owed, so the discount comes back with the goods (and the return
+  that completes the bill absorbs the remaining headroom, so it lands on nil rather than stranding
+  a paisa). Freight **in** is treated differently: it was really incurred on the inward journey
+  and a supplier does not refund it because the goods later went back. Say if it should be
+  reversed in proportion too - it is a small change.
+
+- **S9-3 (2026-11-18) — CORRECTION OF A RECORDED FACT: S7-2 never blocked purchase returns.**
+  HOT.md carried "purchase returns are BLOCKED on S7-2 (stock cannot go out in reverse)" from
+  session 8. That was wrong: `getStockLayers` already understands `PURCHASE_REVERSAL` and removes
+  the purchase's **own lot** (matching source id AND unit cost), never the oldest layer, which is
+  the only correct behaviour when goods go back to the supplier they came from. **S7-2 itself
+  still stands exactly as written** - there is no reversal path for a *user-entered*
+  `addStockMovement`. Only the "blocks R8" inference was false, and nothing had to be built.
+
+- **S9-4 (2026-11-18) — CORRECTION OF A RECORDED FACT: there is no separate `web` tsc gate.**
+  HOT.md listed "web tsc clean" as a fourth gate. `web/tsconfig.json` does not exist and the root
+  `tsconfig.json` has `"include": ["src"]`, so `tsc.cmd -p web/tsconfig.json` exits 2. The web
+  side is covered by the **vite build**. Three gates, not four.
+
 - **S8-5 (2026-11-17) — A FALSE FACT CORRECTED: pushing DOES work from a tool shell.** Sessions
   4-8 carried "a tool shell CANNOT push (no tty for the credential manager)" in the resume brief
   and acted on it for four sessions. Nobody re-tested it. Measured today, dry-run only, on
@@ -570,6 +723,7 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
   reversible, audit-logged; blocked while live stock or an open balance exists.
 - **Rejected (G):** live bank feed, reconciler-only role, auto-posting, one bank
   account per business.
+
 
 ## Not a decision
 `reference/` (Invoice Ninja inspection) is **reference-only** — where it differs from

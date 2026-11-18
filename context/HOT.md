@@ -1,49 +1,49 @@
 # HOT — Book Buddha
 
 ## Last session
-2026-11-17 (session 8), branch `autonomous/book-buddha-finish`, tip `7dcf194` or later. **R5
-DONE, R7b PARTIAL, R8 ONE OF FOUR.** Rulings **S8-1..S8-4**. Count the unpushed commits, never
-quote a number: `git log --oneline @{u}..HEAD | wc -l`. **PUSHING WORKS from a tool shell — a
-dry-run went through in 3s with every prompt disabled (2026-11-17, S8-5). ASK HIM EVERY TIME.**
-Gates: **487/487 vitest, 41 files, tsc clean (unpiped), vite build clean, web tsc clean.**
+2026-11-18 (session 10) — no build slice, by his instruction. **He found a real defect in the
+trial balance and it is fixed** (S10-5): accounts printed **gross** instead of at their balance,
+so R4c totalled Rs 17,750 a side instead of **Rs 15,250**. **R4c scenario 1 SIGNED OFF** (S10-6),
+its four decisions settled (S10-1..S10-4, closing S7-2). The rest of the backlog went to him as
+**nineteen numbered questions**, which he answers as his opening message next session.
 
-## What session 8 did (full version in RESUME_PROMPT.md — do not rebuild any of it)
-1. **`a89f7fc`+`9ede5e4` — R5-rem DONE.** Retained earnings split at the FY boundary as a **new
-   `retainedEarnings` field, NOT replacing the derived row** (chart-accounts.test pins it).
-2. **`0797270` — R7b wiring.** `reports-sales.ts`+`reports-transactions.ts` had NO caller outside
-   their tests; 9 methods + 9 routes reach them. **`.date` → `postedAt` (S8-3)**.
-3. **`a2758de`+`1af0dc2` — R7b ageing.** `/receivables-ageing`, `/payables-ageing`, 0-30/31-60/
-   61-90/90+ off the SAME open-items query; both take businessId/party/asAtDate (**S8-2**).
-4. **`6ad504c`+`f4773ab` — R8 payment cancellation, migration v17.** Row marked not deleted;
-   reversal = the posted entry's lines FLIPPED, dated today. Closed a real dead end, then two
-   holes it opened: **SALES could end on a DEBIT balance**; the supplier statement still counted
-   a cancelled payment. **S8-1.** Proved live on a real v16→v17 upgrade.
+## State now
+Branch `autonomous/book-buddha-finish`, tip `fec2d2a`, **nothing unpushed** (verify, never quote:
+`git log --oneline @{u}..HEAD | wc -l`). Gates: **528/528 vitest, 44 files, tsc clean (unpiped),
+vite build clean. PUSHING WORKS from a tool shell (S8-5) — ASK HIM EVERY TIME.** Migration **v20**.
 
-## NEXT STEP — the owner set this order on 2026-11-17
-1. **FIX fair-sales FIRST.** `/reports/fair-sales` + `/reports/sales-by-item` ignore credit notes
-   and have no filters — fair-sales answers **60,000** where `/reports/sales-by-fair` answers
-   **40,000 on the same books: two routes, two answers.** Reproduce both figures first. **Fix,
-   do not retire** — he asked for a fix.
-2. **R8 — three of four AT BEST.** Bill discount (header-level, own migration **v18**) ·
-   supplier refunds · **purchase returns are BLOCKED on S7-2** (stock cannot go out in reverse).
-3. **R9 attachments — CONDITIONAL, and small.** Engine already exists
-   (`src/attachments/attachments.ts`, table in migration v7, `4033ecb`) with **NO caller outside
-   its own folder** — the same hole R7b had; only routes + HTTP tests remain. **But there is no
-   `@fastify/multipart`:** upload needs an install (ASK) or base64 JSON. Settle that first.
-4. **R10** import-export · R11 backup · R12 banking · R13 cash flow · R14 archive.
+**TWO SLICES THROUGH ACCEPTANCE: R3 and R4c.** Nine await him — 7d, 8c, R1, R2, R4, R4b, R5, R7,
+R8 (the old "nine awaiting, only R3" was miscounted — that list had ten names).
 
-## Owner action / carried
-**FOUR DECISIONS IN `book-buddha/R4C-WORKINGS.md`** + **S8-1** (cash view rewritten
-retrospectively on cancellation; the FY lock does not protect it) + **S7-2** (no stock reversal —
-blocks R8 closing) + **S8-4** (a credit note has no date, so a return cannot be back-dated).
-**ACCEPTANCE for 7d, 8c, R1, R2, R4, R4b, R4c, R5, R7 await him — only R3 is signed
-off.** **The R4c backfill has never touched his real DB and must not without his say-so.** The 13
-CRLF-dirty test files were restored 2026-11-17 and the tree is clean; `.codebase-memory/` is still
-untracked. Open: CASH hardcoded in `recordPayment`, `SALES` in `finalizeCreditNote` (S5-8);
-`web/` is in NO gate.
+## NEXT STEP — take his answers to the nineteen questions
+**His instruction, 2026-11-18:** *"Pause on this, I will answer all of them, as my starting prompt
+in next session."* The nineteen questions, each with the default he can approve in a word, are the
+top block of `context/RESUME_PROMPT.md`. **Do not re-ask them and do not re-derive the list.**
+Write each answer into `decisions.md` as its own **S11-n**; say at once that items **1, 4, 5, 9**
+can change what is built; then do the work, smallest first.
+**Already ruled — never re-ask:** S10-1..S10-4 · S7-2 (closed by S10-4) · R4c scenario 1 (S10-6) ·
+Subscriptions (deferred by S1-5) · the push count (nothing unpushed).
+THEN build: **stock-reversal slice (S10-4) → R9 attachments** (`src/attachments/`, v7, no caller
+outside its folder — routes + HTTP tests only; question 9 is its gate) → R10 → R11 backup →
+R12 banking → R13 cash flow → R14 archive.
 
-## Workflow — full brief in `context/RESUME_PROMPT.md`
+## Uncommitted / blocked
+**Seven files are changed and NOT committed** — that is question 19, which he did not answer:
+`book-buddha/src/database/repository.ts` + five of its tests + `book-buddha/R4C-WORKINGS.md`.
+Message ready: *"Trial balance: report balances, not gross movements (owner-found)"*. `context/*`
+is held back for its own commit. **`.gitignore` still deliberately uncommitted** (question 8).
+**Check `git status` before assuming a clean start.**
+**R4c backfill (scenario 2) is NOT signed off and has NEVER touched his real DB** — on 15 Nov no
+real `.db` existed at all; ask before anything touches one.
+
+## Corrections that must not be re-inherited
+**S7-2 never blocked purchase returns** — `getStockLayers` already removes the purchase's own lot.
+**There is no `web` tsc gate** (no `web/tsconfig.json`), so the vite build IS it. THREE gates.
+**`getTrialBalance` now returns NET balances**, not `SUM(debit)`/`SUM(credit)` — and a gross trial
+balance still balances, which is exactly why `debits === credits` never caught it.
+
+## Workflow
 Gates from `book-buddha/`: `vitest.cmd run --root .` · `tsc.cmd` · `vite.cmd build`, **never via a
-pipe. vitest does NOT type-check — run `tsc.cmd` before claiming it. READ the test count before
-writing it.** Stop servers BY PORT. Throwaway DB in the scratchpad — **NEVER his real DB. No UI.
-Advisor = Fable. PUSH: ASK FIRST, then run it in the BACKGROUND.**
+pipe. vitest does NOT type-check — run `tsc.cmd` first. READ the test count before writing it.**
+Stop servers BY PORT. Throwaway DB in the scratchpad — **NEVER his real DB. No UI. Advisor =
+Fable. PUSH: ASK FIRST, then run it in the BACKGROUND.** Full brief: `context/RESUME_PROMPT.md`.

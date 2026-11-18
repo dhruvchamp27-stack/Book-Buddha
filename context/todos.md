@@ -27,6 +27,14 @@ the docs disagree it is listed as an open question, not resolved.*
 - `testing/testing.md` is a **stale draft** — revise before using as a checklist.
 
 ## Open questions awaiting the owner
+> **AS OF 2026-11-18 (S10-7) EVERY ITEM IN THIS SECTION IS IN ONE PLACE: the nineteen numbered
+> questions at the top of `context/RESUME_PROMPT.md`**, each with a default he can approve in a
+> word. He answers them as his opening message in session 11. Treat the entries below as the
+> detail behind those questions, not as a second to-do list — and do not put a question to him
+> from here without checking it against that block first. Already ruled and NOT open: the four
+> R4c decisions (S10-1..S10-4) · S7-2 (closed by S10-4) · R4c scenario 1 (signed off, S10-6) ·
+> Subscriptions (deferred, S1-5). **7d and 8c need only a one-line confirm** — he gave those
+> figures himself on 2026-11-15 and the app reproduces them.
 - ~~**Slice 7 build gate** (1) real cash-basis data? (2) hand-worked cash/accrual figures?
   (3) chart-of-accounts add?~~ **ALL ANSWERED 2026-11-15.** (1) No real data — no `.db` file
   exists, so 7b was a clean refactor (assumption stated: `BOOK_BUDDHA_DATABASE` could point
