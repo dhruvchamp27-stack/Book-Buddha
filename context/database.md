@@ -93,12 +93,39 @@ business + fair + customer; invoice_lines → items.
 **No hash chain, no `documents` header, invoice-level GST.**
 
 ### Migration versions applied (`schema_migrations`)
+*Read from `src/database/migrations.ts` on 2026-11-18 — that file owns version numbers, and a
+schema file never registers itself.*
 v1 baseline · v2 auth · v3 customer/item/inventory · v4 purchasing+expenses (rebuilds
 `journal_entries`/`journal_lines`/`stock_movements`, so `transactional: false`) ·
 **v5 `business_id` + `entry_date` on `journal_entries`** · **v6 `fair_id` on
-`journal_entries`, `stock_movements`, `purchase_bills`, `expenses`**.
-Next free version: **v7** (the chart-of-accounts CHECK rebuild — see
-`book-buddha/REMAINING_BUILD_PLAN.md` S1).
+`journal_entries`, `stock_movements`, `purchase_bills`, `expenses`** · v7 `attachments` ·
+v8 `audit_hardening` · v9 `chart_of_accounts` · v10 `financial_years` ·
+**v11 `customer_credits`** · v12 `credit_discharge` · v13 `opening_balances` ·
+v14 `opening_sub_ledger` · v15 `inter_fair_clearing` · v16 `recovery_code` ·
+v17 `payment_cancellation` · **v18 `bill_discount`** · **v19 `purchase_returns`**.
+**Next free version: v20.**
+
+**The v11 trap, and it applies to every future version:** any migration that REBUILDS
+`chart_accounts` must drop and replay **every trigger whose body mentions it**, including
+`journal_lines_account_exists`, which lives on `journal_lines`, not on `chart_accounts`. An
+ADDITIVE migration (new tables, new seeded rows) rebuilds nothing and needs no replay — v18 and
+v19 are both additive, and their tests assert the trigger set is byte-identical afterwards.
+
+**Seeded accounts are frozen per version.** `chart-accounts-schema.ts` holds `V9_*`, `V11_*`,
+`V13_ADDED_ACCOUNTS`, `V15_ADDED_ACCOUNTS`, `V18_ADDED_ACCOUNTS`, `V19_ADDED_ACCOUNTS`, and the
+live `SEED_ACCOUNTS` is their concatenation. **Each migration seeds the list frozen at its own
+version, never the live one** — otherwise an old database upgrading today would silently gain
+accounts that did not exist at that version. A new account therefore means a new frozen list.
+
+### R8 purchase documents (v18/v19)
+`PURCHASE_DISCOUNT` (INCOME) and `PURCHASE_EXTRA_CHARGES` (EXPENSE) on a bill header, with
+**INVENTORY debited at FULL line cost** so the INVENTORY ledger equals the stock-layer value by
+construction (the AS 2 trade-off is **S9-1**, open for the owner).
+`purchase_returns` / `purchase_return_lines` / `supplier_refunds`, plus `SUPPLIER_CREDITS`
+(**ASSET** — the mirror of `CUSTOMER_CREDITS` being a LIABILITY). A return carries its **own
+`return_date`**, unlike a credit note (S8-4). Its settlement debit **splits**: PAYABLES as far as
+the bill is still open, the excess to `SUPPLIER_CREDITS`, so payables lands on zero rather than
+going into debit.
 
 ### Dimensions on `journal_entries` (v5/v6) — read before touching reports
 `business_id` (required on new writes, enforced in the repository since SQLite cannot add a
