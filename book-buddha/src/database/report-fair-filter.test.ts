@@ -113,7 +113,13 @@ describe("fair filter on reports, slice 8c", () => {
       const legacy = w.repository.db
         .prepare("SELECT account, SUM(debit_paise) AS d, SUM(credit_paise) AS c FROM journal_lines GROUP BY account ORDER BY account")
         .all() as Array<{ account: string; d: number; c: number }>;
-      expect(w.repository.getTrialBalance()).toEqual(legacy.map((r) => ({ account: r.account, debitPaise: r.d, creditPaise: r.c })));
+      // S10-5: the trial balance nets each account onto ONE side, so the independent query is
+      // netted the same way. The regression intent is unchanged.
+      expect(w.repository.getTrialBalance()).toEqual(legacy.map((r) => ({
+        account: r.account,
+        debitPaise: r.d - r.c > 0 ? r.d - r.c : 0,
+        creditPaise: r.c - r.d > 0 ? r.c - r.d : 0,
+      })));
       const totalLines = (w.repository.db.prepare("SELECT COUNT(*) AS n FROM journal_lines").get() as { n: number }).n;
       expect(w.repository.getGeneralLedger()).toHaveLength(totalLines);
     } finally {

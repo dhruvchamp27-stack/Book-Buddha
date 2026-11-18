@@ -1,4 +1,21 @@
-# R4c Workings: opening stock and stock adjustments in the ledger — AWAITING YOUR SIGN-OFF
+# R4c Workings: opening stock and stock adjustments in the ledger — SCENARIO 1 APPROVED
+
+> **APPROVED by the owner on 2026-11-18 (ruling S10-6), with one correction he found himself.**
+> Reviewing the figures he rejected the trial balance: it totalled Rs 17,750 a side because
+> Inventory was printed **gross** (Dr 11,250 / Cr 2,500) instead of at its Rs 8,750 balance. That
+> was a real defect in `getTrialBalance`, not a slip in this document — it is fixed, the totals are
+> now **Rs 15,250**, and the R4c acceptance test pins them (ruling **S10-5**). The other six
+> figures he signed unchanged: opening stock Rs 10,000 to equity, the recount Rs 1,250, accrual
+> profit Rs 2,750, cash profit Rs 1,500, closing inventory Rs 8,750, balance sheet Rs 12,750.
+>
+> **All four decisions at the foot of this document are also settled** — S10-1 keep the
+> one-business refusal · S10-2 date the entry, not the layer · S10-3 a recount stays out of the
+> cash P&L · S10-4 build the stock-reversal slice, before R9.
+>
+> **What he signed is scenario 1 only.** Those are the figures he worked through and the ones the
+> acceptance test pins. **Scenario 2 (the backfill) is NOT signed off:** its numbers came out of the
+> code on a throwaway database, he has not reviewed them, and the backfill has never been run
+> against his real database.
 
 Every figure below was produced by **running the app itself**, not worked out by hand: scenario 1
 over HTTP against the real API on a throwaway database, scenario 2 through the real compiled code
@@ -51,11 +68,20 @@ recount finds **5 more** (same cost). In September you **sell 10 at Rs 400** for
 |---|---|---|
 | Cash | Rs 4,000 | — |
 | Cost of goods sold | Rs 2,500 | — |
-| Inventory | Rs 11,250 | Rs 2,500 |
+| Inventory | Rs 8,750 | — |
 | Opening Balance Equity | — | Rs 10,000 |
 | Sales | — | Rs 4,000 |
 | Stock Adjustment | — | Rs 1,250 |
-| **Totals** | **Rs 17,750** | **Rs 17,750** |
+| **Totals** | **Rs 15,250** | **Rs 15,250** |
+
+> **CORRECTED BY THE OWNER, 2026-11-18 (ruling S10-5).** This table used to read Inventory
+> **Dr 11,250 / Cr 2,500** and **Rs 17,750** a side. That was the account's gross movement, not its
+> balance: the Rs 2,500 cost of the sale sat in the credit column and inflated both totals by the
+> same amount. It balanced, which is why no test caught it — the only assertion was
+> `debits === credits`. A trial balance carries **net balances**, so Inventory appears once at the
+> **Rs 8,750 actually held** and the totals are **Rs 15,250**. Fixed in `getTrialBalance`; the
+> R4c acceptance test now pins Rs 15,250 and the Inventory row. **No other figure in this document
+> moved**, because the P&L and balance sheet already netted.
 
 ### Profit & Loss (accrual), straight from the app
 | Line | Amount |
@@ -104,8 +130,8 @@ A recount moves no money, so the cash-basis view does not recognise it. **This i
 2. The recount of 5 @ Rs 250 credits **Stock Adjustment Rs 1,250**, which **reduces** this year's
    costs, so accrual net profit is **Rs 2,750**, not Rs 1,500.
 3. Inventory in the ledger is **Rs 8,750** and equals the stock report to the paise.
-4. The trial balance totals **Rs 17,750** on both sides, and the balance sheet balances at
-   **Rs 12,750**.
+4. The trial balance totals **Rs 15,250** on both sides (corrected by him, S10-5 — it read
+   Rs 17,750 while Inventory was shown gross), and the balance sheet balances at **Rs 12,750**.
 5. Cash-basis net profit is **Rs 1,500** — Rs 1,250 lower than accrual, because the recount is
    absent from it.
 
@@ -235,6 +261,9 @@ Both scenarios above were then run **outside the test harness**: scenario 1 over
 real API (signed in, real routes, throwaway database), scenario 2 through the real compiled code.
 
 **Not proved.** The backfill has **never been run against your real database** and will not be
-without your explicit say-so. Scenario 2's figures are **invented**, not read from your books. And
-the figures throughout are mine, not yours: **until you check them, this slice is "built, figures
-unconfirmed"** — the same standing as R1, R2, R4a, R4b and R5, of which only R3 is signed off.
+without your explicit say-so. Scenario 2's figures are **invented**, not read from your books.
+
+**Scenario 1's figures are now yours, not mine** — signed off 2026-11-18 (S10-6), with the trial
+balance corrected to Rs 15,250 on your own challenge (S10-5). **R3 and R4c are the two slices that
+have been through acceptance.** R1, R2, R4a, R4b, R5, R7, R8, 7d and 8c remain "built, figures
+unconfirmed", and none of them has a workings document like this one yet.

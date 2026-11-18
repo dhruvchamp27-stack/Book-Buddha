@@ -330,9 +330,16 @@ describe("AccountingRepository", () => {
         totalExpensesPaise: 3500,
         netProfitPaise: 9000 - 3500,
       });
+      // S10-5: the trial balance reports NET balances. COGS is one-sided, so it is unchanged at
+      // Dr 3500. INVENTORY moved Dr 2000 (the opening movement) against Cr 3500 (the cost of the
+      // sale) and therefore nets to a CREDIT of 1500 - a negative inventory in the ledger while
+      // 1500 of stock is actually held. That is not a netting artefact: it is the known
+      // uncovered-purchase-movement gap (S7-1(d)), where a bare PURCHASE movement posts nothing
+      // but is still consumed by FIFO. Netting makes it visible instead of hiding it inside the
+      // gross columns, which is the point of the change.
       expect(repository.getTrialBalance()).toEqual(expect.arrayContaining([
         expect.objectContaining({ account: "COGS", debitPaise: 3500 }),
-        expect.objectContaining({ account: "INVENTORY", creditPaise: 3500 }),
+        expect.objectContaining({ account: "INVENTORY", debitPaise: 0, creditPaise: 1500 }),
       ]));
       // 2 before R4c (the invoice and its cost). The OPENING movement above now posts a third
       // (Dr INVENTORY 2000 / Cr OPENING_BALANCE_EQUITY); the bare PURCHASE still posts nothing.

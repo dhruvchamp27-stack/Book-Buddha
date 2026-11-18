@@ -91,8 +91,12 @@ describe("purchasing & expenses API", () => {
       const get = (account: string) => trial.find((row) => row.account === account);
       expect(get("INVENTORY")).toMatchObject({ debitPaise: 10000, creditPaise: 0 });
       expect(get("INPUT_IGST")).toMatchObject({ debitPaise: 1800 });
-      expect(get("PAYABLES")).toMatchObject({ debitPaise: 3800, creditPaise: 11800 });
-      expect(get("EXPENSE")).toMatchObject({ debitPaise: 5000, creditPaise: 5000 });
+      // S10-5: the trial balance reports each account's NET balance on one side, not its gross
+      // movement. PAYABLES moved Dr 3800 / Cr 11800 and is therefore owed 8000; the EXPENSE was
+      // booked and then cancelled above, so it nets to nil and is kept as a 0/0 row rather than
+      // dropped, which is how you can still see it had activity.
+      expect(get("PAYABLES")).toMatchObject({ debitPaise: 0, creditPaise: 8000 });
+      expect(get("EXPENSE")).toMatchObject({ debitPaise: 0, creditPaise: 0 });
       const sheet = (await app.inject({ method: "GET", url: "/reports/balance-sheet" })).json<{ totalAssetsPaise: number; totalLiabilitiesPaise: number; totalEquityPaise: number }>();
       expect(sheet.totalAssetsPaise).toBe(sheet.totalLiabilitiesPaise + sheet.totalEquityPaise);
     } finally {

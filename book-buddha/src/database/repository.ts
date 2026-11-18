@@ -370,7 +370,9 @@ export interface CreditNoteSummary {
 export interface TrialBalanceRow {
   /** A code from chart_accounts, which the user can extend at runtime - NOT a fixed union. */
   readonly account: string;
+  /** The account's NET balance when it falls on the debit side, else 0 (S10-5). Never gross. */
   readonly debitPaise: number;
+  /** The account's NET balance when it falls on the credit side, else 0 (S10-5). Never gross. */
   readonly creditPaise: number;
 }
 
@@ -2814,12 +2816,33 @@ export class AccountingRepository {
     return rows.map((row) => this.getJournalEntry(row));
   }
 
+  /**
+   * A trial balance of BALANCES, not of totals (owner ruling S10-5, 2026-11-18).
+   *
+   * Each account appears ONCE, on the side its net balance falls. `getReportAccountRows` returns
+   * the GROSS sums per account, and passing those straight through inflated BOTH totals by every
+   * amount an account carried on both sides. On the R4c scenario INVENTORY read Dr 11,250 and
+   * Cr 2,500 - its full movement rather than the Rs 8,750 actually held - and the totals came to
+   * Rs 17,750 a side instead of Rs 15,250. The books balanced either way, which is exactly why it
+   * survived: no totals assertion could see it.
+   *
+   * An account whose balance nets to exactly nil is KEPT, at 0/0, so the report still shows that
+   * it had activity in the period.
+   *
+   * This is presentation only. No posting, no other report and no stored figure changes: the P&L
+   * already nets (`creditPaise - debitPaise`), the balance sheet works from `balancePaise`, and the
+   * UI's R4c inventory tie-out computes `debitPaise - creditPaise`, which is identical before and
+   * after.
+   */
   public getTrialBalance(filter: AsAtReportFilter = {}): readonly TrialBalanceRow[] {
-    return this.getReportAccountRows(filter).map((row) => ({
-      account: row.account as AccountCode,
-      debitPaise: row.debitPaise,
-      creditPaise: row.creditPaise,
-    }));
+    return this.getReportAccountRows(filter).map((row) => {
+      const balancePaise = row.debitPaise - row.creditPaise;
+      return {
+        account: row.account as AccountCode,
+        debitPaise: balancePaise > 0 ? balancePaise : 0,
+        creditPaise: balancePaise < 0 ? -balancePaise : 0,
+      };
+    });
   }
 
   public getProfitAndLoss(filter: PeriodReportFilter = {}): ProfitAndLossReport {

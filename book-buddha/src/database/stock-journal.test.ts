@@ -90,7 +90,11 @@ function insertGlLessMovement(
 }
 
 describe("R4c - opening stock and stock adjustments post to the ledger", () => {
-  it("ACCEPTANCE R4c (figures unconfirmed): opening stock is equity, an adjustment is an expense, and the ledger ties to the stock", () => {
+  // CONFIRMED by the owner on 2026-11-18 (ruling S10-6), after he corrected the trial balance to
+  // Rs 15,250 a side (S10-5). The six figures he signed are asserted below: opening stock
+  // Rs 10,000 to equity, the recount Rs 1,250, accrual profit Rs 2,750, cash profit Rs 1,500,
+  // closing inventory Rs 8,750 tying to the stock valuation, and the balance sheet at Rs 12,750.
+  it("ACCEPTANCE R4c (CONFIRMED S10-6): opening stock is equity, an adjustment is an expense, and the ledger ties to the stock", () => {
     const w = world();
     const r = w.repository;
     try {
@@ -124,6 +128,14 @@ describe("R4c - opening stock and stock adjustments post to the ledger", () => {
       const debits = tb.reduce((t, x) => t + x.debitPaise, 0);
       const credits = tb.reduce((t, x) => t + x.creditPaise, 0);
       expect(debits).toBe(credits);
+      // S10-5, THE OWNER'S CORRECTION: balancing was never enough. The report used to print each
+      // account's GROSS movement, so INVENTORY read Dr 11,250 / Cr 2,500 and both totals came to
+      // Rs 17,750 - balanced, and wrong, with the same Rs 2,500 duplicated on each side. A trial
+      // balance carries NET balances, so the totals are Rs 15,250 and INVENTORY appears once, at
+      // the Rs 8,750 actually held. This assertion is the one that would have caught it.
+      expect(debits).toBe(1_525_000); // Rs 15,250
+      expect(credits).toBe(1_525_000); // Rs 15,250
+      expect(tb.find((x) => x.account === "INVENTORY")).toMatchObject({ debitPaise: 875_000, creditPaise: 0 });
 
       // The recount is a GAIN, because today a movement can only ADD stock (quantity > 0). So it
       // lands as a CREDIT in an EXPENSE account and REDUCES this year's expenses by Rs 1,250.

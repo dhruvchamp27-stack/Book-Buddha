@@ -65,7 +65,14 @@ describe("report filters", () => {
       const legacy = repository.db
         .prepare("SELECT account, SUM(debit_paise) AS d, SUM(credit_paise) AS c FROM journal_lines GROUP BY account ORDER BY account")
         .all() as Array<{ account: string; d: number; c: number }>;
-      const legacyRows = legacy.map((r) => ({ account: r.account, debitPaise: r.d, creditPaise: r.c }));
+      // S10-5: the trial balance nets each account onto ONE side, so the independent query is
+      // netted the same way. The regression this test exists for is unchanged - the unfiltered
+      // report must still equal a query run with no knowledge of the filter code.
+      const legacyRows = legacy.map((r) => ({
+        account: r.account,
+        debitPaise: r.d - r.c > 0 ? r.d - r.c : 0,
+        creditPaise: r.c - r.d > 0 ? r.c - r.d : 0,
+      }));
       expect(repository.getTrialBalance()).toEqual(legacyRows);
       expect(repository.getTrialBalance({})).toEqual(legacyRows);
 
