@@ -1,49 +1,47 @@
 # HOT — Book Buddha
 
 ## Last session
-2026-11-18 (session 10) — no build slice, by his instruction. **He found a real defect in the
-trial balance and it is fixed** (S10-5): accounts printed **gross** instead of at their balance,
-so R4c totalled Rs 17,750 a side instead of **Rs 15,250**. **R4c scenario 1 SIGNED OFF** (S10-6),
-its four decisions settled (S10-1..S10-4, closing S7-2). The rest of the backlog went to him as
-**nineteen numbered questions**, which he answers as his opening message next session.
+2026-11-18 (session 11) — **he answered all nineteen questions, so the backlog is CLEARED**
+(S11-1..S11-22 in `decisions.md`). Four items followed; **all four done, tested, committed, pushed**:
+unknown-fair guard · ledger date (needed nothing) · credit-note own date (**v20**) · cash-view
+**ROUNDING** line (**v21**). Two rulings: an undated credit note posts at **finalise** (S11-20);
+back-dating a reported month is **allowed but warned** (S11-21).
 
 ## State now
-Branch `autonomous/book-buddha-finish`, tip `fec2d2a`, **nothing unpushed** (verify, never quote:
-`git log --oneline @{u}..HEAD | wc -l`). Gates: **528/528 vitest, 44 files, tsc clean (unpiped),
-vite build clean. PUSHING WORKS from a tool shell (S8-5) — ASK HIM EVERY TIME.** Migration **v20**.
+Branch `autonomous/book-buddha-finish`. Gates: **590 tests, 47 files, tsc clean (unpiped first),
+vite build clean.** Migration **v21**. Verify, never quote: `git log --oneline @{u}..HEAD | wc -l`.
+**PUSHING WORKS, mystery solved (S11-17) — his credential can lapse, so NEVER push in the
+foreground, and ASK HIM EVERY TIME.** **ACCEPTANCE: hand-verified R3, R4c · on trust 7d, 8c
+(S11-13) · outstanding R1, R2, R4, R4b, R5, R7, R8** — seven, per **S11-14**: R4 first, R8 last.
 
-**TWO SLICES THROUGH ACCEPTANCE: R3 and R4c.** Nine await him — 7d, 8c, R1, R2, R4, R4b, R5, R7,
-R8 (the old "nine awaiting, only R3" was miscounted — that list had ten names).
-
-## NEXT STEP — take his answers to the nineteen questions
-**His instruction, 2026-11-18:** *"Pause on this, I will answer all of them, as my starting prompt
-in next session."* The nineteen questions, each with the default he can approve in a word, are the
-top block of `context/RESUME_PROMPT.md`. **Do not re-ask them and do not re-derive the list.**
-Write each answer into `decisions.md` as its own **S11-n**; say at once that items **1, 4, 5, 9**
-can change what is built; then do the work, smallest first.
-**Already ruled — never re-ask:** S10-1..S10-4 · S7-2 (closed by S10-4) · R4c scenario 1 (S10-6) ·
-Subscriptions (deferred by S1-5) · the push count (nothing unpushed).
-THEN build: **stock-reversal slice (S10-4) → R9 attachments** (`src/attachments/`, v7, no caller
-outside its folder — routes + HTTP tests only; question 9 is its gate) → R10 → R11 backup →
-R12 banking → R13 cash flow → R14 archive.
+## NEXT STEP
+**Stock-reversal slice (S10-4)**, then **discount-into-inventory-cost (S11-1 + S11-2)** — the
+largest work his answers created, and **it BLOCKS R8 acceptance** (`bill-discount.test.ts` figures
+change). Unsolved hard part, in S11-1: a stock layer stores an integer `unit_cost_paise`, so a
+discount will not divide into equal whole paise and the remainder must be placed deliberately.
+**S11-22 is the precedent — show the odd paise, never absorb it silently.** Then **R9 attachments:
+only HTTP ROUTES are missing** (`src/attachments/` is built, 24 tests, migration registered);
+base64 per S11-19, Fastify `bodyLimit` (1 MB) **must be raised**. Then R10 → R11 backup → R12
+banking → R13 cash flow (+ the S11-3 warning) → R14. Brief + file map: `context/RESUME_PROMPT.md`.
 
 ## Uncommitted / blocked
-**Seven files are changed and NOT committed** — that is question 19, which he did not answer:
-`book-buddha/src/database/repository.ts` + five of its tests + `book-buddha/R4C-WORKINGS.md`.
-Message ready: *"Trial balance: report balances, not gross movements (owner-found)"*. `context/*`
-is held back for its own commit. **`.gitignore` still deliberately uncommitted** (question 8).
-**Check `git status` before assuming a clean start.**
-**R4c backfill (scenario 2) is NOT signed off and has NEVER touched his real DB** — on 15 Nov no
-real `.db` existed at all; ask before anything touches one.
+**Nothing uncommitted. Nothing blocked.** **Waiting on him when a slice reaches it — do not batch:**
+(1) a purchase return can still be back-dated with **no warning**, unlike a credit note after
+S11-21 — same guard, or a reason? (2) **item 9 / S11-19 was defaulted, never answered** — confirm
+base64 at R9. (3) **§D6 of `Feature Design - Bank Categorization, Bill OCR & Archive (V1).md` →
+TWO Uncategorized accounts** (S11-8) before R12. **Still NO real database (S11-16, verified)** —
+the backfill has never run on real books; never touch or copy his live file.
 
 ## Corrections that must not be re-inherited
-**S7-2 never blocked purchase returns** — `getStockLayers` already removes the purchase's own lot.
-**There is no `web` tsc gate** (no `web/tsconfig.json`), so the vite build IS it. THREE gates.
-**`getTrialBalance` now returns NET balances**, not `SUM(debit)`/`SUM(credit)` — and a gross trial
-balance still balances, which is exactly why `debits === credits` never caught it.
+**`getTrialBalance` returns NET balances**, not gross — a gross trial balance still balances, which
+is why `debits === credits` never caught it (his own find, S10-5). **S7-2 never blocked purchase
+returns.** **THREE gates, not four** — no `web` tsc; the vite build covers it. **Item 15 needed no
+work** (R7b). **Check before calling something missing:** I told an agent the rounding tolerance
+guard was unbuilt; it was already there and the agent was right to push back.
 
 ## Workflow
-Gates from `book-buddha/`: `vitest.cmd run --root .` · `tsc.cmd` · `vite.cmd build`, **never via a
-pipe. vitest does NOT type-check — run `tsc.cmd` first. READ the test count before writing it.**
-Stop servers BY PORT. Throwaway DB in the scratchpad — **NEVER his real DB. No UI. Advisor =
-Fable. PUSH: ASK FIRST, then run it in the BACKGROUND.** Full brief: `context/RESUME_PROMPT.md`.
+Gates from `book-buddha/`: `tsc.cmd` **first** (vitest does NOT type-check) · `vitest.cmd run
+--root .` · `vite.cmd build` — **never through a pipe. READ the count, never assume it.** **An
+`ACCEPTANCE` test pins a figure HE signed — if one turns red, STOP and report. Never edit one to
+make a build pass.** Stop servers BY PORT. Throwaway DB in the scratchpad. **No UI.** Sonnet writes
+code, I review and run gates myself; Haiku for search. Advisor = Opus 5.5.
