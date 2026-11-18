@@ -150,8 +150,47 @@ export const V15_ADDED_ACCOUNTS: readonly SeedAccount[] = [
   { code: "INTER_FAIR_CLEARING", name: "Inter-fair Clearing", type: "ASSET" },
 ];
 
+/**
+ * FROZEN AT v18 - the accounts v18 (`applyBillDiscountSchema`) seeds, and ONLY those. v18 reads
+ * this list, never the live one, for the reason given on V11_SEED_ACCOUNTS.
+ *
+ * R8 bill discount. A purchase bill gains a header-level discount and extra charge, mirroring the
+ * invoice. They could NOT be netted into the goods cost the way the invoice nets its discount
+ * into SALES, for two reasons found while building it:
+ *
+ *  - A stock layer stores an integer `unit_cost_paise`, so a discount pushed into inventory cost
+ *    cannot be made exact: quantity x unit cost will not hit an arbitrary discounted total, and
+ *    the residue would put the INVENTORY ledger permanently out of step with the stock-layer
+ *    value. Keeping INVENTORY at the full line cost keeps those two equal to the paise.
+ *  - On a bill of nothing but stock lines there is no expense debit for a discount to reduce, so
+ *    netting it would drive EXPENSE to a CREDIT balance - the same shape as the SALES-in-debit
+ *    hole closed in session 8.
+ *
+ * So each gets an account of its own, which also shows the owner the discount he won as a line he
+ * can actually see:
+ *  - PURCHASE_DISCOUNT - "Discount Received". INCOME, the ordinary Indian treatment of a supplier
+ *    discount, and the side that keeps the entry balanced without any account going negative.
+ *  - PURCHASE_EXTRA_CHARGES - freight, packing and the like added by the supplier on the bill
+ *    itself. EXPENSE.
+ * Both are plain INCOME/EXPENSE with NO role, so the role CHECK needs no widening and v18 rebuilds
+ * no table. The owner can rename either in the chart; the CODES are immutable under S2-1.
+ *
+ * TRADE-OFF HE SHOULD KNOW ABOUT, written here because nothing else records it: a discount on a
+ * bill of stock does NOT reduce the carrying value of that stock. Strict AS 2 would deduct a trade
+ * discount from inventory cost. Doing that needs the stock layer to carry a total cost rather than
+ * a unit cost, which is a change to the FIFO core and not a reporting slice. Net profit is the
+ * same either way; what differs is timing - the discount lands in the month of the bill instead of
+ * the month the goods are sold - and the balance-sheet value of unsold stock.
+ */
+export const V18_ADDED_ACCOUNTS: readonly SeedAccount[] = [
+  { code: "PURCHASE_DISCOUNT", name: "Discount Received", type: "INCOME" },
+  { code: "PURCHASE_EXTRA_CHARGES", name: "Purchase Extra Charges", type: "EXPENSE" },
+];
+
 /** The live chart: what should exist TODAY. The frozen lists above, in migration order. */
-export const SEED_ACCOUNTS: readonly SeedAccount[] = [...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS, ...V15_ADDED_ACCOUNTS];
+export const SEED_ACCOUNTS: readonly SeedAccount[] = [
+  ...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS, ...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS,
+];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [
   "chart_accounts_no_delete",

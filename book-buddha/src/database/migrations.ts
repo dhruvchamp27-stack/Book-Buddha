@@ -13,6 +13,7 @@ import { applyOpeningSubLedgerSchema } from "./opening-sub-ledger-schema.js";
 import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
 import { applyRecoveryCodeSchema } from "./recovery-code-schema.js";
 import { applyPaymentCancellationSchema } from "./payment-cancellation-schema.js";
+import { applyBillDiscountSchema } from "./bill-discount-schema.js";
 
 export interface Migration {
   version: number;
@@ -236,6 +237,16 @@ export const migrations: readonly Migration[] = [
     // exactly what `cancelled_at IS NULL` means. The reversing journal entry is posted by the
     // repository through the normal door, never by this migration. Default (transactional).
     up: applyPaymentCancellationSchema,
+  },
+  {
+    version: 18,
+    name: "bill_discount",
+    // Additive: two NOT NULL DEFAULT 0 columns on purchase_bills and two new chart accounts
+    // (PURCHASE_DISCOUNT, PURCHASE_EXTRA_CHARGES), seeded from the FROZEN V18 list. No table is
+    // rebuilt, so no trigger needs replaying, and nothing is backfilled -- a bill finalized before
+    // v18 had no discount, and re-deriving its posted entry would rewrite history.
+    // Default (transactional).
+    up: applyBillDiscountSchema,
   },
 ];
 

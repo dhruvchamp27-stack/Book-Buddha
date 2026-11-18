@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrations, runMigrations } from "./migrations.js";
 import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
-import { SEED_ACCOUNTS, V11_SEED_ACCOUNTS, V13_ADDED_ACCOUNTS, V15_ADDED_ACCOUNTS } from "./chart-accounts-schema.js";
+import { SEED_ACCOUNTS, V11_SEED_ACCOUNTS, V13_ADDED_ACCOUNTS, V15_ADDED_ACCOUNTS, V18_ADDED_ACCOUNTS } from "./chart-accounts-schema.js";
 
 /**
  * v15 adds INTER_FAIR_CLEARING (S5-11). Same trap as v13: if an earlier migration seeded from the
@@ -33,9 +33,15 @@ describe("the v15 seed list is frozen", () => {
     expect(V15_ADDED_ACCOUNTS[0]?.role).toBeUndefined();
     expect(V13_ADDED_ACCOUNTS.map((a) => a.code)).toEqual(["STOCK_ADJUSTMENT"]);
     expect(V11_SEED_ACCOUNTS.map((a) => a.code)).not.toContain("INTER_FAIR_CLEARING");
+    // Session 9: was a hardcoded ["STOCK_ADJUSTMENT", "INTER_FAIR_CLEARING"], which is a snapshot
+    // of the chart as it stood at v15 and goes stale at every later migration that seeds an
+    // account (v18 did). Stated as the concatenation instead, which is what this test is NAMED
+    // for and is the guard that actually matters: an account appended to the live list without
+    // being in SOME frozen list -- the v11 trap -- still fails here.
     expect(SEED_ACCOUNTS.map((a) => a.code).filter((c) => !V11_SEED_ACCOUNTS.some((a) => a.code === c))).toEqual([
-      "STOCK_ADJUSTMENT",
-      "INTER_FAIR_CLEARING",
+      ...V13_ADDED_ACCOUNTS.map((a) => a.code),
+      ...V15_ADDED_ACCOUNTS.map((a) => a.code),
+      ...V18_ADDED_ACCOUNTS.map((a) => a.code),
     ]);
   });
 
@@ -57,8 +63,14 @@ describe("v15 seeding from a database built to v14", () => {
     const after = chart();
     for (const row of before) expect(after.find((r) => r.code === row.code)).toEqual(row);
     const added = after.filter((r) => !before.some((b) => b.code === r.code));
-    expect(added.map((r) => r.code)).toEqual(["INTER_FAIR_CLEARING"]);
-    expect(added[0]).toMatchObject({ name: "Inter-fair Clearing", type: "ASSET", role: null, company_id: null, parent_code: null, active: 1 });
+    // This runs the WHOLE tail of the chain, not v15 alone, so every migration after v14 that
+    // seeds an account shows up here -- v18 added two. The assertion is still exact: the chart
+    // gained precisely the frozen accounts of v15 and v18, and nothing else crept in.
+    expect(added.map((r) => r.code).sort()).toEqual(
+      [...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS].map((a) => a.code).sort(),
+    );
+    expect(added.find((r) => r.code === "INTER_FAIR_CLEARING"))
+      .toMatchObject({ name: "Inter-fair Clearing", type: "ASSET", role: null, company_id: null, parent_code: null, active: 1 });
     // chart_accounts was NOT rebuilt: v15 is additive (no role widened).
     expect(objectsSql("trigger")).toEqual(triggersBefore);
     expect(db.pragma("foreign_key_check")).toEqual([]);

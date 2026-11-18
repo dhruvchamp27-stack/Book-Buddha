@@ -196,8 +196,23 @@ const purchaseBillInput = z.object({
   dueDate: z.string().date().optional(),
   notes: z.string().trim().optional(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
+  // R8 (v18). The same two header fields the invoice has had since the baseline, defaulted to 0
+  // so every existing caller and every existing test keeps sending a valid body.
+  discountPaise: z.number().int().nonnegative().default(0),
+  extraChargePaise: z.number().int().nonnegative().default(0),
   ...purchaseTaxFields,
   lines: z.array(invoiceLine).min(1),
+}).superRefine((input, context) => {
+  // Mirrors the invoice rule above. The repository and the engine both re-check this; the schema
+  // catches it first so the caller gets a 400 naming the field, not a 500.
+  const subtotal = input.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+  if (input.discountPaise > subtotal) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["discountPaise"],
+      message: "Discount cannot exceed the bill subtotal.",
+    });
+  }
 });
 const expenseCategoryInput = z.object({ companyId: id, name });
 const expenseInput = z.object({

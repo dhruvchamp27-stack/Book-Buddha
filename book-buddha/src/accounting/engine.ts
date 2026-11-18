@@ -199,6 +199,15 @@ export interface PurchaseEntryInput {
   readonly inventoryPaise: number;
   /** Total of non-stock lines / expense amount (debits EXPENSE). */
   readonly expensePaise: number;
+  /**
+   * R8. Header-level discount the supplier gave on the bill as a whole. CREDITS its own
+   * PURCHASE_DISCOUNT account rather than reducing the goods cost: see V18_ADDED_ACCOUNTS for
+   * why (an integer stock-layer unit cost cannot absorb it exactly, and a bill of nothing but
+   * stock has no expense debit to net it against). Reduces the GST-taxable value, as on a sale.
+   */
+  readonly discountPaise?: number;
+  /** R8. Freight, packing and the like added by the supplier. DEBITS PURCHASE_EXTRA_CHARGES. */
+  readonly extraChargePaise?: number;
   readonly taxType: InvoiceTaxType;
   readonly taxRateBasisPoints: number;
   readonly paymentAccount: PurchasePaymentAccount;
@@ -206,29 +215,53 @@ export interface PurchaseEntryInput {
 
 export interface PurchaseEntryResult {
   readonly entry: JournalEntry;
+  /** Goods and services on the lines, before the header discount and extra charge. */
   readonly subtotalPaise: number;
+  /** subtotal - discount + extra charge. This is what input GST is charged on. */
+  readonly taxablePaise: number;
   readonly taxPaise: number;
   readonly totalPaise: number;
 }
 
 /**
  * Accrual posting for a finalized purchase bill or expense:
- * Dr INVENTORY / Dr EXPENSE / Dr INPUT tax; Cr CASH or PAYABLES for the full total.
+ * Dr INVENTORY / Dr EXPENSE / Dr PURCHASE_EXTRA_CHARGES / Dr INPUT tax;
+ * Cr PURCHASE_DISCOUNT; Cr CASH or PAYABLES for what is actually owed.
+ *
+ * INVENTORY is debited with the FULL line cost of the stock-tracked lines, never a discounted
+ * share of it, so the INVENTORY ledger stays equal to the stock-layer value to the paise. The
+ * reasoning, and the trade-off it accepts, is written out on V18_ADDED_ACCOUNTS.
  */
 export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
   if (!Number.isInteger(input.inventoryPaise) || input.inventoryPaise < 0
     || !Number.isInteger(input.expensePaise) || input.expensePaise < 0) {
     throw new AccountingError("Purchase amounts must be non-negative whole paise.");
   }
+  const discountPaise = input.discountPaise ?? 0;
+  const extraChargePaise = input.extraChargePaise ?? 0;
+  if (!Number.isInteger(discountPaise) || discountPaise < 0) {
+    throw new AccountingError("A bill discount must be a non-negative whole number of paise.");
+  }
+  if (!Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
+    throw new AccountingError("Bill extra charges must be a non-negative whole number of paise.");
+  }
   const subtotalPaise = input.inventoryPaise + input.expensePaise;
   if (subtotalPaise <= 0) {
     throw new AccountingError("A purchase must have a total above zero.");
   }
-  const taxPaise = inputTaxPaise(input.taxType, input.taxRateBasisPoints, subtotalPaise);
-  const totalPaise = subtotalPaise + taxPaise;
+  // Same rule as the sales side: a discount cannot exceed what is being discounted. Without it a
+  // bill could end owing the supplier a negative amount, which is a refund, not a purchase.
+  if (discountPaise > subtotalPaise) {
+    throw new AccountingError("A bill discount cannot exceed the bill subtotal.");
+  }
+  const taxablePaise = subtotalPaise - discountPaise + extraChargePaise;
+  const taxPaise = inputTaxPaise(input.taxType, input.taxRateBasisPoints, taxablePaise);
+  const totalPaise = taxablePaise + taxPaise;
   const lines: readonly JournalLine[] = [
     ...(input.inventoryPaise > 0 ? [{ account: "INVENTORY" as const, debitPaise: input.inventoryPaise, creditPaise: 0 }] : []),
     ...(input.expensePaise > 0 ? [{ account: "EXPENSE" as const, debitPaise: input.expensePaise, creditPaise: 0 }] : []),
+    ...(extraChargePaise > 0 ? [{ account: "PURCHASE_EXTRA_CHARGES" as const, debitPaise: extraChargePaise, creditPaise: 0 }] : []),
+    ...(discountPaise > 0 ? [{ account: "PURCHASE_DISCOUNT" as const, debitPaise: 0, creditPaise: discountPaise }] : []),
     ...inputTaxLines(input.taxType, taxPaise),
     { account: input.paymentAccount, debitPaise: 0, creditPaise: totalPaise },
   ];
@@ -242,6 +275,7 @@ export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
       isReversal: false,
     },
     subtotalPaise,
+    taxablePaise,
     taxPaise,
     totalPaise,
   };

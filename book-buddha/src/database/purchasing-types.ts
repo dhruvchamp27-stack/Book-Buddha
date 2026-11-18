@@ -71,6 +71,15 @@ export interface PurchaseBillInput {
   readonly notes?: string;
   readonly taxType?: InvoiceTaxType;
   readonly taxRateBasisPoints?: number;
+  /**
+   * R8 (migration v18). Header-level discount the supplier gave on the bill as a whole, mirroring
+   * the invoice. Cannot exceed the line subtotal. Credits PURCHASE_DISCOUNT ("Discount Received")
+   * rather than reducing the goods cost - see V18_ADDED_ACCOUNTS for why, and for the trade-off
+   * that accepts.
+   */
+  readonly discountPaise?: number;
+  /** R8. Freight, packing and the like added by the supplier. Debits PURCHASE_EXTRA_CHARGES. */
+  readonly extraChargePaise?: number;
   readonly paymentAccount: PurchasePaymentAccount;
   readonly lines: readonly PurchaseBillLine[];
 }
@@ -91,8 +100,14 @@ export interface PurchaseBillRecord {
   /** Present only when the bill is tagged to a project (fair). */
   readonly fairId?: string;
   readonly lines: readonly PurchaseBillLine[];
+  /** The lines, before the header discount and extra charge. */
   readonly subtotalPaise: number;
+  readonly discountPaise: number;
+  readonly extraChargePaise: number;
+  /** subtotal - discount + extra charge. What input GST is charged on. */
+  readonly taxablePaise: number;
   readonly taxPaise: number;
+  /** taxable + tax: what the supplier is actually owed. */
   readonly totalPaise: number;
   readonly paidPaise: number;
 }

@@ -4550,16 +4550,31 @@ export class AccountingRepository {
         }
       }
       if (subtotal <= 0) throw new RepositoryValidationError("A purchase bill must have a total above zero.");
+      // R8 header discount / extra charge (v18). Validated here as well as in purchaseEntry so a
+      // nonsense DRAFT is refused at the door rather than at finalize, which is where the invoice
+      // side already draws the line.
+      const discountPaise = input.discountPaise ?? 0;
+      const extraChargePaise = input.extraChargePaise ?? 0;
+      if (!Number.isInteger(discountPaise) || discountPaise < 0) {
+        throw new RepositoryValidationError("A bill discount must be a non-negative whole number of paise.");
+      }
+      if (!Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
+        throw new RepositoryValidationError("Bill extra charges must be a non-negative whole number of paise.");
+      }
+      if (discountPaise > subtotal) {
+        throw new RepositoryValidationError("A bill discount cannot exceed the bill subtotal.");
+      }
       this.db
         .prepare(
           `INSERT INTO purchase_bills (id, business_id, supplier_id, number, supplier_invoice_number, bill_date, due_date,
-             notes, tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+             notes, tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id,
+             discount_paise, extra_charge_paise)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId, input.number, input.supplierInvoiceNumber ?? null, input.billDate,
           input.dueDate ?? null, input.notes ?? null, taxType, rate, input.paymentAccount, new Date().toISOString(),
-          input.fairId ?? null,
+          input.fairId ?? null, discountPaise, extraChargePaise,
         );
       const lineStatement = this.db.prepare(
         "INSERT INTO purchase_bill_lines (bill_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
@@ -4577,7 +4592,7 @@ export class AccountingRepository {
       id: string; business_id: string; supplier_id: string; number: string; supplier_invoice_number: string | null;
       bill_date: string; due_date: string | null; notes: string | null; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
-      fair_id: string | null;
+      fair_id: string | null; discount_paise: number; extra_charge_paise: number;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Purchase bill ${billId} was not found.`);
     const lineRows = this.db
@@ -4590,7 +4605,13 @@ export class AccountingRepository {
       unitPricePaise: line.unit_price_paise,
     }));
     const subtotalPaise = lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
-    const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(subtotalPaise * row.tax_rate_basis_points / 10000);
+    // R8 (v18). GST follows the discounted value, exactly as on a sale. Kept in step with
+    // purchaseEntry, which posts the same arithmetic; the engine is the authority and this is the
+    // read-side mirror of it.
+    const discountPaise = row.discount_paise;
+    const extraChargePaise = row.extra_charge_paise;
+    const taxablePaise = subtotalPaise - discountPaise + extraChargePaise;
+    const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(taxablePaise * row.tax_rate_basis_points / 10000);
     const paid = this.db
       .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE bill_id = ? AND cancelled_at IS NULL")
       .get(billId) as { paid: number };
@@ -4600,7 +4621,8 @@ export class AccountingRepository {
       notes: row.notes, taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points,
       paymentAccount: row.payment_account, status: row.status, lines,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
-      subtotalPaise, taxPaise, totalPaise: subtotalPaise + taxPaise, paidPaise: paid.paid,
+      subtotalPaise, discountPaise, extraChargePaise, taxablePaise, taxPaise,
+      totalPaise: taxablePaise + taxPaise, paidPaise: paid.paid,
     };
   }
 
@@ -4642,6 +4664,11 @@ export class AccountingRepository {
         description: `Purchase bill ${bill.number}`,
         inventoryPaise,
         expensePaise,
+        // R8. INVENTORY above is the FULL line cost of the tracked lines; the discount is NOT
+        // spread into it, so the INVENTORY debit still equals what insertStockMovement just
+        // layered in. That equality is asserted in bill-discount.test.ts.
+        discountPaise: bill.discountPaise,
+        extraChargePaise: bill.extraChargePaise,
         taxType: bill.taxType,
         taxRateBasisPoints: bill.taxRateBasisPoints,
         paymentAccount: bill.paymentAccount,
