@@ -7,6 +7,187 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S11-19 (2026-11-18) — ITEM 9, R9 ATTACHMENTS USE BASE64 INSIDE ORDINARY JSON. Taken as the
+  default because he did not answer it.** His message for item 9 repeated the accounting block
+  already recorded as S11-1 to S11-5 — evidently a paste in place of an answer, not an answer. The
+  default needs **nothing from him**: base64 installs no package, and `@fastify/multipart` would
+  need his hands because npm is not on PATH in a tool shell, which hard rule 2 would require him to
+  approve anyway. **So base64 is the choice that respects "ask before installing" by not needing to
+  ask.** One consequence to build: Fastify's default `bodyLimit` is **1 MB** and base64 inflates a
+  file by about 33%, so a 1 MB PDF arrives as ~1.4 MB and would be rejected — `bodyLimit` must be
+  raised deliberately on the attachment routes. If he ever wants large attachments, swapping to
+  multipart stays contained inside `src/attachments/`. **This closes the R9 gate.**
+
+- **S11-18 (2026-11-18) — ITEM 8, `.gitignore`: he has relaxed the question, and it is already
+  committed.** His words: *"If it is not needed, or if it is not meant to be committed, or push,
+  you can keep it local. Thats not a issue."* It went in as **f4f252f** at the close of session 10
+  (S11-12), which is the right outcome regardless: ignoring `.codebase-memory/` belongs in the
+  repo, because the folder is a machine-local search index that no clone should ever carry. **It
+  stays committed.** Not reverted — reverting a correct commit on his general "not an issue" would
+  be reading permission into a shrug.
+
+- **S11-17 (2026-11-18) — ITEM 7 ANSWERED AND CLOSED: THE SLOW FIRST PUSH *WAS* A SIGN-IN WINDOW,
+  AND HE CLEARED IT BY HAND.** His words: *"Yes, I myself by hand fixed this push issue by signing
+  into the Github when needed. And now you are able to make the push."* So of the two explanations
+  carried out of session 8, the first is the true one: Git Credential Manager opened a GitHub
+  sign-in window, the 60-second attempt was it waiting on him, and he completed it at the screen.
+  **What follows, and must not be lost:** the credential is his and was renewed by hand, so it
+  **can lapse again** — and when it does, a push will block on a pop-up he may not be there to
+  click. **Therefore: never leave a push in the foreground (the tool timeout kills it and the
+  failure looks like "pushing does not work" — the exact false fact S8-5 had to undo); always run
+  it in the background; and always ask him first** (hard rule 4 — "yes, commit" is not "yes,
+  push"), even though he has now twice said pushing is fine.
+
+- **S11-16 (2026-11-18) — ITEM 6 CLOSED: THERE IS NO REAL DATABASE, SO THE R4c BACKFILL HAS NOTHING
+  TO RUN AGAINST.** His words: *"Whatever db files are there, its on repo only, However, that
+  session said something about making of a temporary database and meet the test on it, and then
+  have, may have removed that Database file."* **His recollection is correct and it is verified:**
+  a search of the whole repo for `*.db` and `*.sqlite*` (excluding `node_modules`) returns
+  **nothing**, `git ls-files` tracks no database at all, and the default path
+  (`src/api/main.ts:4` — `BOOK_BUDDHA_DATABASE ?? "book-buddha.db"`) does not exist on disk. The
+  throwaway database session 10 built for the R4c scenarios was in the scratchpad and is gone, as
+  intended. **So scenario 2's figures stay what `R4C-WORKINGS.md` already says they are —
+  invented, demonstrating the shape of the problem, not his books.** The item reopens only when he
+  has real books: then the dry run goes against a **copy**, read-only, he reads his own numbers,
+  and he decides. **His live file is never touched, and the copy is never made by me** —
+  `BOOK_BUDDHA_DATABASE` may point outside this repo.
+
+- **S11-15 (2026-11-18) — ITEM 13, THE FEATURE DESIGN IS APPROVED AS THE V1 DESIGN.** His word:
+  *"Agreed on 13 too."* `Feature Design - Bank Categorization, Bill OCR & Archive (V1).md`
+  (repo root, sections A–H) is no longer "unapproved" — it is the V1 design for **R12 banking**,
+  **bill OCR**, and **R14 archive**, on the basis of S11-6 (archive = masters only), S11-7 (a bill
+  match asks before posting) and S11-8 (auto-created holding accounts). **One amendment follows
+  from S11-8:** §D6 of that document assumes a SINGLE `Uncategorized` account; he asked for two,
+  an income side and an expense side, so §D6 must be amended before the slice is built. Approval
+  builds nothing by itself — it moves the document out of "blocked on the owner" (closing the
+  three §H open items carried since S1-2) and queues the tidy-up pass through the Design Document
+  (§1.5/§17), APP_FLOW, PRD and Features List that the document's own status line calls for.
+
+- **S11-14 (2026-11-18) — ITEM 18, HOW THE REMAINING SEVEN SLICES GET ACCEPTED: I BUILD THE
+  WORKINGS, SONNET WRITES THE TESTS, I REVIEW, AND HE READS ONE PLAIN-ENGLISH REPORT PER SLICE.**
+  His words: *"Can you yourself make the tests for each and give me the report at the end. Make
+  sonnet do the test you give to him and you review and if still unsure ask them else can move on.
+  However, make a simple plain english report file of all the test that you will run to understand
+  what you did, what test you run, what you actually tested, expected and actual output and
+  difference. In simple readable format."* And on pace: *"Keep the order and pace default: one
+  slice at a time."*
+  **The loop per slice, fixed by this:** (1) I derive the expected figures from the spec and the
+  accounting, NOT from what the code currently returns — deriving them from the code would only
+  prove the code agrees with itself; (2) Sonnet writes the tests to those figures; (3) I run them
+  and review; (4) **I escalate to him only where I am genuinely unsure**, otherwise I move on;
+  (5) a **plain-English report file per slice** — what the slice does, each test run, what it
+  actually tested, expected vs actual, and the difference where they disagree. Format follows
+  `R4C-WORKINGS.md`, which he accepted, but in his language, not test language.
+  **Order: R4 (opening balances) first**, because the default "R8 first" is now blocked behind
+  S11-1; then one at a time through R4b, R1, R2, R5, R7, and **R8 last**, after the discount slice.
+  **What this changes about acceptance:** his standing rule in `CLAUDE.md` is *"Acceptance = the
+  user's hand-worked figures, not a passing technical test."* He has delegated the working-out,
+  not the judgement — the report is what he judges, and a disagreement I find must be reported as
+  a disagreement, never quietly reconciled.
+
+- **S11-13 (2026-11-18) — ITEM 17, 7d AND 8c ARE ACCEPTED ON TRUST, NOT HAND-VERIFIED. RECORD THE
+  DIFFERENCE.** His words: *"Unsure of this figures but can proceed if everything is working
+  well."* The figures were his own, given on 2026-11-15, and the app reproduces all of them as
+  `ACCEPTANCE` tests — but he did **not** re-work them this time. **So 7d and 8c are NOT the same
+  grade of sign-off as R3 and R4c**, which he worked through figure by figure (and in R4c's case
+  found a real defect doing it). They are recorded as **accepted on trust, conditional on the
+  slice genuinely working** — the condition he attached. They come back to him if anything later
+  contradicts them. **Hand-verified: R3, R4c. Accepted on trust: 7d, 8c. Outstanding: R1, R2, R4,
+  R4b, R5, R7, R8** — seven, down from nine.
+
+- **S11-12 (2026-11-18) — ITEM 19 AND ITEM 8 ARE CLOSED BY ACTION: both were committed at the end
+  of session 10, before he was asked.** His question was *"Commit is now done, right?"* — **yes.**
+  `git status` is clean, branch `autonomous/book-buddha-finish`, nothing unpushed. The trial-balance
+  fix is **d23a609** *"Trial balance: report balances, not gross movements (owner-found)"* (the
+  seven files of item 19); `.gitignore` went on its own as **f4f252f** (item 8's default); the
+  context files followed as **06bbfa2** and **f5213f5**. So the RESUME_PROMPT text *"HE DID NOT
+  ANSWER THIS, SO IT IS STILL UNCOMMITTED"* was already stale when it was written. **Nothing has
+  been pushed, and nothing will be without asking him again.**
+
+- **S11-11 (2026-11-18) — ITEM 16, the one-paise gap: NOT acceptable as-is. A tolerance plus a
+  named rounding account.** His words: *"Allow minor rounding differences within a defined
+  tolerance. Automatically adjust through a designated rounding account where necessary, ensuring
+  the final transaction balances exactly. Never silently ignore discrepancies."* This **overrides
+  the default** ("acceptable, it is exact once fully collected"). Work implied: a `ROUNDING`
+  account in the chart, a stated tolerance, and the adjustment posted — not absorbed.
+
+- **S11-10 (2026-11-18) — ITEM 15, the general ledger shows the TRANSACTION DATE he entered.**
+  Default approved: *"Display the actual transaction date entered by the user. Maintain the
+  posting/creation timestamp separately for audit purposes."* `GeneralLedgerRow.date` = `entryDate`;
+  the posting timestamp stays stored and available to the audit trail. Same principle as S11-4.
+
+- **S11-9 (2026-11-18) — ITEM 14, a report for a fair that does not exist returns an ERROR.**
+  Default approved: *"Return a clear error explaining that the selected fair does not exist. Do not
+  generate an empty report that could be mistaken for zero sales."*
+
+- **S11-8 (2026-11-18) — ITEM 12, the holding accounts are AUTO-CREATED and renameable.** His
+  words: *"Automatically create appropriate default accounts, such as Uncategorized Income and
+  Uncategorized Expense. Allow users to rename them while preserving their account types."* Note he
+  split one account into **two** — an income side and an expense side — which the default did not
+  say. The rename must not be allowed to change `type`.
+
+- **S11-7 (2026-11-18) — ITEM 11, a bank line that matches a bill ASKS BEFORE POSTING.** Default
+  approved: *"Ask for confirmation before posting - Agreed."* Consistent with his no-auto-post rule
+  (FD §H, D5).
+
+- **S11-6 (2026-11-18) — ITEM 10, archive covers MASTERS ONLY in V1.** His words: *"Masters only in
+  V1; retain documents and audit history."* Documents and the audit log are never archived away.
+
+- **S11-5 (2026-11-18) — ITEM 5, income accounts: one default sales account NOW, but the design
+  must carry an income account PER ITEM.** His words: *"Keep one default sales account initially,
+  but support income account mapping at the item/service level so different product categories can
+  eventually use separate income accounts without requiring manual account selection on every
+  invoice."* This goes **further than the default** ("one income account now, revisit when he wants
+  the split"): the mapping lives on the item master, not on the invoice screen — he never wants to
+  pick an account while invoicing. **Consequence for what is already built:** the hardcoded
+  `SALES` debit in `finalizeCreditNote` (`repository.ts:1401`) is latent today but becomes a real
+  defect the moment item mapping exists — a credit note must credit back the SAME income account
+  the invoice used. Fix it when the mapping slice is built, not before.
+
+- **S11-4 (2026-11-18) — ITEM 4, A CREDIT NOTE GETS ITS OWN DATE. Default approved, and it is
+  build work.** His words: *"Maintain a separate transaction date and creation/finalisation
+  timestamp. Allow the transaction date to be specified independently."* One migration (**v20**);
+  existing notes keep their finalise date as their transaction date. The pattern to copy is the
+  purchase return (v19), which already carries its own date. Same principle as S11-10.
+
+- **S11-3 (2026-11-18) — ITEM 3, cancelling a receipt: keep the original, keep the trail, respect
+  the lock.** His words: *"Preserve the original transaction and its audit trail. Do not silently
+  rewrite historical reports. Record cancellations and reversals in the appropriate accounting
+  period, respecting closed-period restrictions."* The default (leave as built, warn in the R13
+  cash-flow report) satisfies "do not silently rewrite" only if the warning is actually built —
+  **so the warning is now required, not optional.** The harder half is "respecting closed-period
+  restrictions": today the cash view is derived from live receipts and nothing is posted for the
+  financial-year lock to refuse, so cancelling an October receipt in December still moves October's
+  cash profit. Settling that is its own slice, to be scoped with R13.
+
+- **S11-2 (2026-11-18) — ITEM 2, freight on a purchase return: reverse only what is actually
+  refunded.** His words: *"Non-refundable freight should remain an expense. Reverse only amounts
+  actually refunded or recoverable. If freight was capitalised into inventory, account for it
+  accordingly."* The built behaviour (no clawback of freight) **matches this for freight that was
+  expensed** — which is what `PURCHASE_EXTRA_CHARGES` does today. The second sentence is the live
+  part: once S11-1 moves discount into inventory cost, the same question is asked of freight, and
+  capitalised freight must come back out of the layer on a return. **This item is downstream of
+  S11-1 and is scoped with it.**
+
+- **S11-1 (2026-11-18) — ITEM 1, THE DEFAULT IS OVERRULED: A TRADE DISCOUNT MUST REDUCE THE COST OF
+  THE STOCK, NOT BE BOOKED AS INCOME.** His words: *"Trade discounts must reduce the actual
+  inventory purchase cost rather than being recorded as income. Distinguish these from
+  early-payment or settlement discounts, which may have different accounting treatment."* This is
+  AS 2 and it reverses what v18 built. **What is built today:** `postPurchaseBill`
+  (`accounting/engine.ts:264`) credits the whole discount to `PURCHASE_DISCOUNT` ("Discount
+  Received", INCOME) and the stock layer is carried at the FULL list cost — so until the goods
+  sell, both inventory and this year's income are overstated by the discount.
+  **What this answer requires:** (a) the discount is spread into the goods cost before the layer is
+  written; (b) `PURCHASE_DISCOUNT` survives but only for **settlement / early-payment** discounts,
+  which are a financing gain and stay income — so the bill needs to tell the two kinds apart;
+  (c) the ACCEPTANCE figures in `src/database/bill-discount.test.ts` change, so R8 cannot be put to
+  him for sign-off until this is done. **The hard part, named in session 9 and not solved:** a
+  stock layer stores an integer `unit_cost_paise` (`purchasing-schema.ts:83`), so Rs 150 off a
+  7-unit bill does not divide into equal whole-paise unit costs. The remainder must be put
+  somewhere deliberately — it cannot be rounded away, because the layer value must still tie to the
+  INVENTORY balance to the paise. **This is a build slice of its own, and it is the largest piece
+  of work his nineteen answers have created.** S11-2 rides on it.
+
 - **S10-7 (2026-11-18) — HOW THE REST OF THE BACKLOG GETS CLEARED: he answers it cold, in
   writing, as the opening message of session 11.** His words: *"Pause on this, I will answer all of
   them, as my starting prompt in next session."* Session 10 put every remaining open item to him as
