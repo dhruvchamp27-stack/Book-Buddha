@@ -26,6 +26,7 @@ build/
 # --- Claude harness: local-only / logs ---
 .claude/logs/
 .claude/settings.local.json
+.codebase-memory/
 
 # --- This setup bundle (extracted archive + zip) ---
 _extracted_claude_setup/
