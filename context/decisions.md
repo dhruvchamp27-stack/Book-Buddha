@@ -7,6 +7,75 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S11-22 (2026-11-18) — ITEM 16 / S11-11 BUILT AS A VISIBLE ROUNDING LINE ON THE CASH P&L, NOT AS
+  A POSTED ENTRY. His words were not buildable literally, and this records why.** He said *"adjust
+  automatically through a designated rounding account where necessary, ensuring the final
+  transaction balances exactly. Never silently ignore discrepancies."* **There is no transaction to
+  balance.** The gap lives ONLY in the derived CASH view; the posted ledger is already exact to the
+  paise because `postJournalEntry` refuses an unbalanced entry. **Posting a journal entry to close
+  the gap was rejected and must stay rejected:** it would be a posting created because a REPORT was
+  run, carrying whatever date the report ran on, which breaks S1-6 (a reported month cannot move).
+  So the adjustment belongs in the report. **His principle is honoured where the gap actually is.**
+  **The mechanism, for whoever reads this cold:** a payment recognises each line as
+  `round(line x paid / total)` (`allocateProportionally`, `accounting/engine.ts:351`). Each line is
+  rounded on its own, so the shares need not sum to the cash that moved. **Worked by hand, not read
+  off the code:** a Rs 118 invoice (SALES 10000, CGST 900, SGST 900 paise) part-paid Rs 50 gives
+  4237 + 381 + 381 = **4999 paise against 5000 collected** — one paise short. It is
+  self-correcting: `allocateProportionally` telescopes, so at full collection every line is exact.
+  **His ruling, asked as a straight either/or with both reports drawn out: SHOW THE ROUNDING LINE.**
+  Income and GST keep their true proportional shares and a visible `ROUNDING` line carries the
+  difference, so the cash P&L ties to cash exactly. He rejected absorbing the paise into the
+  largest line — that also balances and loses no money, but you cannot see it, and "never silently
+  ignore" is his own phrase. The line vanishes once invoices are fully collected.
+  **Three things the build must get right, each a trap:** (a) the account is ONE `ROUNDING` account
+  and the amount is **signed** — the gap goes both ways (a Rs 118 invoice part-paid 7 paise
+  recognises 8), so a negative rounding line is correct and must not be split into an income side
+  and an expense side; (b) **the tolerance is checked PER DOCUMENT, never on the report total.**
+  Each line can round by at most half a paise, so one allocation cannot be adrift by more than
+  about half its line count — but a report covering many documents legitimately sums many such
+  gaps, so a bound applied to the aggregate would fire on correct arithmetic. Beyond the per-document
+  bound it is NOT rounding, it is a defect, and it must raise rather than absorb — that is the
+  "never silently ignore" half; (c) it applies to **every document type in the cash view**, not just
+  invoices: a bill's expense and input-GST shares are rounded the same way, and if they are left
+  alone the cash view's expenses stop tying to the cash actually paid out.
+  **Accrual basis is untouched** — it has no gap to close.
+
+- **S11-21 (2026-11-18) — BACK-DATING INTO AN ALREADY-REPORTED MONTH IS ALLOWED, BUT NEVER
+  SILENTLY.** He chose "allow it, but warn" over allowing it silently and over refusing it. The
+  date he types is honoured; the app says plainly that it falls in a month already passed and that
+  those figures will change, and he confirms. **Refusing was rejected for a reason worth keeping:**
+  goods that genuinely came back in January must be recordable in January, and a rule that forbids
+  it would make the books less true, not safer. **Silence was rejected because of S11-3** — "do not
+  silently rewrite historical reports". **Backend shape, since there is no UI:** finalizing a note
+  dated in a calendar month earlier than the current IST month is REFUSED unless the caller passes
+  an explicit confirmation flag, and the refusal names the date and the month it will move. The
+  same two-step shape as S11-7 (a bank match asks before posting). The financial-YEAR lock is
+  unchanged and still absolute — this warning only governs an earlier month inside an OPEN year.
+  **An inconsistency this creates, to put to him later:** a purchase return (v19) already carries
+  its own date and can be back-dated with no warning at all. Either it gets the same guard or the
+  difference needs a reason. **Not changed in this slice** — he was asked about credit notes.
+
+- **S11-20 (2026-11-18) — A CREDIT NOTE WITH NO DATE TYPED STILL POSTS AT FINALIZE. S4-8 SURVIVES
+  AS THE DEFAULT; S11-4 IS OPT-IN.** Settling a real collision between two of his own rulings,
+  found when the v20 build turned `ACCEPTANCE S4-8` in `customer-credits.test.ts` red (it expected
+  the entry on 2026-02-10 and got 2026-01-25 — the amounts were all correct, only the month moved).
+  **The history matters:** originally a note took its date from `created_at`, the draft-save
+  stamp, which back-dated a February finalisation into January and re-measured it (January's cash
+  expenses jumped from 2,400 to 3,257.14 after the fact). On 2026-11-17 he ruled **S4-8 — date it
+  at finalize** — and explicitly accepted the trade-off, buying the S1-6 guarantee that a reported
+  month cannot move. S11-4 hands that ability back.
+  **His ruling: no date typed means the note posts on the day it is FINALIZED, exactly as now.**
+  A note is back-dated only when he deliberately types a date. **Why this is the right split, in
+  his own words' terms:** he asked that the transaction date be *"specified independently"* —
+  specified, not guessed. Defaulting to the draft-save date (the other option, and what the first
+  build did) guesses a transaction date out of a creation timestamp, which is the precise confusion
+  his own S11-4 tells us to separate. **Consequences:** `ACCEPTANCE S4-8` passes UNCHANGED and
+  needs no re-signing, so no figure he has accepted moves; `note_date` must be left **NULL** when
+  no date is given, and `getCreditNote` must NOT fall back to `created_at` for NULL (the first
+  build's fallback is what produced the failure); `finalizeCreditNote` posts on `note_date` when
+  it is set and `istDateOf()` when it is not. **The test's title and doc comment must be amended**
+  to say it now pins the DEFAULT rather than the only behaviour — the figures stay untouched.
+
 - **S11-19 (2026-11-18) — ITEM 9, R9 ATTACHMENTS USE BASE64 INSIDE ORDINARY JSON. Taken as the
   default because he did not answer it.** His message for item 9 repeated the accounting block
   already recorded as S11-1 to S11-5 — evidently a paste in place of an answer, not an answer. The
