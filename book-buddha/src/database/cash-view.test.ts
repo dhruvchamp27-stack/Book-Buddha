@@ -238,8 +238,11 @@ describe("cash view: convergence, rounding and periods", () => {
       expect(sumOf(w.repository, "SALES")).toBe(1000000);
       expect(sumOf(w.repository, "COGS")).toBe(600000);
       expect(sumOf(w.repository, "OUTPUT_CGST") + sumOf(w.repository, "OUTPUT_SGST")).toBe(180000);
-      // Every individual P&L recognition is non-negative (INVENTORY legitimately goes down when stock is sold).
-      expect(w.repository.deriveCashView().recognitions.filter((r) => r.account !== "INVENTORY").every((r) => r.amountPaise >= 0)).toBe(true);
+      // Every individual P&L recognition is non-negative, with two deliberate exceptions:
+      // INVENTORY legitimately goes down when stock is sold, and ROUNDING (S11-22) is SIGNED -
+      // the per-line roundings can over- as well as under-recognise, so a negative paisa on
+      // ROUNDING is the correct figure, not a defect. The money assertions above are unchanged.
+      expect(w.repository.deriveCashView().recognitions.filter((r) => r.account !== "INVENTORY" && r.account !== "ROUNDING").every((r) => r.amountPaise >= 0)).toBe(true);
     } finally {
       w.repository.close();
     }

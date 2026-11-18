@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { RepositoryValidationError } from "./errors.js";
-import { reportConditions } from "./report-filters-sql.js";
+import { assertReportFairExists, reportConditions } from "./report-filters-sql.js";
 
 /**
  * R7 part one: the sales and credit-note reports (spec section 13).
@@ -144,7 +144,8 @@ function refuseItemFilter(reportName: string, filter: object): void {
  * reportConditions (business, fair, dates - all on `je`) plus extra fixed conditions and their
  * parameters, in that order. reportConditions validates the dates, so none of that is repeated here.
  */
-function withConditions(filter: SalesReportFilter, extras: ReadonlyArray<{ sql: string; param?: string }>): { where: string; params: string[] } {
+function withConditions(db: Database.Database, filter: SalesReportFilter, extras: ReadonlyArray<{ sql: string; param?: string }>): { where: string; params: string[] } {
+  assertReportFairExists(db, filter.fairId);
   const base = reportConditions(filter);
   const sql = extras.map((extra) => extra.sql);
   const params = [...base.params, ...extras.flatMap((extra) => (extra.param === undefined ? [] : [extra.param]))];
@@ -200,7 +201,7 @@ function aggregate(
 ): AggregateRow[] {
   const extras: Array<{ sql: string; param?: string }> = [{ sql: "je.source_type = 'INVOICE'" }];
   if (filter.customerId !== undefined) extras.push({ sql: "i.customer_id = ?", param: filter.customerId });
-  const { where, params } = withConditions(filter, extras);
+  const { where, params } = withConditions(db, filter, extras);
   const accountTest = shape.includeTax ? "(ca.type = 'INCOME' OR ca.role = 'OUTPUT_GST')" : "ca.type = 'INCOME'";
   const sql = `
     SELECT ${shape.select},
@@ -323,7 +324,7 @@ export function creditNoteReport(db: Database.Database, filter: CreditNoteReport
   if (filter.itemId !== undefined) {
     extras.push({ sql: "EXISTS (SELECT 1 FROM credit_note_lines l WHERE l.credit_note_id = cn.id AND l.item_id = ?)", param: filter.itemId });
   }
-  const { where, params } = withConditions(filter, extras);
+  const { where, params } = withConditions(db, filter, extras);
   const lineSum = (expression: string, test: string): string =>
     `(SELECT COALESCE(SUM(${expression}), 0) FROM journal_lines jl JOIN chart_accounts ca ON ca.code = jl.account WHERE jl.journal_entry_id = je.id AND ${test})`;
   const rows = (db.prepare(
@@ -385,7 +386,7 @@ export function salesReturnReport(db: Database.Database, filter: CreditNoteRepor
   const extras: Array<{ sql: string; param?: string }> = [{ sql: "cn.status = 'FINALIZED'" }];
   if (filter.customerId !== undefined) extras.push({ sql: "i.customer_id = ?", param: filter.customerId });
   if (filter.itemId !== undefined) extras.push({ sql: "l.item_id = ?", param: filter.itemId });
-  const { where, params } = withConditions(filter, extras);
+  const { where, params } = withConditions(db, filter, extras);
   const from = `
       FROM credit_note_lines l
       JOIN credit_notes cn ON cn.id = l.credit_note_id
@@ -479,7 +480,7 @@ export function salesByItem(db: Database.Database, filter: CreditNoteReportFilte
   const extras: Array<{ sql: string; param?: string }> = [{ sql: "inv.status = 'FINALIZED'" }];
   if (filter.customerId !== undefined) extras.push({ sql: "inv.customer_id = ?", param: filter.customerId });
   if (filter.itemId !== undefined) extras.push({ sql: "il.item_id = ?", param: filter.itemId });
-  const { where, params } = withConditions(filter, extras);
+  const { where, params } = withConditions(db, filter, extras);
   const gross = db.prepare(
     `SELECT il.item_id, COALESCE(it.name, il.description) AS item_name,
             SUM(il.quantity) AS quantity, SUM(il.quantity * il.unit_price_paise) AS sales_paise

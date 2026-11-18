@@ -1,3 +1,4 @@
+import type Database from "better-sqlite3";
 import { isValidIsoDate } from "../accounting/recurrence.js";
 import { RepositoryValidationError } from "./errors.js";
 
@@ -11,6 +12,20 @@ export interface ReportFilter {
 
 function assertIsoDate(label: string, value: string): void {
   if (!isValidIsoDate(value)) throw new RepositoryValidationError(`${label} must be a real date written as YYYY-MM-DD.`);
+}
+
+/**
+ * A report asked for a fair that does not exist must say so, not return zero rows (which reads as
+ * "no sales at that fair"). No fair named (undefined) means consolidated and is always fine.
+ */
+export function assertReportFairExists(db: Database.Database, fairId: string | undefined): void {
+  if (fairId === undefined) return;
+  if (typeof fairId !== "string" || fairId.trim() === "") {
+    throw new RepositoryValidationError("A project (fair) id cannot be empty.");
+  }
+  if (db.prepare("SELECT 1 FROM fairs WHERE id = ?").get(fairId) === undefined) {
+    throw new RepositoryValidationError(`Fair ${fairId} was not found, so no report can be produced for it.`);
+  }
 }
 
 /**

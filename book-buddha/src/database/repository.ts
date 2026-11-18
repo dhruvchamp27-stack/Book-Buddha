@@ -33,7 +33,7 @@ import { runMigrations } from "./migrations.js";
 import { RepositoryValidationError } from "./errors.js";
 import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
-import { reportConditions } from "./report-filters-sql.js";
+import { assertReportFairExists, reportConditions } from "./report-filters-sql.js";
 import {
   salesByBusiness, salesByCustomer, salesByFair, salesByItem, salesByTax, creditNoteReport, salesReturnReport,
   type SalesReportFilter, type CreditNoteReportFilter, type SalesReport, type CreditNoteReport,
@@ -440,6 +440,32 @@ export interface ProfitAndLossReport {
  * cash moved. amountPaise is in the account's natural direction (credit - debit for SALES and
  * OUTPUT_* GST; debit - credit for COGS, EXPENSE, INVENTORY and INPUT_* GST).
  */
+/** The one account the cash view uses for the paise between per-line rounding and the cash that moved. Signed. */
+const ROUNDING_ACCOUNT = "ROUNDING";
+
+/**
+ * The per-allocation tolerance. `lineCount` is the number of lines in THAT allocation. A line's
+ * cumulative target is off by at most half a paisa, so the running gap after any payment is at most
+ * half the line count; one event is the DIFFERENCE of two running gaps, so it can reach the full line
+ * count. A gap beyond it cannot come from rounding: the posted lines do not add up to the document
+ * total, so this raises, naming the document and both figures, rather than absorbing it.
+ * Never apply this to a report total: a report legitimately sums many small gaps.
+ */
+export function assertRoundingWithinTolerance(input: {
+  documentType: string;
+  documentId: string;
+  cashPaise: number;
+  recognisedPaise: number;
+  lineCount: number;
+}): void {
+  const gapPaise = input.cashPaise - input.recognisedPaise;
+  if (Math.abs(gapPaise) > input.lineCount) {
+    throw new RepositoryValidationError(
+      `Cash-basis rounding on ${input.documentType} ${input.documentId} is out of tolerance: ${input.cashPaise} paise moved but ${input.recognisedPaise} paise were recognised, a gap of ${gapPaise} paise against a limit of ${input.lineCount} paise for ${input.lineCount} lines. Per-line rounding cannot explain this; the posted lines do not add up to the document total.`,
+    );
+  }
+}
+
 export interface CashRecognitionRow {
   readonly date: string;
   /** A chart_accounts code, extensible at runtime - NOT a fixed union. */
@@ -850,6 +876,21 @@ export interface AsAtReportFilter {
 const IST_OFFSET_MS = 330 * 60 * 1000;
 
 /** Calendar date (YYYY-MM-DD) in IST of an ISO instant; defaults to now. The single "today" source. */
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+] as const;
+
+/** "2026-01-20" -> "20 January 2026": how a person reads a date, for messages they will see. */
+function readableDate(isoDate: string): string {
+  return `${Number(isoDate.slice(8, 10))} ${readableMonth(isoDate)}`;
+}
+
+/** "2026-01-20" -> "January 2026". */
+function readableMonth(isoDate: string): string {
+  return `${MONTH_NAMES[Number(isoDate.slice(5, 7)) - 1] ?? isoDate.slice(5, 7)} ${isoDate.slice(0, 4)}`;
+}
+
 export function istDateOf(instant: string | Date = new Date()): string {
   const ms = typeof instant === "string" ? Date.parse(instant) : instant.getTime();
   return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
@@ -1779,9 +1820,12 @@ export class AccountingRepository {
     if (invoice.status !== "FINALIZED") throw new RepositoryValidationError("Credit notes require a finalized invoice.");
     if (note.status !== "DRAFT" || note.lines.length === 0) throw new RepositoryValidationError("Credit notes must start as non-empty drafts.");
     this.validateCreditNoteLines(invoice, note.lines);
+    // S11-20: NULL when no date is given. The date is SPECIFIED, never guessed from "today at save".
+    const noteDate = note.noteDate ?? null;
+    if (noteDate !== null) this.assertIsoDate("Credit note date", noteDate);
     const transaction = this.db.transaction(() => {
-      this.db.prepare("INSERT INTO credit_notes (id, invoice_id, number, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(note.id, note.invoiceId, note.number, note.reason, note.status, new Date().toISOString());
+      this.db.prepare("INSERT INTO credit_notes (id, invoice_id, number, reason, note_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(note.id, note.invoiceId, note.number, note.reason, noteDate, note.status, new Date().toISOString());
       const statement = this.db.prepare("INSERT INTO credit_note_lines (credit_note_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)");
       for (const line of note.lines) statement.run(note.id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
       this.insertAuditEvent({ action: "credit_note.created", entityId: note.id, occurredAt: new Date().toISOString() });
@@ -1789,11 +1833,21 @@ export class AccountingRepository {
     transaction();
   }
 
-  public finalizeCreditNote(creditNoteId: string): JournalEntry {
+  public finalizeCreditNote(creditNoteId: string, options: { readonly confirmBackdatedMonth?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const note = this.getCreditNote(creditNoteId);
       if (note.status !== "DRAFT") throw new RepositoryValidationError("Only draft credit notes can be finalized.");
       const invoice = this.getInvoice(note.invoiceId);
+      if (note.noteDate !== undefined) {
+        // S11-20/S11-21. The financial-year lock is checked FIRST and is absolute: no confirmation
+        // can override it. The month guard only governs an earlier month inside an OPEN year.
+        assertPeriodOpen(this.db, invoice.businessId, note.noteDate);
+        if (note.noteDate.slice(0, 7) < istDateOf().slice(0, 7) && options.confirmBackdatedMonth !== true) {
+          throw new RepositoryValidationError(
+            `This credit note is dated ${readableDate(note.noteDate)}, in a month that has already passed. Posting it will change the figures already reported for ${readableMonth(note.noteDate)}. If that is what you want, confirm and finalize it again.`,
+          );
+        }
+      }
       this.validateCreditNoteLines(invoice, note.lines);
       const taxablePaise = note.lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
       // One place decides the GST lines, capped per account and absorbing the remainder on a
@@ -1832,20 +1886,27 @@ export class AccountingRepository {
         ],
       };
       const inventoryCost = this.restoreCreditNoteStock(note, invoice.fairId);
-      // S4-8 (owner, 2026-11-17): a credit note is dated at FINALIZE, never at the draft.
+      // S11-4 / S11-20 / S11-21 (owner, 2026-11-18). A credit note may carry ITS OWN transaction
+      // date, the day the goods came back, and then posts on that date, not on the day it is
+      // finalized. The date is SPECIFIED by the owner, never guessed: a note saved with no date
+      // keeps note_date NULL and posts on the day it is FINALIZED, exactly as S4-8 ruled, so
+      // `note.noteDate ?? istDateOf()` below is load-bearing, not dead code.
       //
-      // This used to read created_at, which is stamped when the DRAFT is saved. A note drafted in
-      // January and finalized in February was therefore back-dated into January, where it
-      // re-measured any payment falling between the two dates - a month already reported, moved
-      // by a February action. Reproduced before it was changed: two payments of 3,000 on 20 and
-      // 30 January and a freight note drafted 25 January, finalized 10 February, pushed January's
-      // cash expenses from 2,400 to 3,257.14. That is S1-6 broken by an entirely ordinary
-      // workflow - raise the paperwork, finalize it later.
+      // Why the date matters: two payments of 3,000 on 20 and 30 January and a freight note raised
+      // 25 January and finalized 10 February. Finalize-date posting puts the note in February
+      // although the goods came back in January. Given noteDate 25 January it posts in JANUARY
+      // and February is untouched. created_at drives nothing here. A purchase return does this
+      // with returnDate.
       //
-      // The owner chose this over giving a note its own document date: the trade-off he accepted
-      // is that a note finalized late lands in the month it was FINALIZED rather than the month
-      // the goods came back. The cash-view walk reads these entry dates, so it follows for free.
-      const dims = { businessId: invoice.businessId, entryDate: istDateOf(), ...fairDim(invoice.fairId) };
+      // Back-dating into an already-reported month rewrites that month's figures, so a date in
+      // an earlier month is refused above unless the caller passes confirmBackdatedMonth. The
+      // financial-year lock is separate and absolute: the posting door refuses a locked year
+      // whatever was confirmed. Cancellation is unchanged: its reversal is dated today.
+      const dims = {
+        businessId: invoice.businessId,
+        entryDate: note.noteDate ?? istDateOf(),
+        ...fairDim(invoice.fairId),
+      };
       this.insertJournalEntry(entry, dims);
       if (inventoryCost > 0) {
         this.insertJournalEntry({
@@ -2275,13 +2336,14 @@ export class AccountingRepository {
   }
 
   public getCreditNote(creditNoteId: string): CreditNote {
-    const row = this.db.prepare("SELECT id, invoice_id, number, reason, status FROM credit_notes WHERE id = ?")
-      .get(creditNoteId) as { id: string; invoice_id: string; number: string; reason: string; status: CreditNote["status"] } | undefined;
+    const row = this.db.prepare("SELECT id, invoice_id, number, reason, status, note_date FROM credit_notes WHERE id = ?")
+      .get(creditNoteId) as { id: string; invoice_id: string; number: string; reason: string; status: CreditNote["status"]; note_date: string | null } | undefined;
     if (row === undefined) throw new Error(`Credit note ${creditNoteId} was not found.`);
     const lines = this.db.prepare("SELECT item_id, description, quantity, unit_price_paise FROM credit_note_lines WHERE credit_note_id = ? ORDER BY id")
       .all(creditNoteId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number }>;
     return {
-      id: row.id, invoiceId: row.invoice_id, number: row.number, reason: row.reason, status: row.status,
+      id: row.id, invoiceId: row.invoice_id, number: row.number, reason: row.reason,
+      ...(row.note_date === null ? {} : { noteDate: row.note_date }), status: row.status,
       lines: lines.map((line) => ({ ...(line.item_id === null ? {} : { itemId: line.item_id }), description: line.description, quantity: line.quantity, unitPricePaise: line.unit_price_paise })),
     };
   }
@@ -3079,6 +3141,35 @@ export class AccountingRepository {
       return [...sums.entries()].map(([account, amountPaise]) => ({ account, amountPaise }));
     };
 
+    // ROUNDING. Each line of an allocation is rounded on its own, so the shares need not sum to
+    // the cash that moved (Rs 118 invoice, Rs 50 paid: 4,237 + 381 + 381 = 4,999 against 5,000).
+    // `roundingFor` returns the ROUNDING recognition that makes this one event sum to the cash
+    // EXACTLY (0 when there is no gap).
+    //
+    // Direction: an invoice is measured credit-positive (SALES and OUTPUT GST are credits that add
+    // up to what the customer owes); a bill or expense debit-positive. ROUNDING is a credit-normal
+    // INCOME account, so on an invoice its natural amount equals the gap, and on a bill it is the
+    // NEGATIVE of the gap - a bill whose expense shares came in a paisa under what was paid shows
+    // ROUNDING as a paisa of expense. One signed account, never an income side and an expense side.
+    //
+    // It carries the date and document of the event that caused it, so a reported month never
+    // moves. It is deliberately NOT added to `recognised` or `current`: the settlement true-up
+    // would then "correct" it away, and it is an artefact of the cash, not a line of the document.
+    //
+    // TOLERANCE, checked PER ALLOCATION and never on a report total (see
+    // assertRoundingWithinTolerance). `lineCount` is the bound for THIS allocation.
+    const roundingFor = (
+      doc: { type: "INVOICE" | "PURCHASE_BILL" | "EXPENSE"; id: string },
+      cashPaise: number,
+      shares: ReadonlyArray<{ account: string; amountPaise: number }>,
+      lineCount: number,
+    ): number => {
+      const docSign = doc.type === "INVOICE" ? 1 : -1;
+      const recognisedPaise = shares.reduce((total, share) => total + (creditNormal(share.account) ? 1 : -1) * docSign * share.amountPaise, 0);
+      assertRoundingWithinTolerance({ documentType: doc.type, documentId: doc.id, cashPaise, recognisedPaise, lineCount });
+      return (cashPaise - recognisedPaise) * docSign;
+    };
+
     for (const doc of documents) {
       const key = `${doc.type}|${doc.id}`;
       const docLines = byDocument.get(key) ?? [];
@@ -3210,6 +3301,9 @@ export class AccountingRepository {
       let segmentAmounts = segmentLines.map((account) => current.get(account) ?? 0);
       let segmentBalance = balancePaise;
       let segmentPaid = 0;
+      // Lines of every credit note folded into this document so far: extra tolerance for the
+      // payments after a note, which carry the note's own (uncashed) rounding gap.
+      let noteLineSlack = 0;
 
       const openSegment = (): void => {
         segmentLines = [...current.keys()].sort();
@@ -3233,12 +3327,18 @@ export class AccountingRepository {
           folded: Array<{ account: string; amountPaise: number }>;
         }
       >();
+      // What the last dischargeShares call actually applied (capped at what the note had left) and how
+      // many lines it spread over: the cash side of the rounding tie, and its tolerance.
+      let lastDischargeAppliedPaise = 0;
+      let lastDischargeLineCount = 0;
       const dischargeShares = (noteId: string, amountPaise: number): Array<{ account: string; amountPaise: number }> => {
         const state = noteLedger.get(noteId);
         if (state === undefined || state.inclusivePaise <= 0 || amountPaise <= 0) return [];
         const before = state.dischargedPaise;
         const after = Math.min(before + amountPaise, state.inclusivePaise);
         if (after <= before) return [];
+        lastDischargeAppliedPaise = after - before;
+        lastDischargeLineCount = state.lines.length;
         const shares = allocateProportionally({
           lineAmountsPaise: state.lines.map((line) => line.amountPaise),
           totalPaise: state.inclusivePaise,
@@ -3258,11 +3358,22 @@ export class AccountingRepository {
           // so the running segment is untouched and must NOT be reopened: resetting it here would
           // restart the cumulative allocator mid-segment and silently change the shares of every
           // later payment.
-          for (const line of dischargeShares(event.noteId, event.amountPaise)) {
+          const dischargeLines = dischargeShares(event.noteId, event.amountPaise);
+          for (const line of dischargeLines) {
             current.set(line.account, (current.get(line.account) ?? 0) + line.amountPaise);
             recognised.set(line.account, (recognised.get(line.account) ?? 0) + line.amountPaise);
             if (inPeriod(event.date)) {
               recognitions.push({ date: event.date, account: line.account, amountPaise: line.amountPaise, documentType: doc.type, documentId: doc.id });
+            }
+          }
+          // A refund or application IS a cash event (the money left, or the credit was used): the
+          // note's lines are recognised now, negatively, so the cash side is MINUS what was applied.
+          // Nothing discharged (no shares) means no event to tie. The NOTE's own fold into the
+          // document is NOT tied: no cash moves when a note is set against an open balance.
+          if (dischargeLines.length > 0) {
+            const gap = roundingFor(doc, -lastDischargeAppliedPaise, dischargeLines, lastDischargeLineCount);
+            if (gap !== 0 && inPeriod(event.date)) {
+              recognitions.push({ date: event.date, account: ROUNDING_ACCOUNT, amountPaise: gap, documentType: doc.type, documentId: doc.id });
             }
           }
           // Gross collections fall by what went back out, or gross would stop equalling
@@ -3298,6 +3409,7 @@ export class AccountingRepository {
             folded: [] as Array<{ account: string; amountPaise: number }>,
           };
           noteLedger.set(event.noteId, state);
+          noteLineSlack += event.lines.length;
           // Only the OFFSET share folds into the document now. A note worth more than the invoice
           // still owes has the remainder held back entirely until it is refunded or applied: S1-6
           // puts that reduction in the month it actually happens.
@@ -3342,6 +3454,18 @@ export class AccountingRepository {
               paidBeforePaise: segmentPaid,
               paidAfterPaise: segmentPaidAfter,
             });
+            // Cash moved: tie this event's shares to it. The slack covers the credit-note fold (a
+            // note's offset share is allocated without cash, so its own rounding gap is left in
+            // the segment and comes out with the payments that follow).
+            const gap = roundingFor(
+              doc,
+              segmentPaidAfter - segmentPaid,
+              segmentLines.map((account, index) => ({ account, amountPaise: shares[index] as number })),
+              segmentLines.length + noteLineSlack,
+            );
+            if (gap !== 0 && inPeriod(event.date)) {
+              recognitions.push({ date: event.date, account: ROUNDING_ACCOUNT, amountPaise: gap, documentType: doc.type, documentId: doc.id });
+            }
             segmentLines.forEach((account, index) => {
               const share = shares[index] as number;
               if (share === 0) return;
@@ -3978,6 +4102,7 @@ export class AccountingRepository {
   }
 
   private reportConditions(filter: { businessId?: string; fairId?: string; fromDate?: string; toDate?: string; asAtDate?: string }): { where: string; params: string[] } {
+    assertReportFairExists(this.db, filter.fairId);
     return reportConditions(filter);
   }
 

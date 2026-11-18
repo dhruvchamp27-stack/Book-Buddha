@@ -206,9 +206,24 @@ export const V19_ADDED_ACCOUNTS: readonly SeedAccount[] = [
   { code: "SUPPLIER_CREDITS", name: "Supplier Credits Receivable", type: "ASSET" },
 ];
 
+/**
+ * FROZEN AT v21 - the account v21 (`applyCashRoundingSchema`) seeds, and ONLY that. v21 reads this
+ * list, never the live one, for the reason given on V11_SEED_ACCOUNTS.
+ *
+ * - ROUNDING - the cash view recognises each line of a document as round(line x paid / total), each
+ *   line rounded on its own, so the shares need not sum to the cash that moved (Rs 118 invoice
+ *   part-paid Rs 50 recognises 4,999 paise of the 5,000 collected). The difference is recognised
+ *   here so the cash view ties to the cash, to the paise. ONE account, INCOME, and the amount on
+ *   it is SIGNED: a negative line is correct and is never split into an income and an expense
+ *   side. It exists only in the derived cash view; nothing is ever posted to it.
+ */
+export const V21_ADDED_ACCOUNTS: readonly SeedAccount[] = [
+  { code: "ROUNDING", name: "Rounding", type: "INCOME" },
+];
+
 export const SEED_ACCOUNTS: readonly SeedAccount[] = [
   ...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS, ...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS,
-  ...V19_ADDED_ACCOUNTS,
+  ...V19_ADDED_ACCOUNTS, ...V21_ADDED_ACCOUNTS,
 ];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [

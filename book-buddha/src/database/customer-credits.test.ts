@@ -888,8 +888,13 @@ describe("cancelling respects FINALIZE order, not draft order", () => {
  * to finalize into a reported month. The trade-off he accepted: a note finalized late lands in
  * the month it was FINALIZED, not the month the goods came back. In exchange, a closed month can
  * never move - which is the property S1-6 exists to protect.
+ *
+ * S11-20 / S11-4 (2026-11-18): this pins the DEFAULT behaviour, not the only behaviour. A note
+ * saved with NO date of its own still posts at finalize, exactly as below. A note given an
+ * explicit noteDate (S11-4) posts on that date instead, and a date in an earlier month needs an
+ * explicit confirmation (S11-21).
  */
-describe("ACCEPTANCE S4-8: a credit note is dated at FINALIZE, so a reported month cannot move", () => {
+describe("ACCEPTANCE S4-8: an UNDATED credit note is dated at FINALIZE, so a reported month cannot move", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 

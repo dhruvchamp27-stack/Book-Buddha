@@ -57,6 +57,11 @@ export interface CreditNote {
   readonly invoiceId: string;
   readonly number: string;
   readonly reason: string;
+  /**
+   * The day the goods came back and the note takes effect (S11-4). Absent means no date was
+   * given (S11-20): the note then posts on the day it is finalized.
+   */
+  readonly noteDate?: string;
   readonly status: CreditNoteStatus;
   readonly lines: readonly CreditNoteLine[];
 }

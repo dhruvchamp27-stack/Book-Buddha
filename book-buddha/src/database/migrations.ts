@@ -15,6 +15,8 @@ import { applyRecoveryCodeSchema } from "./recovery-code-schema.js";
 import { applyPaymentCancellationSchema } from "./payment-cancellation-schema.js";
 import { applyBillDiscountSchema } from "./bill-discount-schema.js";
 import { applyPurchaseReturnsSchema } from "./purchase-returns-schema.js";
+import { applyCreditNoteDateSchema } from "./credit-note-date-schema.js";
+import { applyCashRoundingSchema } from "./cash-rounding-schema.js";
 
 export interface Migration {
   version: number;
@@ -256,6 +258,23 @@ export const migrations: readonly Migration[] = [
     // SUPPLIER_CREDITS from the FROZEN V19 list. No existing table is altered or rebuilt, so no
     // trigger needs replaying, and there is nothing to backfill. Default (transactional).
     up: applyPurchaseReturnsSchema,
+  },
+  {
+    version: 20,
+    name: "credit_note_date",
+    // Additive: one nullable column, credit_notes.note_date (S11-4). The table is not rebuilt, so
+    // no trigger needs replaying. Backfilled so no posted figure moves: a posted note takes its
+    // entry's entry_date, any other stays NULL (no date given, S11-20). Guarded: a FINALIZED note left
+    // undated throws and rolls the whole of v20 back. Default (transactional).
+    up: applyCreditNoteDateSchema,
+  },
+  {
+    version: 21,
+    name: "cash_rounding",
+    // Additive: seeds ROUNDING (INCOME, no role) from the FROZEN V21 list, so the derived cash view
+    // can show the paise by which per-line rounding differs from the cash that moved. No table is
+    // rebuilt, nothing is backfilled. Default (transactional).
+    up: applyCashRoundingSchema,
   },
 ];
 

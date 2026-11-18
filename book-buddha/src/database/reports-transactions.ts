@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { RepositoryValidationError } from "./errors.js";
-import { reportConditions } from "./report-filters-sql.js";
+import { assertReportFairExists, reportConditions } from "./report-filters-sql.js";
 
 /**
  * R7 part one: the transaction and stock-movement reports (spec section 13).
@@ -132,6 +132,7 @@ function customerCondition(filter: TransactionReportFilter): Array<{ sql: string
 /** Every posted journal entry in the period, in date order, one row per entry. */
 export function transactionListByDate(db: Database.Database, filter: TransactionReportFilter = {}): readonly TransactionListRow[] {
   refuseFilter("The transaction list", filter, "itemId", "item", "journal entries are posted per document, not per item. Use the stock movement report.");
+  assertReportFairExists(db, filter.fairId);
   const { where, params } = appendConditions(reportConditions(filter), customerCondition(filter));
   const rows = db.prepare(
     `SELECT je.entry_date, je.id, je.description, je.source_type, je.source_id, je.is_reversal,
@@ -172,6 +173,7 @@ const DEBIT_NATURAL = new Set(["ASSET", "EXPENSE"]);
  */
 export function transactionDetailByAccount(db: Database.Database, filter: TransactionReportFilter = {}): readonly TransactionDetailAccount[] {
   refuseFilter("The transaction detail", filter, "itemId", "item", "journal lines are posted per document, not per item. Use the stock movement report.");
+  assertReportFairExists(db, filter.fairId);
   const customer = customerCondition(filter);
   // reportConditions validates the dates (and refuses from > to) once, for the whole filter.
   const { where, params } = appendConditions(reportConditions(filter), customer);
@@ -282,6 +284,7 @@ export function stockMovementConditions(filter: StockMovementFilter): { where: s
  * (occurred_at, then rowid) is the one FIFO costing itself uses.
  */
 export function stockMovementReport(db: Database.Database, filter: StockMovementFilter = {}): readonly StockMovementRow[] {
+  assertReportFairExists(db, filter.fairId);
   const { where, params } = stockMovementConditions(filter);
   const rows = db.prepare(
     `SELECT * FROM (

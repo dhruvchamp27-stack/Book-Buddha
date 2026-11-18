@@ -274,6 +274,7 @@ const creditNoteInput = z.object({
   invoiceId: id,
   number: name,
   reason: name,
+  noteDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date written as YYYY-MM-DD.").optional(),
   lines: z.array(invoiceLine).min(1),
 });
 
@@ -990,6 +991,7 @@ export function buildApi(
       invoiceId: input.invoiceId,
       number: input.number,
       reason: input.reason,
+      ...(input.noteDate === undefined ? {} : { noteDate: input.noteDate }),
       status: "DRAFT",
       lines: input.lines.map((line) => ({
         ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
@@ -1016,8 +1018,17 @@ export function buildApi(
   app.get<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId", async (request) =>
     repository.getCreditNote(request.params.creditNoteId));
 
-  app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/finalize", async (request) =>
-    ({ journalEntry: repository.finalizeCreditNote(request.params.creditNoteId) }));
+  // S11-21: a note dated in an earlier month is refused until the caller confirms it.
+  const finalizeCreditNoteInput = z.object({ confirmBackdatedMonth: z.boolean().optional() }).optional();
+  app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/finalize", async (request) => {
+    const input = parseBody(finalizeCreditNoteInput, request.body);
+    return {
+      journalEntry: repository.finalizeCreditNote(
+        request.params.creditNoteId,
+        input?.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {},
+      ),
+    };
+  });
 
   /** What the note is worth back to the customer, and how much of it is still undischarged. */
   app.get<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/balance", async (request) =>
