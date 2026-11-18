@@ -14,6 +14,7 @@ import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
 import { applyRecoveryCodeSchema } from "./recovery-code-schema.js";
 import { applyPaymentCancellationSchema } from "./payment-cancellation-schema.js";
 import { applyBillDiscountSchema } from "./bill-discount-schema.js";
+import { applyPurchaseReturnsSchema } from "./purchase-returns-schema.js";
 
 export interface Migration {
   version: number;
@@ -247,6 +248,14 @@ export const migrations: readonly Migration[] = [
     // v18 had no discount, and re-deriving its posted entry would rewrite history.
     // Default (transactional).
     up: applyBillDiscountSchema,
+  },
+  {
+    version: 19,
+    name: "purchase_returns",
+    // Additive: purchase_returns, purchase_return_lines and supplier_refunds are new tables, plus
+    // SUPPLIER_CREDITS from the FROZEN V19 list. No existing table is altered or rebuilt, so no
+    // trigger needs replaying, and there is nothing to backfill. Default (transactional).
+    up: applyPurchaseReturnsSchema,
   },
 ];
 

@@ -188,8 +188,27 @@ export const V18_ADDED_ACCOUNTS: readonly SeedAccount[] = [
 ];
 
 /** The live chart: what should exist TODAY. The frozen lists above, in migration order. */
+/**
+ * FROZEN AT v19 - R8 purchase returns. Read by `applyPurchaseReturnsSchema` and nothing else; the
+ * reason a migration seeds its OWN frozen list is on V11_SEED_ACCOUNTS.
+ *
+ * SUPPLIER_CREDITS is the mirror of CUSTOMER_CREDITS, and sits on the opposite side of the books.
+ * CUSTOMER_CREDITS is a LIABILITY - a credit note we have not yet refunded is money we owe the
+ * customer. A purchase return the supplier has not yet refunded is money the supplier owes US, so
+ * SUPPLIER_CREDITS is an ASSET.
+ *
+ * It exists for the same reason CUSTOMER_CREDITS does: returning goods on a bill that is already
+ * PAID would otherwise drive PAYABLES into a debit balance - a negative liability, the shape this
+ * project has now had to close three times. The return debits PAYABLES only as far as the bill is
+ * still open; whatever exceeds that becomes a supplier credit, and PAYABLES stops at zero.
+ */
+export const V19_ADDED_ACCOUNTS: readonly SeedAccount[] = [
+  { code: "SUPPLIER_CREDITS", name: "Supplier Credits Receivable", type: "ASSET" },
+];
+
 export const SEED_ACCOUNTS: readonly SeedAccount[] = [
   ...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS, ...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS,
+  ...V19_ADDED_ACCOUNTS,
 ];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [

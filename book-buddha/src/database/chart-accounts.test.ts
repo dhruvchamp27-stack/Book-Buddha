@@ -231,7 +231,12 @@ describe("reports are classified by the table, not by a hardcoded list", () => {
       if (creditNormal) credits += 1000; else debits += 1000;
     }
     const squareOff = credits - debits;
-    insert.run("CASH", squareOff > 0 ? squareOff : 0, squareOff > 0 ? 0 : -squareOff);
+    // Only if it is actually out: when the seeded chart happens to hold as many debit-normal
+    // accounts as credit-normal ones, the entry already balances and a square-off line would be
+    // 0/0, which the posting CHECK rightly refuses. v19's SUPPLIER_CREDITS made the two equal.
+    if (squareOff !== 0) {
+      insert.run("CASH", squareOff > 0 ? squareOff : 0, squareOff > 0 ? 0 : -squareOff);
+    }
   }
 
   it("keeps assets = liabilities + equity with EVERY seeded account posted to", () => {

@@ -56,6 +56,10 @@ import type {
   PayableRow,
   PurchaseBillInput,
   PurchaseBillRecord,
+  PurchaseReturnBalance,
+  PurchaseReturnInput,
+  PurchaseReturnLine,
+  PurchaseReturnRecord,
   SupplierInput,
   SupplierPatch,
   SupplierPaymentInput,
@@ -4724,6 +4728,466 @@ export class AccountingRepository {
       this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
       return reversal;
     })();
+  }
+
+  // ===========================================================================================
+  // R8 PURCHASE RETURNS (migration v19) - the supplier mirror of a credit note.
+  //
+  // Before this, goods could only go back to a supplier by CANCELLING the whole bill: all or
+  // nothing, and it rewrites a document that was correct when it was issued. A return is the
+  // honest partial case - some of what was bought goes back, on its own dated document, and the
+  // bill stands exactly as posted.
+  // ===========================================================================================
+
+  public createPurchaseReturn(input: PurchaseReturnInput): PurchaseReturnRecord {
+    return this.db.transaction(() => {
+      const bill = this.getPurchaseBill(input.billId);
+      if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${input.billId}.`);
+      if (bill.status !== "FINALIZED") {
+        throw new RepositoryValidationError("Only a finalized purchase bill can be returned against.");
+      }
+      if (input.lines.length === 0) throw new RepositoryValidationError("A purchase return needs at least one line.");
+      const returnDate = input.returnDate ?? istDateOf();
+      this.assertIsoDate("Return date", returnDate);
+      if (returnDate < bill.billDate) {
+        throw new RepositoryValidationError(`A return cannot predate the bill (${bill.billDate}).`);
+      }
+      this.validatePurchaseReturnLines(bill, input.lines);
+
+      const id = input.id ?? randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO purchase_returns (id, bill_id, number, reason, return_date, status, created_at) VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)",
+        )
+        .run(id, bill.id, input.number, input.reason, returnDate, new Date().toISOString());
+      const insertLine = this.db.prepare(
+        "INSERT INTO purchase_return_lines (purchase_return_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const line of input.lines) {
+        insertLine.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
+      }
+      this.insertAuditEvent({ action: "purchase_return.created", entityId: id, occurredAt: new Date().toISOString() });
+      return this.getPurchaseReturn(id);
+    })();
+  }
+
+  public getPurchaseReturn(returnId: string): PurchaseReturnRecord {
+    const row = this.db.prepare("SELECT * FROM purchase_returns WHERE id = ?").get(returnId) as {
+      id: string; bill_id: string; number: string; reason: string; return_date: string;
+      status: PurchaseDocumentStatus;
+    } | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`No purchase return ${returnId}.`);
+    const lines = (this.db
+      .prepare("SELECT item_id, description, quantity, unit_price_paise FROM purchase_return_lines WHERE purchase_return_id = ? ORDER BY id")
+      .all(returnId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number }>)
+      .map((line): PurchaseReturnLine => ({
+        ...(line.item_id === null ? {} : { itemId: line.item_id }),
+        description: line.description, quantity: line.quantity, unitPricePaise: line.unit_price_paise,
+      }));
+    return {
+      id: row.id, billId: row.bill_id, number: row.number, reason: row.reason,
+      returnDate: row.return_date, status: row.status, lines,
+      valuePaise: lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0),
+    };
+  }
+
+  public listPurchaseReturns(billId?: string): readonly PurchaseReturnRecord[] {
+    const ids = (billId === undefined
+      ? this.db.prepare("SELECT id FROM purchase_returns ORDER BY return_date, rowid").all()
+      : this.db.prepare("SELECT id FROM purchase_returns WHERE bill_id = ? ORDER BY return_date, rowid").all(billId)
+    ) as Array<{ id: string }>;
+    return ids.map((row) => this.getPurchaseReturn(row.id));
+  }
+
+  /**
+   * What this return takes back off the bill, and where it lands.
+   *
+   * Dr PAYABLES (as far as the bill is still open) / Dr SUPPLIER_CREDITS (the rest)
+   * Dr PURCHASE_DISCOUNT (the share of the header discount being given back)
+   *   Cr INVENTORY   at the BILL's own cost, for stock-tracked lines
+   *   Cr EXPENSE     for everything else
+   *   Cr INPUT_CGST/SGST/IGST  - the input tax credit reversed
+   */
+  public finalizePurchaseReturn(returnId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const ret = this.getPurchaseReturn(returnId);
+      if (ret.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase returns can be finalized.");
+      const bill = this.getPurchaseBill(ret.billId);
+      if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
+      this.validatePurchaseReturnLines(bill, ret.lines, ret.id);
+
+      // The goods go back first: this both writes the PURCHASE_REVERSAL movements and tells us
+      // how much of the value was stock, so INVENTORY is credited with exactly what left the
+      // layers and the two can never drift.
+      const inventoryPaise = this.removeReturnedStock(ret, bill);
+      const expensePaise = ret.valuePaise - inventoryPaise;
+
+      // The header discount is clawed back in proportion, so returning the WHOLE bill gives back
+      // exactly what was paid for it and no more. Without this, a bill discounted by Rs 150 and
+      // then fully returned would credit the supplier Rs 150 they were never given.
+      const discountPaise = this.purchaseReturnDiscountShare(bill, ret.valuePaise, ret.id);
+      // The extra charge is deliberately NOT clawed back: freight on the inward journey was
+      // incurred and is not refunded because the goods later went back. OWNER DECISION if he
+      // disagrees - recorded in context, not silently reversed here.
+      const taxLines = this.purchaseReturnTaxLines(bill, ret.valuePaise - discountPaise);
+      const postedTaxPaise = taxLines.reduce((sum, line) => sum + line.creditPaise, 0);
+      const owedBackPaise = ret.valuePaise - discountPaise + postedTaxPaise;
+
+      // The settlement debit SPLITS, exactly as a credit note's credit does (S4-1). As far as the
+      // bill is still open, the return reduces what we owe. Anything beyond that is money the
+      // supplier owes US - an ASSET - so PAYABLES lands on zero instead of going into debit and
+      // showing as a phantom receivable inside a payables account.
+      //
+      // A CASH bill never splits: there is no open balance to reduce and the money comes back
+      // across the counter, so the return IS the refund.
+      const outstandingPaise = bill.paymentAccount === "CASH"
+        ? owedBackPaise
+        : Math.max(0, bill.totalPaise - this.billReturnedPaise(bill) - bill.paidPaise);
+      const offsetPaise = Math.min(owedBackPaise, outstandingPaise);
+      const creditPaise = owedBackPaise - offsetPaise;
+      const settlementLines: JournalEntry["lines"] = [
+        ...(offsetPaise > 0 ? [{ account: bill.paymentAccount, debitPaise: offsetPaise, creditPaise: 0 }] : []),
+        ...(creditPaise > 0 ? [{ account: "SUPPLIER_CREDITS", debitPaise: creditPaise, creditPaise: 0 }] : []),
+      ];
+
+      const entry: JournalEntry = {
+        id: `je-purchase-return-${ret.id}`,
+        sourceId: bill.id,
+        sourceType: "PURCHASE_BILL",
+        description: `Purchase return ${ret.number} against bill ${bill.number}`,
+        isReversal: false,
+        lines: [
+          ...settlementLines,
+          ...(discountPaise > 0 ? [{ account: "PURCHASE_DISCOUNT", debitPaise: discountPaise, creditPaise: 0 }] : []),
+          ...(inventoryPaise > 0 ? [{ account: "INVENTORY", debitPaise: 0, creditPaise: inventoryPaise }] : []),
+          ...(expensePaise > 0 ? [{ account: "EXPENSE", debitPaise: 0, creditPaise: expensePaise }] : []),
+          ...taxLines,
+        ],
+      };
+      // The return's OWN date, not today: the goods went back when they went back (S8-4).
+      this.insertJournalEntry(entry, { businessId: bill.businessId, entryDate: ret.returnDate, ...fairDim(bill.fairId) });
+      this.db.prepare("UPDATE purchase_returns SET status = 'FINALIZED' WHERE id = ?").run(ret.id);
+      this.insertAuditEvent({ action: "purchase_return.finalized", entityId: ret.id, occurredAt: new Date().toISOString() });
+      return entry;
+    })();
+  }
+
+  public cancelPurchaseReturn(returnId: string): JournalEntry {
+    return this.db.transaction(() => {
+      const ret = this.getPurchaseReturn(returnId);
+      if (ret.status !== "FINALIZED") throw new RepositoryValidationError("Only a finalized purchase return can be cancelled.");
+      const bill = this.getPurchaseBill(ret.billId);
+      if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
+      const balance = this.getPurchaseReturnBalance(returnId);
+      if (balance.refundedPaise > 0) {
+        throw new RepositoryValidationError(
+          "This return has already been refunded by the supplier; cancel the refund first.",
+        );
+      }
+      const original = this.getJournalEntryById(`je-purchase-return-${ret.id}`);
+      const reversal = this.guard(() => reverseEntry(original, `je-purchase-return-${ret.id}-reversal`, `Cancellation of purchase return ${ret.number}`));
+      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: istDateOf(), ...fairDim(bill.fairId) });
+      // The goods come back to us, at the very cost they left at, so the lot is restored to the
+      // shape it had. Rebuilt from the RETURN'S OWN LINES rather than read back out of
+      // stock_movements: those rows are stamped with the bill, because that is how getStockLayers
+      // matches a lot, so they cannot be told apart from another return's on the same bill.
+      //
+      // The restored layer goes on the end of the queue rather than back into its old position,
+      // so a later FIFO sale could draw on it in a different order. cancelPurchaseBill has the
+      // same property, and it only shows where two lots of one item differ in cost.
+      for (const line of ret.lines) {
+        if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
+        this.insertStockMovement({
+          itemId: line.itemId, sourceId: ret.billId, movementType: "PURCHASE",
+          quantityDelta: line.quantity, unitCostPaise: line.unitPricePaise, ...fairDim(bill.fairId),
+        });
+      }
+      this.db.prepare("UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?").run(ret.id);
+      this.insertAuditEvent({ action: "purchase_return.cancelled", entityId: ret.id, occurredAt: new Date().toISOString() });
+      return reversal;
+    })();
+  }
+
+  /**
+   * What the supplier still owes us on a return.
+   *
+   * Read from the POSTED journal, never recomputed from the lines, for the reason given on
+   * invoiceCreditedPaise: the moment a tax or discount share is clamped, a recomputed figure
+   * disagrees with the ledger, and the figure that governs a refund has to be the one on the books.
+   */
+  public getPurchaseReturnBalance(returnId: string): PurchaseReturnBalance {
+    const ret = this.getPurchaseReturn(returnId);
+    const posted = this.db.prepare(
+      `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS credit
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.id = ? AND jl.account = 'SUPPLIER_CREDITS'`,
+    ).get(`je-purchase-return-${returnId}`) as { credit: number };
+    const refunded = this.db.prepare(
+      "SELECT COALESCE(SUM(amount_paise), 0) AS total FROM supplier_refunds WHERE purchase_return_id = ?",
+    ).get(returnId) as { total: number };
+    // A CANCELLED return owes nothing: its entry has been reversed, so the ledger carries none of
+    // it either, and reporting the old figure would put this sub-ledger at odds with the books.
+    const creditPaise = ret.status === "CANCELLED" ? 0 : posted.credit;
+    return { creditPaise, refundedPaise: refunded.total, outstandingPaise: creditPaise - refunded.total };
+  }
+
+  /**
+   * R8 - the supplier hands money back (the mirror of recordCreditNoteRefund).
+   *
+   * Dr CASH|BANK / Cr SUPPLIER_CREDITS on the refund's OWN date, which is what keeps S1-6 true:
+   * the cash view shows the money arriving in the month it arrived, not the month the goods went
+   * back. Its own table, so the `CHECK IN ('CASH')` on supplier_payments.payment_account - which
+   * would otherwise make BANK unusable - is not in the way.
+   */
+  public recordSupplierRefund(input: {
+    id?: string;
+    purchaseReturnId: string;
+    amountPaise: number;
+    refundedOn: string;
+    paymentAccount: "CASH" | "BANK";
+  }): JournalEntry {
+    return this.db.transaction(() => {
+      const ret = this.getPurchaseReturn(input.purchaseReturnId);
+      if (ret.status !== "FINALIZED") {
+        throw new RepositoryValidationError("Only a finalized purchase return can be refunded.");
+      }
+      if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
+        throw new RepositoryValidationError("A refund must be a whole number of paise above zero.");
+      }
+      // Validated as a real date, not merely string-compared: "garbage" sorts after any ISO date,
+      // so it would clear the check below and land straight in entryDate.
+      this.assertIsoDate("Refund date", input.refundedOn);
+      if (input.refundedOn < ret.returnDate) {
+        throw new RepositoryValidationError(`A refund cannot predate the return (${ret.returnDate}).`);
+      }
+      const balance = this.getPurchaseReturnBalance(ret.id);
+      if (input.amountPaise > balance.outstandingPaise) {
+        throw new RepositoryValidationError(
+          `Purchase return ${ret.number} has ${balance.outstandingPaise} paise left to come back; a refund of ${input.amountPaise} paise exceeds it.`,
+        );
+      }
+      const bill = this.getPurchaseBill(ret.billId);
+      if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
+      const id = input.id ?? randomUUID();
+      const entry: JournalEntry = {
+        // Deliberately NOT the `je-purchase-return-` prefix: that belongs to the return's own
+        // entry, which getPurchaseReturnBalance matches by exact id.
+        id: `je-supplier-refund-${id}`,
+        sourceId: bill.id,
+        sourceType: "PURCHASE_BILL",
+        description: `Supplier refund against purchase return ${ret.number}`,
+        isReversal: false,
+        lines: [
+          { account: input.paymentAccount, debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: "SUPPLIER_CREDITS", debitPaise: 0, creditPaise: input.amountPaise },
+        ],
+      };
+      this.insertJournalEntry(entry, { businessId: bill.businessId, entryDate: input.refundedOn, ...fairDim(bill.fairId) });
+      this.db
+        .prepare("INSERT INTO supplier_refunds (id, purchase_return_id, amount_paise, refunded_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, ret.id, input.amountPaise, input.refundedOn, input.paymentAccount, new Date().toISOString());
+      this.insertAuditEvent({ action: "purchase_return.refunded", entityId: id, occurredAt: new Date().toISOString() });
+      return entry;
+    })();
+  }
+
+  /** The value of this bill's FINALIZED returns, read off the posted settlement lines. */
+  private billReturnedPaise(bill: PurchaseBillRecord): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS returned
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.source_id = ? AND je.id LIKE 'je-purchase-return-%' AND jl.account = ?`,
+    ).get(bill.id, bill.paymentAccount) as { returned: number };
+    return row.returned;
+  }
+
+  /**
+   * The share of the bill's header discount this return gives back.
+   *
+   * A return that COMPLETES the bill takes all the remaining headroom, instead of rounding its
+   * own share in isolation. This is the same trick as creditNoteTaxLines, and it is there for the
+   * same reason: rounding each document's share separately strands a paisa or two, so a bill
+   * returned in full would not come back to exactly zero.
+   */
+  private purchaseReturnDiscountShare(bill: PurchaseBillRecord, valuePaise: number, excludeReturnId?: string): number {
+    if (bill.discountPaise === 0 || bill.subtotalPaise === 0) return 0;
+    const alreadyReturned = this.returnedValuePaise(bill.id, excludeReturnId);
+    const alreadyClawedBack = this.db.prepare(
+      `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS total
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.source_id = ? AND je.id LIKE 'je-purchase-return-%' AND jl.account = 'PURCHASE_DISCOUNT'`,
+    ).get(bill.id) as { total: number };
+    const room = Math.max(0, bill.discountPaise - alreadyClawedBack.total);
+    const completesBill = alreadyReturned + valuePaise >= bill.subtotalPaise;
+    if (completesBill) return room;
+    return Math.min(room, Math.round(bill.discountPaise * valuePaise / bill.subtotalPaise));
+  }
+
+  /**
+   * The input-GST lines this return should carry - the single place that is decided, so
+   * validation and posting can never disagree.
+   *
+   * Each account is capped by what the bill still HOLDS as input credit, which stops the
+   * per-return rounding leaving one GST account with a credit balance it never had.
+   */
+  private purchaseReturnTaxLines(bill: PurchaseBillRecord, taxablePaise: number): JournalEntry["lines"] {
+    if (bill.taxType === "NONE" || taxablePaise <= 0) return [];
+    const wanted = Math.round(taxablePaise * bill.taxRateBasisPoints / 10000);
+    const capped = (account: string, want: number): number => {
+      const room = this.inputTaxHeadroomPaise(bill.id, account);
+      return Math.max(0, Math.min(want, room));
+    };
+    const lines = bill.taxType === "IGST"
+      ? [{ account: "INPUT_IGST", debitPaise: 0, creditPaise: capped("INPUT_IGST", wanted) }]
+      : [
+        { account: "INPUT_CGST", debitPaise: 0, creditPaise: capped("INPUT_CGST", Math.floor(wanted / 2)) },
+        { account: "INPUT_SGST", debitPaise: 0, creditPaise: capped("INPUT_SGST", wanted - Math.floor(wanted / 2)) },
+      ];
+    return lines.filter((line) => line.creditPaise > 0); // the door rejects a zero-amount line
+  }
+
+  /** Input credit this bill is still carrying on one GST account: what it took, less what returns gave back. */
+  private inputTaxHeadroomPaise(billId: string, account: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS headroom
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE je.source_id = ? AND je.source_type = 'PURCHASE_BILL' AND jl.account = ?`,
+    ).get(billId, account) as { headroom: number };
+    return Math.max(0, row.headroom);
+  }
+
+  /** Taxable value of this bill's FINALIZED returns, optionally ignoring one (the one being posted). */
+  private returnedValuePaise(billId: string, excludeReturnId?: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(prl.quantity * prl.unit_price_paise), 0) AS total
+         FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
+        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED'
+              ${excludeReturnId === undefined ? "" : "AND pr.id <> ?"}`,
+    ).get(...(excludeReturnId === undefined ? [billId] : [billId, excludeReturnId])) as { total: number };
+    return row.total;
+  }
+
+  /**
+   * A return may not send back more than the bill bought, nor more than the bill was worth, and
+   * its prices must be the ones the bill charged - that last rule is what keeps INVENTORY and the
+   * stock layers equal, because the layer holds the bill's price and nothing else.
+   */
+  private validatePurchaseReturnLines(
+    bill: PurchaseBillRecord,
+    lines: readonly PurchaseReturnLine[],
+    excludeReturnId?: string,
+  ): void {
+    const billed = new Map<string, { quantity: number; unitPricePaise: number }>();
+    for (const line of bill.lines) {
+      if (line.itemId === undefined) continue;
+      const existing = billed.get(line.itemId);
+      billed.set(line.itemId, {
+        quantity: (existing?.quantity ?? 0) + line.quantity,
+        unitPricePaise: line.unitPricePaise,
+      });
+    }
+    const returnedRows = this.db.prepare(
+      `SELECT prl.item_id, SUM(prl.quantity) AS quantity
+         FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
+        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED'
+              ${excludeReturnId === undefined ? "" : "AND pr.id <> ?"}
+        GROUP BY prl.item_id`,
+    ).all(...(excludeReturnId === undefined ? [bill.id] : [bill.id, excludeReturnId])) as Array<{ item_id: string | null; quantity: number }>;
+    const alreadyReturned = new Map(
+      returnedRows.filter((row) => row.item_id !== null).map((row) => [row.item_id as string, row.quantity] as const),
+    );
+    for (const line of lines) {
+      if (!Number.isInteger(line.quantity) || line.quantity <= 0
+        || !Number.isInteger(line.unitPricePaise) || line.unitPricePaise < 0) {
+        throw new RepositoryValidationError("Purchase return quantities and prices must be valid whole paise values.");
+      }
+      if (line.itemId === undefined) continue;
+      const onBill = billed.get(line.itemId);
+      if (onBill === undefined) {
+        throw new RepositoryValidationError(`Item ${line.itemId} is not on bill ${bill.number}, so it cannot be returned against it.`);
+      }
+      if (line.unitPricePaise !== onBill.unitPricePaise) {
+        throw new RepositoryValidationError(
+          `A return must use the price the bill charged for item ${line.itemId} (${onBill.unitPricePaise} paise), not ${line.unitPricePaise}.`,
+        );
+      }
+      const available = onBill.quantity - (alreadyReturned.get(line.itemId) ?? 0);
+      if (line.quantity > available) {
+        throw new RepositoryValidationError(
+          `Purchase return quantity exceeds what bill ${bill.number} bought of item ${line.itemId} (${available} left).`,
+        );
+      }
+    }
+    const value = lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+    const alreadyValue = this.returnedValuePaise(bill.id, excludeReturnId);
+    if (value + alreadyValue > bill.subtotalPaise) {
+      throw new RepositoryValidationError(
+        `Purchase returns cannot exceed what the bill charged before tax and discount (${bill.subtotalPaise} paise); this return would take the total returned to ${value + alreadyValue} paise.`,
+      );
+    }
+  }
+
+  /**
+   * Send the goods back, and report what they cost.
+   *
+   * Written as PURCHASE_REVERSAL against the BILL's own lot, which getStockLayers already
+   * understands: it removes that lot at that cost rather than the oldest layer, which is the only
+   * correct thing to do when goods go back to the supplier they came from.
+   *
+   * Guarded against returning stock that has since been SOLD, the same guard cancelPurchaseBill
+   * uses - otherwise the layers would go negative and the INVENTORY credit would be fiction.
+   */
+  private removeReturnedStock(ret: PurchaseReturnRecord, bill: PurchaseBillRecord): number {
+    let totalCost = 0;
+    for (const line of ret.lines) {
+      if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
+      const itemId = line.itemId;
+      const remainingOfLot = this.getStockLayers(itemId)
+        .filter((layer) => layer.sourceId === bill.id && layer.unitCostPaise === line.unitPricePaise)
+        .reduce((total, layer) => total + layer.quantity, 0);
+      if (remainingOfLot < line.quantity) {
+        throw new RepositoryValidationError(
+          `Only ${remainingOfLot} of item ${itemId} from bill ${bill.number} is still in stock; the rest has been sold, so it cannot be returned to the supplier.`,
+        );
+      }
+      this.insertStockMovement({
+        itemId,
+        // The BILL's id, not the return's. getStockLayers finds the lot to take the goods out of
+        // by matching source_id AND unit cost against the layer, and the layer carries the bill.
+        // Stamping the return's id here matches nothing, and the movement silently removes no
+        // stock while the ledger credits INVENTORY anyway - which is how this was first written,
+        // and what the stock-equals-ledger assertions caught.
+        sourceId: bill.id,
+        movementType: "PURCHASE_REVERSAL",
+        quantityDelta: -line.quantity,
+        unitCostPaise: line.unitPricePaise,
+        ...fairDim(bill.fairId),
+      });
+      totalCost += line.quantity * line.unitPricePaise;
+    }
+    if (totalCost > 0) {
+      this.insertAuditEvent({ action: "stock.purchase_returned", entityId: ret.id, occurredAt: new Date().toISOString() });
+    }
+    return totalCost;
+  }
+
+  /**
+   * Fetch a posted entry by its EXACT id. getSourceJournalEntry looks up by source id, which
+   * cannot tell two returns on the same bill apart.
+   */
+  private getJournalEntryById(entryId: string): JournalEntry {
+    const row = this.db
+      .prepare("SELECT id, source_id, description, is_reversal, source_type FROM journal_entries WHERE id = ?")
+      .get(entryId) as { id: string; source_id: string; description: string; is_reversal: number; source_type: JournalSourceType } | undefined;
+    if (row === undefined) throw new RepositoryValidationError(`Journal entry ${entryId} was not found.`);
+    const lines = this.db
+      .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
+      .all(entryId) as Array<{ account: string; debit_paise: number; credit_paise: number }>;
+    return {
+      id: row.id, sourceId: row.source_id, sourceType: row.source_type, description: row.description,
+      isReversal: row.is_reversal === 1,
+      lines: lines.map((line) => ({ account: line.account, debitPaise: line.debit_paise, creditPaise: line.credit_paise })),
+    };
   }
 
   private getSourceJournalEntry(sourceId: string, sourceType: JournalSourceType): JournalEntry {

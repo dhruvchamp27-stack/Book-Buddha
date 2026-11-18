@@ -185,3 +185,54 @@ export interface SupplierStatement {
   readonly rows: readonly SupplierStatementRow[];
   readonly closingBalancePaise: number;
 }
+
+/**
+ * R8 purchase returns (migration v19) - the supplier mirror of a credit note.
+ *
+ * Deliberately shaped like CreditNoteLine / CreditNote, because that is exactly what this is on
+ * the other side of the books, and the next person should not have to learn two vocabularies.
+ */
+export interface PurchaseReturnLine {
+  /** Absent for a line that was never a stock item (a service, freight, a one-off). */
+  readonly itemId?: string;
+  readonly description: string;
+  readonly quantity: number;
+  /** Must be the price the BILL charged for this item: that is what the stock layer holds. */
+  readonly unitPricePaise: number;
+}
+
+export interface PurchaseReturnInput {
+  readonly id?: string;
+  readonly billId: string;
+  readonly number: string;
+  readonly reason: string;
+  /**
+   * YYYY-MM-DD, the day the goods actually went back. Defaults to today (IST).
+   *
+   * A credit note has no date of its own and is dated at finalize instead (S4-8), which the owner
+   * has an open complaint about (S8-4: a return cannot be back-dated). A purchase return is new,
+   * so it carries its own document date from the start rather than inheriting that problem.
+   */
+  readonly returnDate?: string;
+  readonly lines: readonly PurchaseReturnLine[];
+}
+
+export interface PurchaseReturnRecord {
+  readonly id: string;
+  readonly billId: string;
+  readonly number: string;
+  readonly reason: string;
+  readonly returnDate: string;
+  readonly status: PurchaseDocumentStatus;
+  readonly lines: readonly PurchaseReturnLine[];
+  /** The lines: what the goods were billed at. */
+  readonly valuePaise: number;
+}
+
+/** What a finalized return is worth back from the supplier, and how much is still undischarged. */
+export interface PurchaseReturnBalance {
+  /** Posted to SUPPLIER_CREDITS: the part that exceeded what was still owed on the bill. */
+  readonly creditPaise: number;
+  readonly refundedPaise: number;
+  readonly outstandingPaise: number;
+}

@@ -282,6 +282,24 @@ const creditNoteInput = z.object({
  * optional paidOn: a refund or an application is a deliberate, dated act, and defaulting it to
  * today would quietly drop the reduction into the wrong month of the cash P&L.
  */
+/**
+ * R8 purchase returns (v19) - the supplier mirror of a credit note. Shaped like creditNoteInput
+ * on purpose; the only addition is a real document date, which a credit note still lacks (S8-4).
+ */
+const purchaseReturnInput = z.object({
+  billId: id,
+  number: name,
+  reason: z.string().trim().min(1),
+  returnDate: z.string().date("Use a real date written as YYYY-MM-DD.").optional(),
+  lines: z.array(invoiceLine).min(1),
+});
+const supplierRefundInput = z.object({
+  amountPaise: z.number().int().positive(),
+  refundedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
+  // BANK is reachable here, and only here: supplier_payments.payment_account is CHECK IN ('CASH').
+  paymentAccount: z.enum(["CASH", "BANK"]),
+});
+
 const creditNoteRefundInput = z.object({
   amountPaise: z.number().int().positive(),
   refundedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
@@ -1275,6 +1293,52 @@ export function buildApi(
       })),
     });
     return reply.code(201).send(bill);
+  });
+
+  // ---- R8 purchase returns: goods going BACK to a supplier, the mirror of a credit note. ----
+
+  app.post("/purchase-returns", async (request, reply) => {
+    const input = parseBody(purchaseReturnInput, request.body);
+    return reply.code(201).send(repository.createPurchaseReturn({
+      billId: input.billId,
+      number: input.number,
+      reason: input.reason,
+      ...(input.returnDate === undefined ? {} : { returnDate: input.returnDate }),
+      lines: input.lines.map((line) => ({
+        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+        description: line.description,
+        quantity: line.quantity,
+        unitPricePaise: line.unitPricePaise,
+      })),
+    }));
+  });
+
+  app.get<{ Querystring: { billId?: string } }>("/purchase-returns", async (request) =>
+    repository.listPurchaseReturns(request.query.billId));
+
+  app.get<{ Params: { returnId: string } }>("/purchase-returns/:returnId", async (request) =>
+    repository.getPurchaseReturn(request.params.returnId));
+
+  app.post<{ Params: { returnId: string } }>("/purchase-returns/:returnId/finalize", async (request) =>
+    ({ journalEntry: repository.finalizePurchaseReturn(request.params.returnId) }));
+
+  app.post<{ Params: { returnId: string } }>("/purchase-returns/:returnId/cancel", async (request) =>
+    ({ journalEntry: repository.cancelPurchaseReturn(request.params.returnId) }));
+
+  /** What the supplier still owes on this return, and how much has already come back. */
+  app.get<{ Params: { returnId: string } }>("/purchase-returns/:returnId/balance", async (request) =>
+    repository.getPurchaseReturnBalance(request.params.returnId));
+
+  /** The supplier hands money back (the mirror of a credit-note refund). */
+  app.post<{ Params: { returnId: string } }>("/purchase-returns/:returnId/refunds", async (request, reply) => {
+    const input = parseBody(supplierRefundInput, request.body);
+    const journalEntry = repository.recordSupplierRefund({
+      purchaseReturnId: request.params.returnId,
+      amountPaise: input.amountPaise,
+      refundedOn: input.refundedOn,
+      paymentAccount: input.paymentAccount,
+    });
+    return reply.code(201).send({ journalEntry, balance: repository.getPurchaseReturnBalance(request.params.returnId) });
   });
 
   app.get<{ Querystring: { businessId?: string; supplierId?: string; status?: string } }>("/purchase-bills", async (request) => {
