@@ -37,6 +37,9 @@ blockers, next step. Allied files (`architecture.md`, `database.md`, `decisions.
 - **Use lower models where you can.** Sonnet for writing code and non-trivial
   research; Haiku for file search, context extraction, and other supporting or
   routine tasks.
+- Use Sonnet for code writing and development and haiku for very non trivial work like file search and update. 
+  You review the work done and make necessary tests pass, at each session end make the commits and push with proper message. Use Opus 5.5 as advisor where               
+  needed. 
 
 ## Hard rules
 1. **Never expose secrets** — API keys, passwords, tokens, `.env` files. Enforced in
