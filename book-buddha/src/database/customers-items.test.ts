@@ -222,9 +222,16 @@ describe("inventory reports (read-only; the OPENING movements themselves now pos
       expect(repository.getLowStockItems()).toEqual([
         { itemId: tracked, itemName: "Notebook", unit: "each", quantity: 2, reorderThreshold: 5 },
       ]);
+      // Session 9: getSalesByItem gained the returns side (it used to ignore credit notes
+      // completely). The INVOICED figures below are untouched - 13 @ 6,450 and 2 @ 2,000 are the
+      // same numbers this test has always pinned. There are no credit notes in this world, so
+      // every returns column is nil and net equals gross. This is an incidental shape change, not
+      // a moved acceptance figure.
       expect(repository.getSalesByItem()).toEqual([
-        { itemId: tracked, itemName: "Notebook", unit: "each", quantity: 13, salesPaise: 12 * 500 + 450 },
-        { itemId: plain, itemName: "Service", unit: "each", quantity: 2, salesPaise: 2000 },
+        { itemId: tracked, itemName: "Notebook", unit: "each", quantity: 13, salesPaise: 12 * 500 + 450,
+          returnedQuantity: 0, returnsPaise: 0, netQuantity: 13, netSalesPaise: 12 * 500 + 450 },
+        { itemId: plain, itemName: "Service", unit: "each", quantity: 2, salesPaise: 2000,
+          returnedQuantity: 0, returnsPaise: 0, netQuantity: 2, netSalesPaise: 2000 },
       ]);
     } finally {
       repository.close();

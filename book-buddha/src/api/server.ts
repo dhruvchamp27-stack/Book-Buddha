@@ -1352,7 +1352,10 @@ export function buildApi(
 
   app.get("/reports/inventory-valuation", async () => repository.getInventoryValuation());
   app.get("/reports/low-stock", async () => repository.getLowStockItems());
-  app.get("/reports/sales-by-item", async () => repository.getSalesByItem());
+  // Session 9. Both of these used to take no filters and ignore credit notes. sales-by-item takes
+  // the credit-note query because an item filter IS meaningful on a per-item report.
+  app.get("/reports/sales-by-item", async (request) =>
+    repository.getSalesByItem(parseBody(creditNoteReportQuery, request.query)));
   // Optional report filters. No query string = consolidated, all dates (unchanged behaviour).
   app.get("/reports/trial-balance", async (request) =>
     repository.getTrialBalance(parseBody(trialBalanceQuery, request.query)));
@@ -1386,10 +1389,8 @@ export function buildApi(
   app.get("/reports/receivables", async (request) =>
     repository.getReceivables(parseBody(customerOpenItemsQuery, request.query)));
   app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
-  app.get<{ Querystring: { fairId?: string } }>(
-    "/reports/fair-sales",
-    async (request) => repository.getFairSales(request.query.fairId),
-  );
+  app.get("/reports/fair-sales", async (request) =>
+    repository.getFairSales(parseBody(salesReportQuery, request.query)));
 
   return app;
 }

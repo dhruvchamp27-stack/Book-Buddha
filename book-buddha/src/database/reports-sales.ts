@@ -432,3 +432,100 @@ export function salesReturnReport(db: Database.Database, filter: CreditNoteRepor
     }));
   return { rows, byItem, totalValuePaise: rows.reduce((total, row) => total + row.valuePaise, 0) };
 }
+
+export interface SalesByItemRow {
+  /** null for a line that names no item (a typed-in service line); the row is then named by its description. */
+  readonly itemId: string | null;
+  readonly itemName: string;
+  /** null where there is no item behind the row. */
+  readonly unit: string | null;
+  /** Quantity invoiced on FINALIZED invoices. */
+  readonly quantity: number;
+  /** Quantity x unit price invoiced, BEFORE invoice-level discount, extra charge and GST. */
+  readonly salesPaise: number;
+  /** Quantity returned on FINALIZED credit notes. */
+  readonly returnedQuantity: number;
+  readonly returnsPaise: number;
+  readonly netQuantity: number;
+  readonly netSalesPaise: number;
+}
+
+/**
+ * Sales per item (spec section 13).
+ *
+ * Unlike every other report in this file this one reads DOCUMENT LINES, not the journal, because
+ * the journal has no item dimension (see the file header). To keep it in the same world as the
+ * journal reports, its business, fair and date filters come from the invoice's OWN POSTED ENTRY,
+ * joined as `je` - so `sales-by-item?fairId=X` covers exactly the invoices that
+ * `sales-by-fair?fairId=X` counts, rather than a second, privately-invented idea of which
+ * invoices belong to a fair.
+ *
+ * An invoice posts up to TWO entries (the sale, and COGS when a line tracks stock) under the same
+ * source_id with the same dimensions, so they are collapsed with GROUP BY source_id before the
+ * join. Joining the raw table would count every tracked-stock invoice twice.
+ *
+ * Returns come from salesReturnReport's own byItem query, so a return cannot be counted there and
+ * missed here. Until session 9 this report ignored credit notes completely and took no filters at
+ * all, which is what let it disagree with the rest of section 13.
+ *
+ * WHAT THIS IS NOT. Line value is quantity x unit price. Invoice-level discount, extra charge and
+ * GST are NOT spread across the lines (there is no honest rule for doing so - see
+ * `refuseItemFilter`), so the column total here does NOT equal net sales from the journal, and is
+ * not meant to. Dates follow each document: an invoice sits on its own entry date, a credit note
+ * on the date it was finalized (S8-4), so a January sale returned in February shows as a sale in
+ * January and a return in February.
+ */
+export function salesByItem(db: Database.Database, filter: CreditNoteReportFilter = {}): readonly SalesByItemRow[] {
+  const extras: Array<{ sql: string; param?: string }> = [{ sql: "inv.status = 'FINALIZED'" }];
+  if (filter.customerId !== undefined) extras.push({ sql: "inv.customer_id = ?", param: filter.customerId });
+  if (filter.itemId !== undefined) extras.push({ sql: "il.item_id = ?", param: filter.itemId });
+  const { where, params } = withConditions(filter, extras);
+  const gross = db.prepare(
+    `SELECT il.item_id, COALESCE(it.name, il.description) AS item_name,
+            SUM(il.quantity) AS quantity, SUM(il.quantity * il.unit_price_paise) AS sales_paise
+       FROM invoice_lines il
+       JOIN invoices inv ON inv.id = il.invoice_id
+       JOIN (SELECT source_id AS id, MIN(entry_date) AS entry_date, business_id, fair_id
+               FROM journal_entries
+              WHERE source_type = 'INVOICE' AND is_reversal = 0
+              GROUP BY source_id) je ON je.id = inv.id
+       LEFT JOIN items it ON it.id = il.item_id
+       ${where}
+      GROUP BY il.item_id, CASE WHEN il.item_id IS NULL THEN il.description END
+      ORDER BY item_name, il.item_id`,
+  ).all(...params) as Array<{ item_id: string | null; item_name: string; quantity: number; sales_paise: number }>;
+
+  const units = new Map(
+    (db.prepare("SELECT id, unit FROM items").all() as Array<{ id: string; unit: string }>).map((row) => [row.id, row.unit] as const),
+  );
+  /** An item-less line is identified by its name, exactly as salesReturnReport groups it. */
+  const keyOf = (itemId: string | null, itemName: string): string => (itemId === null ? `description:${itemName}` : `item:${itemId}`);
+
+  const merged = new Map<string, { itemId: string | null; itemName: string; quantity: number; salesPaise: number; returnedQuantity: number; returnsPaise: number }>();
+  for (const row of gross) {
+    merged.set(keyOf(row.item_id, row.item_name), {
+      itemId: row.item_id, itemName: row.item_name,
+      quantity: row.quantity, salesPaise: row.sales_paise, returnedQuantity: 0, returnsPaise: 0,
+    });
+  }
+  for (const row of salesReturnReport(db, filter).byItem) {
+    const key = keyOf(row.itemId, row.itemName);
+    // A return whose item was never invoiced inside the filter still belongs in the report: it is
+    // stock coming back. Dropping it would hide a return behind a date or fair filter.
+    const existing = merged.get(key) ?? { itemId: row.itemId, itemName: row.itemName, quantity: 0, salesPaise: 0, returnedQuantity: 0, returnsPaise: 0 };
+    merged.set(key, { ...existing, returnedQuantity: existing.returnedQuantity + row.quantity, returnsPaise: existing.returnsPaise + row.valuePaise });
+  }
+  return [...merged.values()]
+    .map((row): SalesByItemRow => ({
+      itemId: row.itemId,
+      itemName: row.itemName,
+      unit: row.itemId === null ? null : units.get(row.itemId) ?? null,
+      quantity: row.quantity,
+      salesPaise: row.salesPaise,
+      returnedQuantity: row.returnedQuantity,
+      returnsPaise: row.returnsPaise,
+      netQuantity: row.quantity - row.returnedQuantity,
+      netSalesPaise: row.salesPaise - row.returnsPaise,
+    }))
+    .sort((left, right) => left.itemName.localeCompare(right.itemName) || (left.itemId ?? "").localeCompare(right.itemId ?? ""));
+}

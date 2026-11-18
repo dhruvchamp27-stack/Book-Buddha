@@ -35,10 +35,10 @@ import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { reportConditions } from "./report-filters-sql.js";
 import {
-  salesByBusiness, salesByCustomer, salesByFair, salesByTax, creditNoteReport, salesReturnReport,
+  salesByBusiness, salesByCustomer, salesByFair, salesByItem, salesByTax, creditNoteReport, salesReturnReport,
   type SalesReportFilter, type CreditNoteReportFilter, type SalesReport, type CreditNoteReport,
-  type SalesByBusinessRow, type SalesByCustomerRow, type SalesByFairRow, type SalesByTaxRow,
-  type SalesReturnReport,
+  type SalesByBusinessRow, type SalesByCustomerRow, type SalesByFairRow, type SalesByItemRow,
+  type SalesByTaxRow, type SalesReturnReport, type SalesTotals,
 } from "./reports-sales.js";
 import {
   transactionListByDate, transactionDetailByAccount, stockMovementReport,
@@ -327,14 +327,6 @@ export interface LowStockRow {
   readonly unit: string;
   readonly quantity: number;
   readonly reorderThreshold: number;
-}
-
-export interface SalesByItemRow {
-  readonly itemId: string;
-  readonly itemName: string;
-  readonly unit: string;
-  readonly quantity: number;
-  readonly salesPaise: number;
 }
 
 export interface FairInput {
@@ -637,11 +629,28 @@ export interface ReceivableRow {
   readonly ageDays: number;
 }
 
+/**
+ * One row per fair. Session 9: the figures now come from `salesByFair`, which reads the POSTED
+ * JOURNAL, so `/reports/fair-sales`, `/reports/sales-by-fair` and `/reports/profit-and-loss?fairId=`
+ * finally give ONE answer. This report used to re-add the invoice lines itself, count GST as
+ * sales and ignore credit notes entirely; measured on the worked example in
+ * `fair-sales-reconciliation.test.ts` it answered Rs 2,180 where the other two answered Rs 1,500.
+ */
 export interface FairSalesRow {
   readonly fairId: string;
   readonly fairName: string;
+  /** Distinct FINALIZED invoices with sales posted in the period. */
   readonly invoiceCount: number;
+  /**
+   * Net sales: invoiced less credit notes, GST EXCLUDED. The same number as `netSalesPaise`,
+   * kept under its old name so existing callers do not break. GST used to be added in; it is a
+   * liability collected for the government, never the fair's income.
+   */
   readonly totalPaise: number;
+  readonly invoicedPaise: number;
+  readonly creditNotesPaise: number;
+  readonly netSalesPaise: number;
+  readonly creditNoteCount: number;
 }
 
 export type StockMovementType = "OPENING" | "PURCHASE" | "ADJUSTMENT";
@@ -1203,22 +1212,12 @@ export class AccountingRepository {
       }));
   }
 
-  /** Quantity and line amount (quantity x unit price, before invoice-level discount/tax) per item on finalized invoices. */
-  public getSalesByItem(): readonly SalesByItemRow[] {
-    const rows = this.db
-      .prepare(
-        `SELECT i.id, i.name, i.unit, SUM(il.quantity) AS quantity, SUM(il.quantity * il.unit_price_paise) AS sales_paise
-         FROM invoice_lines il
-         JOIN invoices inv ON inv.id = il.invoice_id
-         JOIN items i ON i.id = il.item_id
-         WHERE inv.status = 'FINALIZED'
-         GROUP BY i.id, i.name, i.unit
-         ORDER BY i.name, MIN(i.rowid)`,
-      )
-      .all() as Array<{ id: string; name: string; unit: string; quantity: number; sales_paise: number }>;
-    return rows.map((row) => ({
-      itemId: row.id, itemName: row.name, unit: row.unit, quantity: row.quantity, salesPaise: row.sales_paise,
-    }));
+  /**
+   * Quantity and line amount per item, gross and net of returns. See `salesByItem` for what the
+   * figures mean and why this one report reads document lines rather than the journal.
+   */
+  public getSalesByItem(filter: CreditNoteReportFilter = {}): readonly SalesByItemRow[] {
+    return salesByItem(this.db, filter);
   }
 
   public createFair(input: FairInput): string {
@@ -2747,46 +2746,36 @@ export class AccountingRepository {
     );
   }
 
-  public getFairSales(fairId?: string): readonly FairSalesRow[] {
-    const statement = fairId === undefined
-      ? this.db.prepare(
-          `SELECT f.id, f.name, COUNT(s.id) AS invoice_count,
-                  COALESCE(SUM(s.total_paise), 0) AS total_paise
-           FROM fairs f
-           LEFT JOIN (
-             SELECT i.id, i.fair_id,
-                    (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
-                      + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise
-             FROM invoices i JOIN invoice_lines il ON il.invoice_id = i.id
-             WHERE i.status = 'FINALIZED'
-             GROUP BY i.id
-           ) s ON s.fair_id = f.id
-           GROUP BY f.id ORDER BY f.name, f.id`,
-        )
-      : this.db.prepare(
-          `SELECT f.id, f.name, COUNT(s.id) AS invoice_count,
-                  COALESCE(SUM(s.total_paise), 0) AS total_paise
-           FROM fairs f
-           LEFT JOIN (
-             SELECT i.id, i.fair_id,
-                    (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
-                      + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise
-             FROM invoices i JOIN invoice_lines il ON il.invoice_id = i.id
-             WHERE i.status = 'FINALIZED'
-             GROUP BY i.id
-           ) s ON s.fair_id = f.id
-           WHERE f.id = ?
-           GROUP BY f.id ORDER BY f.name, f.id`,
-        );
-    const rows = (fairId === undefined ? statement.all() : statement.all(fairId)) as Array<{
-      id: string; name: string; invoice_count: number; total_paise: number;
-    }>;
-    return rows.map((row) => ({
-      fairId: row.id,
-      fairName: row.name,
-      invoiceCount: row.invoice_count,
-      totalPaise: row.total_paise,
-    }));
+  /**
+   * Sales per fair, from the journal via `salesByFair`, so this cannot drift from the other two
+   * routes that answer the same question. Every fair is still listed, including one with nothing
+   * posted against it, which is why this is not simply `getSalesByFairReport`: that report only
+   * returns groups the journal actually contains, and adds a "(No fair)" row this one has never
+   * had. The filters (business, fair, customer, dates) are the ordinary sales-report filters;
+   * with none, the answer is consolidated over all dates, as before.
+   */
+  public getFairSales(filter: SalesReportFilter = {}): readonly FairSalesRow[] {
+    const posted = new Map<string, SalesTotals>();
+    for (const row of salesByFair(this.db, filter).rows) {
+      if (row.fairId !== null) posted.set(row.fairId, row);
+    }
+    const statement = filter.fairId === undefined
+      ? this.db.prepare("SELECT id, name FROM fairs ORDER BY name, id")
+      : this.db.prepare("SELECT id, name FROM fairs WHERE id = ? ORDER BY name, id");
+    const fairs = (filter.fairId === undefined ? statement.all() : statement.all(filter.fairId)) as Array<{ id: string; name: string }>;
+    return fairs.map((fair): FairSalesRow => {
+      const totals = posted.get(fair.id);
+      return {
+        fairId: fair.id,
+        fairName: fair.name,
+        invoiceCount: totals?.invoiceCount ?? 0,
+        totalPaise: totals?.netSalesPaise ?? 0,
+        invoicedPaise: totals?.invoicedPaise ?? 0,
+        creditNotesPaise: totals?.creditNotesPaise ?? 0,
+        netSalesPaise: totals?.netSalesPaise ?? 0,
+        creditNoteCount: totals?.creditNoteCount ?? 0,
+      };
+    });
   }
 
   public listAuditEvents(entityId?: string): readonly AuditEvent[] {
