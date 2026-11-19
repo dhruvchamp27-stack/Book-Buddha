@@ -30,6 +30,9 @@ import type {
 import { ACCOUNT_CODES, type AccountingBasis } from "../accounting/types.js";
 import { AGEING_BANDS } from "./ageing-bands.js";
 import { istDateOf } from "./ist-date.js";
+import { openCustomerItemRows, type OpenCustomerItem, type OpenCustomerItemRow } from "./open-items.js";
+
+export type { OpenCustomerItem };
 import {
   inventoryValuationDetail, stockAgeing,
   type InventoryValuationDetailReport, type StockAgeingReport, type StockReportFilter,
@@ -554,19 +557,6 @@ export interface GeneralLedgerRow {
   readonly account: AccountCode;
   readonly debitPaise: number;
   readonly creditPaise: number;
-}
-
-/** One open item of a customer: an invoice or an opening balance. See getOpenCustomerItems. */
-export interface OpenCustomerItem {
-  readonly documentId: string;
-  readonly kind: "INVOICE" | "OPENING";
-  readonly date: string;
-  readonly totalPaise: number;
-  /** Payments, applied credit and credit notes (invoice), or receipts (opening balance). */
-  readonly settledPaise: number;
-  readonly outstandingPaise: number;
-  readonly customerId: string;
-  readonly businessId: string;
 }
 
 /** The supplier mirror of OpenCustomerItem. See getOpenSupplierItems. */
@@ -6585,84 +6575,13 @@ export class AccountingRepository {
     }));
   }
 
-  /** The same rows with the invoice-only detail getReceivables still shows. One query, two shapes. */
-  private openCustomerItemRows(filter: { businessId?: string; customerId?: string }): Array<OpenCustomerItem & {
-    readonly number: string; readonly paidPaise: number; readonly creditedPaise: number;
-  }> {
-    const where = (alias: string): { sql: string; params: string[] } => ({
-      sql: (filter.businessId === undefined ? "" : ` AND ${alias}.business_id = ?`) + (filter.customerId === undefined ? "" : ` AND ${alias}.customer_id = ?`),
-      params: [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.customerId === undefined ? [] : [filter.customerId])],
-    });
-    const invoiceWhere = where("i");
-    const rows = this.db
-      .prepare(
-        `SELECT i.id, i.number, i.business_id, i.customer_id, COALESCE(i.invoice_date, i.created_at) AS invoice_date,
-                i.tax_rate_basis_points,
-                (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
-                  + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
-                COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id AND p.cancelled_at IS NULL), 0)
-                  + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
-           FROM invoices i
-           JOIN invoice_lines il ON il.invoice_id = i.id
-           WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES'${invoiceWhere.sql}
-           GROUP BY i.id
-           ORDER BY i.created_at`,
-      )
-      .all(...invoiceWhere.params) as Array<{
-        id: string; number: string; business_id: string; customer_id: string; invoice_date: string;
-        tax_rate_basis_points: number; total_paise: number; paid_paise: number;
-      }>;
-    // Credit notes, read from the POSTED journal exactly as invoiceCreditedPaise does, so the
-    // list and the payment cap can never disagree. Recomputing from the note lines would drift
-    // the moment a note's tax is clamped. SAME DEFECT as recordPayment's cap: without this, an
-    // invoice that has been fully credited still appeared on the receivables list as owed.
-    const creditedByInvoice = new Map<string, number>();
-    for (
-      const note of this.db
-        .prepare(
-          `SELECT je.source_id AS invoice_id,
-                  COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS credited
-             FROM journal_lines jl
-             JOIN journal_entries je ON je.id = jl.journal_entry_id
-             JOIN invoices i ON i.id = je.source_id
-            WHERE je.id LIKE 'je-credit-note-%' AND jl.account = i.payment_account
-            GROUP BY je.source_id`,
-        )
-        .all() as Array<{ invoice_id: string; credited: number }>
-    ) {
-      creditedByInvoice.set(note.invoice_id, note.credited);
-    }
-    const items: Array<OpenCustomerItem & { readonly number: string; readonly paidPaise: number; readonly creditedPaise: number }> = [];
-    for (const row of rows) {
-      const creditedPaise = creditedByInvoice.get(row.id) ?? 0;
-      items.push({
-        documentId: row.id, kind: "INVOICE", date: row.invoice_date, totalPaise: row.total_paise,
-        settledPaise: row.paid_paise + creditedPaise, outstandingPaise: row.total_paise - creditedPaise - row.paid_paise,
-        customerId: row.customer_id, businessId: row.business_id,
-        number: row.number, paidPaise: row.paid_paise, creditedPaise,
-      });
-    }
-    const openingWhere = where("b");
-    for (
-      const b of this.db
-        .prepare(
-          `SELECT b.id, b.business_id, b.customer_id, b.as_at, b.amount_paise,
-                  COALESCE((SELECT SUM(r.amount_paise) FROM opening_balance_receipts r WHERE r.opening_customer_balance_id = b.id), 0) AS received_paise
-             FROM opening_customer_balances b
-            WHERE b.reversed_at IS NULL${openingWhere.sql}
-            ORDER BY b.created_at, b.rowid`,
-        )
-        .all(...openingWhere.params) as Array<{
-        id: string; business_id: string; customer_id: string; as_at: string; amount_paise: number; received_paise: number;
-      }>
-    ) {
-      items.push({
-        documentId: b.id, kind: "OPENING", date: b.as_at, totalPaise: b.amount_paise, settledPaise: b.received_paise,
-        outstandingPaise: b.amount_paise - b.received_paise, customerId: b.customer_id, businessId: b.business_id,
-        number: "Opening balance", paidPaise: b.received_paise, creditedPaise: 0,
-      });
-    }
-    return items.filter((item) => item.outstandingPaise > 0);
+  /**
+   * The same rows with the invoice-only detail getReceivables still shows. One query, two shapes.
+   * The query itself now lives in `open-items.ts` so the customer reports can read it too; see the
+   * note there. This is a pass-through and nothing about the rows changed when it moved.
+   */
+  private openCustomerItemRows(filter: { businessId?: string; customerId?: string }): OpenCustomerItemRow[] {
+    return openCustomerItemRows(this.db, filter);
   }
 
   /** The supplier mirror of getOpenCustomerItems: bills, expenses on credit, and opening balances. */

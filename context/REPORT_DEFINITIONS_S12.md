@@ -27,7 +27,7 @@ Valuation Detail, which exists only in summary form (`getInventoryValuation`, on
 
 ## 0. THE SHARED CHANGE THIS SLICE NEEDS FIRST
 
-### 0a. `openCustomerItemRows` gains `asAtDate` (and keeps today's behaviour when not given)
+### 0a. `openCustomerItemRows` gains `fairId` and `includeSettled` (and nothing else — see the trap below)
 `openCustomerItemRows` (`repository.ts:6605`) is the **one definition of what a customer still
 owes**: invoices less non-cancelled payments, less applied credit, less credit notes read from the
 posted journal, plus opening balances less their receipts. `getReceivables`, `getReceivablesAgeing`
