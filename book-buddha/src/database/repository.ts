@@ -1715,7 +1715,12 @@ export class AccountingRepository {
           invoice.buyerName ?? null,
           invoice.buyerContact ?? null,
           invoice.number,
-          invoice.invoiceDate ?? new Date().toISOString().slice(0, 10),
+          // Today in IST, not the UTC calendar date. Slicing an ISO string dated an invoice
+          // entered between 00:00 and 05:29 IST to the PREVIOUS day, and that wrong date was
+          // then read back by invoiceEntryDate and posted to the journal, so the document, the
+          // P&L period and the General Ledger all carried it. The rest of the app has always
+          // used IST for a business date (see journal-dimensions-schema.ts).
+          invoice.invoiceDate ?? istDateOf(),
           invoice.dueDate ?? null,
           invoice.discountPaise ?? 0,
           invoice.extraChargePaise ?? 0,
@@ -1765,7 +1770,12 @@ export class AccountingRepository {
           invoice.buyerName ?? null,
           invoice.buyerContact ?? null,
           invoice.number,
-          invoice.invoiceDate ?? new Date().toISOString().slice(0, 10),
+          // Today in IST, not the UTC calendar date. Slicing an ISO string dated an invoice
+          // entered between 00:00 and 05:29 IST to the PREVIOUS day, and that wrong date was
+          // then read back by invoiceEntryDate and posted to the journal, so the document, the
+          // P&L period and the General Ledger all carried it. The rest of the app has always
+          // used IST for a business date (see journal-dimensions-schema.ts).
+          invoice.invoiceDate ?? istDateOf(),
           invoice.dueDate ?? null,
           invoice.discountPaise ?? 0,
           invoice.extraChargePaise ?? 0,
