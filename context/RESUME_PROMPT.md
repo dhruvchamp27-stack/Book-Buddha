@@ -1,4 +1,4 @@
-Resume Book Buddha — autonomous backend finish, **session 13**.
+Resume Book Buddha — autonomous backend finish, **session 14**.
 
 ## READ THIS BLOCK BEFORE ANYTHING ELSE
 
@@ -17,141 +17,97 @@ properly. Build backend only. Screenshots only of something that genuinely works
 no screen, say so plainly rather than sending a picture of something else.
 
 **THE NINETEEN QUESTIONS ARE CLOSED. DO NOT RE-ASK THEM AND DO NOT RE-DERIVE THE LIST.**
-He answered all nineteen in session 11, cold and in writing. Every answer is recorded in
-`context/decisions.md` as **S11-1 … S11-22**, in his own words, dated 2026-11-18. The old question
-block has been deleted from this file on purpose — `decisions.md` is the record now.
-**Item 9 he never actually answered** (his message repeated the accounting block); the default was
-taken and recorded as **S11-19**, and that is the one answer he may want to revisit.
+Every answer is in `context/decisions.md` as **S11-1 … S11-22**, in his own words.
 
-**START HERE: `context/HOT.md`**, then `context/decisions.md` **S11-1 … S11-22** newest-first.
-S11-1, S11-2, S11-3, S11-5 and S11-22 are the ones that still carry unbuilt work.
+**START HERE: `context/HOT.md`**, then `context/decisions.md` **S13-1 … S13-5** newest-first, then
+S12-x, then S11-x.
 
-## WHAT SESSION 12 DID
+**HOW HE WANTS THIS RUN (session 13, still in force):** Sonnet writes code, Haiku does file search
+and routine file updates, **I (Opus) stay the reviewer** — read every diff, mutation-prove the key
+assertions, run the three gates on the real tree, then commit one slice per commit. Two Sonnet
+builders may run in parallel **on disjoint files**, each from a brief written first to
+`context/BRIEF_*.md`. Use CBM (codebase-memory-mcp, project
+`C-Users-Admin-Desktop-Book-Buddha-book-buddha`) actively for navigation. No advisor needed unless
+he asks. He checks that pushes only happen after the tests — say so when you ask to push.
 
-Six commits, all gate-passing, **none pushed**. In order:
-1. **`59d496a`** — four corrections to the six report definitions **before** any of them was coded.
-2. **`528860a`** — **R7c: stock ageing and inventory valuation detail**, built, wired to HTTP and
-   tested (15 tests in `reports-stock.test.ts`). Two of the six §13 reports are now DONE.
-3. **`bb0335e`** — `HOT.md` trimmed back under fifty lines and made true.
-4. **`fadb6c8`** — **a real dating bug in the posted books, found and fixed. Tell him about this
-   one.** An invoice saved with no explicit date was dated by the **UTC** calendar while the whole
-   app's business date is **IST**, so an invoice entered between 00:00 and 05:29 IST was stored —
-   and POSTED — a day early; across 31 March it landed in the financial year that had just closed.
-   Fixed to `istDateOf()` with three tests. Full write-up: **S12-5** in `decisions.md`.
-5. **`63bb874`** — **section 0a**: the one definition of what a customer owes moved out of
-   `repository.ts` into `src/database/open-items.ts` (moved verbatim and gate-proved first, with
-   zero test edits, so any later red test names the real cause), then given a fair filter,
-   `includeSettled`, and a corrected date fallback. 7 tests.
-6. Uncommitted at the pause: the definitions file's **RESOLUTIONS R1–R7** and these context files.
+## WHAT SESSION 13 DID — six slices, every one reviewed, gated and PUSHED
 
-Gates at the pause, all three measured on the real tree: **tsc exit 0 · 619 tests passing in 51
-files · vite built in 1.24s.**
+1. **`9cd1838`** — reports 1–3: customer statement, Customer Balance Detail, Collections
+   (`src/database/reports-customers.ts`, 15 tests) + the shared `existingOn` as-at helper in
+   `open-items.ts`.
+2. **`cf84fe9`** — report 6, item profitability (`reports-profitability.ts`, 14 tests).
+3. **`9cd503c`** — HTTP routes for all four (`/reports/customer-statement`,
+   `/customer-balance-detail`, `/collections`, `/item-profitability`) + the unknown-fair sweep, and
+   `getReceivables` finally got the fair filter section 0a promised (S13-1).
+4. **`fa4ab42`** — R9 attachment routes 2–5 (`src/api/attachment-routes.ts`, 8 tests): base64 JSON
+   upload with a raised `bodyLimit`, list, download, delete.
+5. **`2cb332f`** — S10-4 stock-entry correction, migration **v22** registered: `writeDownStock` (a
+   FIFO write-down) and `reverseStockMovement` (reversal of a hand-entered movement) + routes
+   `POST /inventory/write-downs`, `POST /inventory/movements/:id/reverse`. 15 tests; v22 also proved
+   on a real file.
+6. **`2952c28`** — R11 backup / verify / restore (`src/backup/backup.ts`, 16 tests; routes
+   `POST /backups`, `GET /backups`, `POST /backups/:id/verify`, 7 tests). **No restore route, by
+   design** (S13-4). R11 was built before R10 on my call (S13-4).
 
-## WHAT SESSION 11 DID
+Also in the log, **made by a different Claude session in this same folder** (S13-3): `6e0369e`
+(/status skill), `a5c20cb` (IMPLEMENTATION_PROGRESS write-up), `7d3d71e` (committed my routes
+brief). Not mine; flagged to him; ask whether it continues.
 
-He answered the nineteen questions; the whole backlog is cleared. Four small items followed from
-them and **all four are finished, tested, committed and pushed**:
-1. **Item 14 → S11-9.** A report for a fair that does not exist now raises a clear error instead of
-   returning no rows (which read as "no sales at that fair"). Guarded at the choke points, so all
-   fourteen report entry points are covered. 43 tests in
-   `book-buddha/src/database/report-unknown-fair.test.ts`.
-2. **Item 15 → S11-10. NO WORK NEEDED** — already correct, fixed back in R7b. Do not rebuild it.
-3. **Item 4 → S11-4 / S11-20 / S11-21.** A credit note may carry its own transaction date
-   (migration **v20**). No date given leaves `note_date` **NULL** and the note posts on the day it
-   is finalized, so **`ACCEPTANCE S4-8` passes with no assertion changed** — no signed figure moved.
-   A date in an earlier month is refused until the caller confirms; the financial-year lock stays
-   absolute and a confirmation cannot override it. 10 tests in `credit-note-date.test.ts`.
-4. **Item 16 → S11-11 / S11-22.** The derived cash view now ties to the cash that actually moved,
-   to the paise, through a **visible signed `ROUNDING` line** (migration **v21**). 9 tests in
-   `cash-rounding.test.ts`; plain-English workings in `book-buddha/CASH-ROUNDING-WORKINGS.md`.
-
-**Two rulings he gave by choosing between drawn-out options** — both already built, both recorded:
-an undated credit note posts on the **finalise** date (S11-20), and back-dating into an
-already-reported month inside an open year is **allowed but warned about** (S11-21).
-
-**A correction worth inheriting:** I told the agent the rounding tolerance guard was missing. It
-was already built, and the agent said so rather than building it twice. Check before asserting.
+Gates on the final tree: **tsc exit 0 · 714 tests passing in 56 files · vite built in 1.18s.**
 
 ## WHERE THE PENDING WORK IS WRITTEN DOWN — read these, do not re-derive
 
 | What | File | What is in it |
 |---|---|---|
-| Every ruling S11-1..S11-22 | `context/decisions.md` | His answers, in his words, with the traps named |
 | Current status, blockers, next step | `context/HOT.md` | Under 50 lines, always loaded |
-| **The next slice, fully specified** | `context/REPORT_DEFINITIONS_S12.md` | Six report definitions; **RESOLUTIONS R1–R7 override everything earlier in it** |
-| **The brief to hand a build agent** | `context/BRIEF_customer_reports.md` | Self-contained; what to read, what to build, the gates, the hard constraints |
-| The task list | `context/todos.md` | Slice-by-slice |
-| The biggest unbuilt slice | `context/decisions.md` **S11-1** | Discount into inventory cost; **blocks R8 acceptance** |
-| Acceptance loop and order | `context/decisions.md` **S11-14** | R4 first, R8 last, seven slices outstanding |
-| Banking / OCR / archive design | `Feature Design - Bank Categorization, Bill OCR & Archive (V1).md` | Approved as V1 by S11-15; **§D6 must be amended to TWO Uncategorized accounts per S11-8** |
-| Item 4's workings, his format | `book-buddha/CASH-ROUNDING-WORKINGS.md` | Plain English, rupees and paise |
-| R4c workings, the format he accepted | `book-buddha/R4C-WORKINGS.md` | Model every future report on this |
+| Every ruling | `context/decisions.md` | S13-x newest, then S12-x, S11-1..S11-22 |
+| The remaining build plan | `book-buddha/REMAINING_BUILD_PLAN.md` | S10 = R10 import/export; R12 banking |
+| Report definitions (all six DONE) | `context/REPORT_DEFINITIONS_S12.md` | The model for an R10 definitions file |
+| Past briefs (the format that worked) | `context/BRIEF_*.md` | Copy the shape for R10 |
+| The biggest blocked slice | `context/decisions.md` **S11-1 / S11-2** | Bill discount into inventory cost |
+| Banking / OCR / archive design | `Feature Design - Bank Categorization, Bill OCR & Archive (V1).md` | **§D6 must become TWO Uncategorized accounts (S11-8)** |
+| Workings format he accepted | `book-buddha/R4C-WORKINGS.md` | Model every future report on this |
 
-## THE NEXT STEP — you are resuming mid-slice, and NOTHING is half-built
+## THE NEXT STEP — NOTHING is half-built; the tree was clean and pushed at the pause
 
-**Verified at the pause (S12-7): the repo is clean.** A Sonnet build agent was dispatched for the
-work below and died at its first step on the account's 5-hour rate limit, writing nothing. Do not
-go looking for partial work. Start it.
+**1. R10 import / export** (spec §14.1–14.2; `REMAINING_BUILD_PLAN` S10). **Design before code.**
+It needs ONE shared engine: upload → preview → column-map → validate/review → post (through the
+existing repository methods, so double-entry, audit log and the FY lock still apply). CSV + JSON
+only without an install; **.xlsx and PDF need a package = ask him before installing.** Write a
+definitions file in the style of `REPORT_DEFINITIONS_S12.md` (what each import/export covers, row
+rules, what is refused, a small hand-worked example), show him the key choices briefly, then a
+`BRIEF_import_export.md`, then Sonnet builds while I review.
 
-**1. Build `book-buddha/src/database/reports-customers.ts` + `.test.ts`** — the customer
-statement, Customer Balance Detail and Collections. Everything is specified; none of it is coded.
-- The brief to hand an agent, complete and self-contained: **`context/BRIEF_customer_reports.md`**
-- The specification it points to: **`context/REPORT_DEFINITIONS_S12.md`** — read its
-  **RESOLUTIONS R1–R7** section, which **overrides anything earlier in that file**.
-- The shared foundation is **already built and committed** (`63bb874`):
-  `book-buddha/src/database/open-items.ts` is now the ONE definition of what a customer owes, with
-  a fair filter and `includeSettled`. **Do not write a second "what is owed" query.**
-- It takes **no `asAtDate`** — RESOLUTION R1 says why, and tells you to add one shared `existingOn`
-  helper instead of letting each report invent its own date predicate.
+**2. Bill discount into inventory cost** (S11-1 + S11-2) — **BLOCKED on his odd-paise ruling.**
 
-**2. Then report 6, item profitability.** Its one open code question is now answered in
-**RESOLUTION R7**: a `SALE` stock row is NOT always an invoice (`cancelCreditNote` writes one under
-the NOTE's id), and `cancelInvoice` dates its reversal the day it happens, which is why the COGS
-tie-out is asserted with no date filter only.
+**3. R12 banking** — accounts, transfers, reconciliation. Amend FD §D6 to TWO Uncategorized
+accounts first (S11-8). Confirm "backend-only through R12" with him when you get here.
 
-**3. Then routes for all six reports** + entries in `reports-wiring.test.ts` + the unknown-fair
-sweep, per the build order at the end of `REPORT_DEFINITIONS_S12.md`.
-
-**Then, in the order he pasted, through R12:**
-R9 attachment routes 2–5 (POST upload, GET list, GET `:id/content`, DELETE — `src/attachments/` is
-already built with 24 passing tests and a registered migration; **only the HTTP routes are
-missing**; base64 in ordinary JSON per S11-19, and Fastify's default 1 MB `bodyLimit` **must be
-raised** because base64 inflates a file by about a third) → **stock-entry correction** (a v22
-migration is DRAFTED and deliberately **unregistered** at
-`book-buddha/src/database/stock-adjustment-schema.ts`) → **bill discount into inventory cost**
-(S11-1 + S11-2 — **this one needs his odd-paise ruling first**: Rs 150 off a 7-unit bill will not
-divide into equal whole paise, and S11-22 is the precedent — show the remainder, never absorb it
-silently) → R10 import/export → R11 backup → R12 banking.
-
-**Then, and only then, his standing order:** run every test together — the seven parked acceptance
-slices (R1, R2, R4, R4b, R5, R7, R8) plus everything newly built — and check the backend end to end.
+**Then his standing order:** run every test together — the seven parked acceptance slices (R1, R2,
+R4, R4b, R5, R7, R8) plus everything newly built — and check the backend end to end.
 
 ## QUESTIONS WAITING FOR HIM — ask when a slice touches them, not as a batch
 
-1. **THE ODD-PAISE RULING, and it BLOCKS the bill-discount slice.** Rs 150 off a 7-unit bill
-   will not divide into equal whole paise, and a stock layer stores an integer
-   `unit_cost_paise` that must still tie to the INVENTORY balance to the paise. **S11-22 is
-   the precedent: show the remainder, never absorb it silently.** He has to say where it goes.
-   A second, smaller question rides with it: how a bill distinguishes a **trade** discount
-   from a **settlement** discount, since only the first belongs in inventory cost.
-2. **A purchase return can still be back-dated with NO warning**, unlike a credit note after
-   S11-21. Either returns get the same guard or the difference needs a stated reason.
-3. **Item 9 / S11-19** was defaulted, not answered — base64 for attachments. Confirm at R9.
-4. **Acceptance for seven slices** — R1, R2, R4, R4b, R5, R7, R8 — run as S11-14 sets out: R4
-   first, R8 last. 7d and 8c are **accepted on trust, not hand-verified** (S11-13), a deliberately
-   lower grade than R3 and R4c. **PARKED until the build reaches R12, by his own order
-   (S12-3).**
-5. **The build is backend-only through R12** although his pasted prompt says "API, UI" —
-   resolved that way because `RESUME_PROMPT.md` records that he builds the frontend himself
-   (items 9–10 of his list). Put it to him when R12 is reached rather than assuming.
-6. **`context/AGENT_BRIEF_R9_ROUTES.md` is dead litter** — its agent was cancelled. Deletion
-   was offered and never answered, so it is still sitting there untracked.
+1. **THE ODD-PAISE RULING — BLOCKS bill discount.** Rs 150 off a 7-unit bill will not divide into
+   equal whole paise; a layer's integer `unit_cost_paise` must still tie to INVENTORY. **S11-22 is
+   the precedent: show the remainder, never absorb it.** Plus: how a bill tells a **trade** discount
+   from a **settlement** discount (only trade belongs in inventory cost).
+2. **Attachment upload/delete writes NO audit log** (S13-2), and `createdBy` is stored null. The
+   audit log is a fixed part of the product — his call whether to add it.
+3. **A purchase return can still be back-dated with NO warning**, unlike a credit note (S11-21).
+4. **Another Claude session commits in this checkout** (S13-3) — is it his, and should it carry on?
+5. Smaller: base64 vs multipart for attachments (S11-19, defaulted) · Collections labels opening
+   balances' basis `INVOICE_DATE` (an `OPENING_DATE` label?) · a zero-cost write-down is not
+   FY-lock-checked · `web/src/App.tsx` `StockMovementType` lacks the v22 types (UI is his) ·
+   restore writes no audit event · backend-only through R12 (confirm at R12).
+6. **`context/AGENT_BRIEF_R9_ROUTES.md` is dead litter** (untracked) — deletion offered, unanswered.
+7. **Acceptance for seven slices** (R1, R2, R4, R4b, R5, R7, R8) — PARKED until R12 (S12-3).
 
 ## ORIENT
 
 1. `context/HOT.md` — auto-loaded. Trust it over anything written here.
 2. `git branch --show-current` must be `autonomous/book-buddha-finish`. **Never `main`.**
-3. `context/decisions.md` — **S11-1 … S11-22 first**, then S10-x. S5-x … S9-x still apply.
+3. `context/decisions.md` — **S13-x, S12-x, then S11-1 … S11-22**, then S10-x. S5-x … S9-x still apply.
 4. **Count the unpushed commits; never quote a number out of this file:**
    `git log --oneline @{u}..HEAD | wc -l`.
    **PUSHING WORKS, and the old mystery is SOLVED (S11-17).** He confirmed he signed into GitHub by
@@ -163,8 +119,8 @@ slices (R1, R2, R4, R4b, R5, R7, R8) plus everything newly built — and check t
    not "yes, push". After a push, confirm `git log --oneline @{u}..HEAD` is empty.
 5. Gates (npm is NOT on PATH), from `book-buddha/`:
    `tsc.cmd` **first** · `./node_modules/.bin/vitest.cmd run --root .` · `vite.cmd build`
-   **Baseline at the pause of session 12, all three measured on the real tree: 51 files,
-   619 tests, tsc exit 0, vite built in 1.24s.**
+   **Baseline at the pause of session 13, all three measured on the real tree: 56 files,
+   714 tests, tsc exit 0, vite built in 1.18s. Migration v22.**
    **There are THREE gates, not four (S9-4).** `web/tsconfig.json` does not exist; the web side is
    covered by the vite build.
    ⚠️ **NEVER pipe a gate into `tail` and read `$?`** — that is tail's exit code. Run it unpiped,

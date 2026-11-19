@@ -35,10 +35,15 @@ the docs disagree it is listed as an open question, not resolved.*
 > (S10-1..S10-4) · S7-2 (closed by S10-4) · R4c scenario 1 (signed off, S10-6) · Subscriptions
 > (deferred, S1-5). **7d and 8c are accepted ON TRUST, not hand-verified (S11-13)** — a
 > deliberately lower grade than R3 and R4c; they come back to him if anything contradicts them.
-> **Only three things still wait on him, and they are listed in `context/HOT.md`:** the
-> purchase-return back-dating inconsistency (S11-21), confirming base64 for attachments at R9
-> (S11-19, defaulted and never actually answered), and amending FD §D6 to TWO Uncategorized
-> accounts before R12 (S11-8).
+> **What still waits on him is listed ONCE, in `context/HOT.md` → "Waiting on him"** (updated
+> session 13: the odd-paise ruling that blocks bill discount, the attachment audit-log gap S13-2,
+> the purchase-return back-dating inconsistency S11-21, the second Claude session S13-3, and the
+> smaller base64 / OPENING_DATE / backend-only / §D6 items). Do not keep a second copy here.
+>
+> **Built in session 13 (all pushed):** reports 1–3 + 6 and routes for all four · R9 attachment
+> routes 2–5 · S10-4 stock-entry correction (v22) · R11 backup / verify / restore. **Remaining to
+> R12:** R10 import/export (design first) · bill discount (blocked on the odd-paise ruling) · R12
+> banking · then the all-together test run (S12-3).
 - ~~**Slice 7 build gate** (1) real cash-basis data? (2) hand-worked cash/accrual figures?
   (3) chart-of-accounts add?~~ **ALL ANSWERED 2026-11-15.** (1) No real data — no `.db` file
   exists, so 7b was a clean refactor (assumption stated: `BOOK_BUDDHA_DATABASE` could point

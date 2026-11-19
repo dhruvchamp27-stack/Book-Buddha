@@ -7,6 +7,37 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S13-5 (2026-11-19) — PAUSED BY HIM, NOTHING HALF-BUILT, EVERYTHING PUSHED.** Session 13 built
+  and pushed six slices: reports 1–3 (`9cd1838`), report 6 (`cf84fe9`), routes for all four +
+  `getReceivables` fair filter (`9cd503c`), R9 attachment routes 2–5 (`fa4ab42`), S10-4 stock-entry
+  correction / v22 (`2cb332f`), R11 backup-verify-restore (`2952c28`). Final tree: tsc 0 · 714
+  tests, 56 files · vite built. Resume at **R10 import/export, design first.**
+
+- **S13-4 (2026-11-19) — MY CALL: R11 BUILT BEFORE R10.** R10 needs a shared import → review →
+  post engine designed before any code; R11 was self-contained and low accounting risk, so it ran
+  in parallel with stock correction instead. Same scope, order swapped. Restore has **no HTTP
+  route on purpose**: replacing the open database belongs to the app shell (`src/backup/backup.ts`
+  header). Restore never overwrites — it takes a pre-restore backup, moves the old file aside,
+  migrates, re-verifies, rolls back on failure. "Sanitise settings" turned out to mean only
+  discarding saved sign-in sessions; the schema has nothing else to sanitise and no logo.
+
+- **S13-3 (2026-11-19) — FINDING: A SECOND CLAUDE SESSION COMMITS IN THIS SAME CHECKOUT.** Between
+  23:09 and 23:10 it made `6e0369e` (/status skill), `a5c20cb` (IMPLEMENTATION_PROGRESS write-up)
+  and `7d3d71e` (committed my in-flight routes brief "as a plan"). No collision this time; two
+  sessions committing in one working tree can. **Ask him whether it is his and should continue.**
+
+- **S13-2 (2026-11-19) — FINDING FOR HIM: ATTACHMENT UPLOAD AND DELETE WRITE NO AUDIT LOG.**
+  `storeAttachment` / `deleteAttachment` leave no tamper-evident trace, and the audit log is a
+  fixed part of this product. Deliberately NOT added by the build agent — it is his call. Also:
+  `createdBy` is stored null (the signed-in user is not yet passed to the engine).
+
+- **S13-1 (2026-11-19) — DEFINITIONS INCONSISTENCY, RESOLVED BY THE RULES: A CANCELLED PAYMENT HAS
+  NO STATEMENT ROW.** The hand table in `REPORT_DEFINITIONS_S12.md` §1 said the cancelled 11 Apr
+  receipt shows "both rows netting to nil"; the same section's row rules (and `getReceivables`)
+  say a cancelled payment never settled anything and is excluded. The rules were followed; the
+  balance is 18,000 either way. Also found: `getReceivables` never had the fair filter 0a said it
+  would get "for free" — added in `9cd503c`, behaviour without a fair unchanged.
+
 - **S12-7 (2026-11-19) — PAUSED MID-SLICE, NOTHING HALF-BUILT.** He asked to pause. The four
   remaining §13 reports (customer statement, balance detail, collections, item profitability) are
   **fully specified and not yet coded**. The Sonnet build agent was dispatched and died at its
