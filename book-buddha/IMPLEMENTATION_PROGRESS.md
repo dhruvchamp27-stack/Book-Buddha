@@ -282,6 +282,55 @@ npm run build
 npm run build:web
 ```
 
+## Session 12 — R7c, the two absent stock reports (19 Nov 2026)
+
+The Design Document §13 names six reports that were specified and never built. Two of them are
+stock reports, and both are the SAME FIFO replay that `getInventoryValuation` already runs, only
+grouped differently — so neither can disagree with it. They are now built.
+
+**Definitions and tie-outs written BEFORE any code:** `context/REPORT_DEFINITIONS_S12.md`
+(sections 0b, 4 and 5).
+
+New files:
+
+- `src/database/ageing-bands.ts` — `AGEING_BANDS` moved out of `repository.ts`. There is now
+  exactly ONE literal band list in the codebase, so customer, supplier and stock ageing cannot
+  drift apart. The labels and boundaries are byte-identical to the old private list, so the
+  accepted A/R and A/P ageing output is unchanged.
+- `src/database/ist-date.ts` — `istDateOf` moved out of `repository.ts` (unchanged) to avoid a
+  circular import. Still re-exported from `repository.ts`, so every existing importer is untouched.
+- `src/database/stock-layers.ts` — `datedStockLayers(db, itemId)`: the FIFO replay MOVED, not
+  changed, and each surviving lot given the date it came in plus how firm that date is
+  (`dateBasis`: `BILL` | `JOURNAL` | `CREDIT_NOTE` | `ENTRY_INSTANT`). The replay order,
+  `ORDER BY occurred_at, rowid`, is untouched: `occurred_at` is the INSERTION instant, never the
+  economic date, because a back-dated layer would silently re-measure COGS already posted. A test
+  pins exactly that — a back-dated opening layer yields identical COGS, movement rows and
+  survivors, and only `receivedOn` differs.
+- `src/database/reports-stock.ts` — `stockAgeing` and `inventoryValuationDetail`. Both take an
+  as-at date and nothing else: a FIFO lot has no business or fair dimension, so accepting one
+  would quietly answer a different question.
+- `src/database/reports-stock.test.ts` — 15 tests, including the two tie-outs (buckets sum to
+  `getInventoryValuation` per item and in total; detail rows group back to it), the FIFO-order
+  test above, band boundaries at 30/31/90/91 days, and the three HTTP tests.
+
+Changed: `src/database/repository.ts` (`getStockAgeing`, `getInventoryValuationDetail`;
+`getStockLayers` now delegates to the shared replay) · `src/api/server.ts`
+(`GET /reports/stock-ageing`, `GET /reports/inventory-valuation-detail`, both on a `strict()`
+query so an unknown parameter is refused rather than ignored).
+
+No migration: both reports read what is already stored.
+
+**Gates, run in order from `book-buddha/` on 19 Nov 2026:**
+
+- `./node_modules/.bin/tsc.cmd` — exit 0, no output.
+- `./node_modules/.bin/vitest.cmd run --root .` — **609 passed, 49 files**, exit 0 (was 594/48
+  at the start of the session; +12 from the new report tests, +3 from the HTTP tests).
+- `./node_modules/.bin/vite.cmd build` — built in 1.01s, exit 0.
+
+Still absent from §13, next in this slice: customer statement · customer balance detail ·
+collections · item profitability. All four are defined in
+`context/REPORT_DEFINITIONS_S12.md` sections 0a, 1, 2, 3 and 6.
+
 ## Notes for the next session
 
 - Work only in `D:\dhruv-book-accounting-app\Book-Buddha-github\book-buddha`.

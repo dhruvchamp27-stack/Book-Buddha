@@ -28,6 +28,13 @@ import type {
   SupplierPayment,
 } from "../accounting/types.js";
 import { ACCOUNT_CODES, type AccountingBasis } from "../accounting/types.js";
+import { AGEING_BANDS } from "./ageing-bands.js";
+import { istDateOf } from "./ist-date.js";
+import {
+  inventoryValuationDetail, stockAgeing,
+  type InventoryValuationDetailReport, type StockAgeingReport, type StockReportFilter,
+} from "./reports-stock.js";
+import { datedStockLayers, type DatedStockLayer } from "./stock-layers.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
 import { RepositoryValidationError } from "./errors.js";
@@ -843,11 +850,8 @@ function mapCustomerRow(row: CustomerRow): CustomerRecord {
   };
 }
 
-interface StockLayer {
-  quantity: number;
-  unitCostPaise: number;
-  sourceId: string | null;
-}
+/** The richer dated layer flows through; the costing callers only read quantity, cost and source. */
+type StockLayer = DatedStockLayer;
 
 /** Optional filter for period reports (P&L, General Ledger). Omit everything for consolidated, all dates. */
 export interface PeriodReportFilter {
@@ -872,10 +876,6 @@ export interface AsAtReportFilter {
   readonly asAtDate?: string;
 }
 
-/** The app assumes India Standard Time (UTC+5:30) for every business date. */
-const IST_OFFSET_MS = 330 * 60 * 1000;
-
-/** Calendar date (YYYY-MM-DD) in IST of an ISO instant; defaults to now. The single "today" source. */
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -891,10 +891,8 @@ function readableMonth(isoDate: string): string {
   return `${MONTH_NAMES[Number(isoDate.slice(5, 7)) - 1] ?? isoDate.slice(5, 7)} ${isoDate.slice(0, 4)}`;
 }
 
-export function istDateOf(instant: string | Date = new Date()): string {
-  const ms = typeof instant === "string" ? Date.parse(instant) : instant.getTime();
-  return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
-}
+// The IST conversion moved to ist-date.ts so the report modules share it without a circular import.
+export { istDateOf };
 
 export { RepositoryValidationError };
 
@@ -1235,6 +1233,23 @@ export class AccountingRepository {
         valuePaise: layers.reduce((total, layer) => total + layer.quantity * layer.unitCostPaise, 0),
       };
     });
+  }
+
+  /**
+   * Session 12. How long the stock on the shelf has been sitting there, in the SAME age bands the
+   * customer and supplier ageing reports use. It is the same FIFO replay `getInventoryValuation`
+   * runs, only grouped by age, so the buckets sum to the valuation by construction.
+   */
+  public getStockAgeing(filter: StockReportFilter = {}): StockAgeingReport {
+    return stockAgeing(this.db, filter);
+  }
+
+  /**
+   * Session 12. The valuation summary opened up: one row per surviving FIFO lot, with the date it
+   * came in and how firm that date is. `getInventoryValuation` is this grouped by item.
+   */
+  public getInventoryValuationDetail(filter: StockReportFilter = {}): InventoryValuationDetailReport {
+    return inventoryValuationDetail(this.db, filter);
   }
 
   /** Stock-tracked items at or below their reorder threshold. Items with no threshold are skipped. */
@@ -2706,14 +2721,6 @@ export class AccountingRepository {
     return asAtDate;
   }
 
-  /** The age bands every ageing report uses. One definition, so customer and supplier agree. */
-  private static readonly AGEING_BANDS: ReadonlyArray<{ label: string; fromDays: number; toDays: number | null }> = [
-    { label: "0-30 days", fromDays: 0, toDays: 30 },
-    { label: "31-60 days", fromDays: 31, toDays: 60 },
-    { label: "61-90 days", fromDays: 61, toDays: 90 },
-    { label: "Over 90 days", fromDays: 91, toDays: null },
-  ];
-
   /**
    * Age a set of open documents into bands and group them by party. Shared by the customer and
    * supplier reports so the two cannot drift apart.
@@ -2737,7 +2744,7 @@ export class AccountingRepository {
     // band guard below would then throw for the whole report rather than for that one row.
     const dayOf = (value: string): string => value.slice(0, 10);
     const emptyBuckets = (): AgeingBucket[] =>
-      AccountingRepository.AGEING_BANDS.map((band) => ({ ...band, outstandingPaise: 0, documentCount: 0 }));
+      AGEING_BANDS.map((band) => ({ ...band, outstandingPaise: 0, documentCount: 0 }));
     const byParty = new Map<string, AgeingBucket[]>();
     const totals = emptyBuckets();
 
@@ -2748,7 +2755,7 @@ export class AccountingRepository {
       const documentDay = dayOf(document.date);
       if (excludeAfter && documentDay > asAtDate) continue;
       const ageDays = Math.max(0, Math.floor((asAtMs - Date.parse(`${documentDay}T00:00:00.000Z`)) / 86400000));
-      const index = AccountingRepository.AGEING_BANDS
+      const index = AGEING_BANDS
         .findIndex((band) => ageDays >= band.fromDays && (band.toDays === null || ageDays <= band.toDays));
       // The bands run contiguously from 0 with an open top, so this cannot miss. Guarded anyway:
       // a document silently dropped from an ageing report is the worst thing it could do.
@@ -4031,40 +4038,7 @@ export class AccountingRepository {
   }
 
   private getStockLayers(itemId: string): StockLayer[] {
-    const rows = this.db.prepare(
-      "SELECT source_id, movement_type, quantity_delta, unit_cost_paise FROM stock_movements WHERE item_id = ? ORDER BY occurred_at, rowid",
-    ).all(itemId) as Array<{ source_id: string | null; movement_type: string; quantity_delta: number; unit_cost_paise: number }>;
-    const layers: StockLayer[] = [];
-    for (const row of rows) {
-      if (row.quantity_delta > 0) {
-        layers.push({ quantity: row.quantity_delta, unitCostPaise: row.unit_cost_paise, sourceId: row.source_id });
-        continue;
-      }
-      let remaining = Math.abs(row.quantity_delta);
-      if (row.movement_type === "PURCHASE_REVERSAL") {
-        // Removes this purchase's own lot (same source and cost), never the oldest lot.
-        for (const layer of layers) {
-          if (remaining === 0) break;
-          if (layer.sourceId !== row.source_id || layer.unitCostPaise !== row.unit_cost_paise) continue;
-          const removed = Math.min(remaining, layer.quantity);
-          layer.quantity -= removed;
-          remaining -= removed;
-        }
-        for (let index = layers.length - 1; index >= 0; index -= 1) {
-          if (layers[index]?.quantity === 0) layers.splice(index, 1);
-        }
-        continue;
-      }
-      while (remaining > 0 && layers.length > 0) {
-        const layer = layers[0];
-        if (layer === undefined) break;
-        const consumed = Math.min(remaining, layer.quantity);
-        layer.quantity -= consumed;
-        remaining -= consumed;
-        if (layer.quantity === 0) layers.shift();
-      }
-    }
-    return layers;
+    return datedStockLayers(this.db, itemId);
   }
 
   private insertStockMovement(input: {

@@ -387,6 +387,14 @@ const asAtReportQuery = z.object({
   businessId: id.optional(),
   asAtDate: reportDate.optional(),
 }).strict().transform((value) => definedOnly(value));
+/**
+ * Stock ageing and valuation detail take an as-at date and NOTHING else. Deliberately not
+ * `asAtReportQuery`: that one also accepts `businessId`, and a FIFO lot has no business dimension,
+ * so accepting one here would silently ignore it and quietly answer a different question.
+ */
+const stockReportQuery = z.object({
+  asAtDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
 /** Trial Balance: the as-at filters plus an optional project (fair). */
 const trialBalanceQuery = z.object({
   businessId: id.optional(),
@@ -1468,6 +1476,12 @@ export function buildApi(
   app.get("/journal-entries", async () => repository.listJournalEntries());
 
   app.get("/reports/inventory-valuation", async () => repository.getInventoryValuation());
+  // Session 12. The §13 reports that were specified and never built. Both are the valuation's own
+  // FIFO replay grouped differently, so neither can disagree with /reports/inventory-valuation.
+  app.get("/reports/stock-ageing", async (request) =>
+    repository.getStockAgeing(parseBody(stockReportQuery, request.query)));
+  app.get("/reports/inventory-valuation-detail", async (request) =>
+    repository.getInventoryValuationDetail(parseBody(stockReportQuery, request.query)));
   app.get("/reports/low-stock", async () => repository.getLowStockItems());
   // Session 9. Both of these used to take no filters and ignore credit notes. sales-by-item takes
   // the credit-note query because an item filter IS meaningful on a per-item report.
