@@ -15,9 +15,8 @@ corrected twice (`59d496a`, then R1–R7).
 
 ## State now
 Branch `autonomous/book-buddha-finish`, **nothing pushed this session**. Gates **all green,
-measured 19 Nov: tsc 0 · 619 tests, 51 files · vite 1.24s.** Migration **v21**. **Count the
-unpushed commits, never quote a figure from this file** (it goes stale as it is written):
-`git log --oneline @{u}..HEAD | wc -l`. **PUSHING: never in the foreground, and ASK HIM EVERY TIME
+measured 19 Nov: tsc 0 · 619 tests, 51 files · vite 1.24s.** Migration **v21**. **Count unpushed
+commits, never quote a figure from here:** `git log --oneline @{u}..HEAD | wc -l`. **PUSHING: never in the foreground, and ASK HIM EVERY TIME
 (S11-17).** **ACCEPTANCE (parked): hand-verified R3, R4c · on trust 7d, 8c · outstanding R1, R2,
 R4, R4b, R5, R7, R8.** Under **S12-1** acceptance = the accounting logic is satisfied.
 
