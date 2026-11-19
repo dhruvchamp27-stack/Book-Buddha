@@ -86,7 +86,23 @@ export function datedStockLayers(db: Database.Database, itemId: string): DatedSt
     ).all(itemId) as Array<{ movement_id: string; entry_date: string }>).map((row) => [row.movement_id, row.entry_date] as const),
   );
 
+  // Goods put BACK by reversing a write-down open a new lot at the end of the queue; the lot is dated
+  // by the reversal's own journal entry, whose id is derived from the write-down id every one of
+  // those rows carries in source_id (reverseStockMovement writes `je-stock-writedown-<id>-reversal`).
+  const writedownReversalDates = new Map(
+    (db.prepare(
+      `SELECT sm.id AS movement_id, je.entry_date AS entry_date
+         FROM stock_movements sm
+         JOIN journal_entries je ON je.id = 'je-stock-writedown-' || sm.source_id || '-reversal'
+        WHERE sm.item_id = ? AND sm.movement_type = 'ADJUSTMENT_REVERSAL' AND sm.quantity_delta > 0 AND sm.source_id IS NOT NULL`,
+    ).all(itemId) as Array<{ movement_id: string; entry_date: string }>).map((row) => [row.movement_id, row.entry_date] as const),
+  );
+
   const dateOf = (row: (typeof rows)[number]): { receivedOn: string; dateBasis: StockLayerDateBasis } => {
+    if (row.movement_type === "ADJUSTMENT_REVERSAL") {
+      const reversalDate = writedownReversalDates.get(row.id);
+      if (reversalDate !== undefined) return { receivedOn: reversalDate, dateBasis: "JOURNAL" };
+    }
     if (row.movement_type === "PURCHASE" && row.source_id !== null) {
       const billDate = billDates.get(row.source_id);
       if (billDate !== undefined) return { receivedOn: billDate, dateBasis: "BILL" };
@@ -111,6 +127,22 @@ export function datedStockLayers(db: Database.Database, itemId: string): DatedSt
       continue;
     }
     let remaining = Math.abs(row.quantity_delta);
+    if (row.movement_type === "ADJUSTMENT_REVERSAL") {
+      // A NEGATIVE reversal undoes ONE hand-entered movement, so it takes THAT movement's own lot
+      // out, matched by the movement id it carries in source_id - never the oldest lot, and never
+      // by cost (two lots can share a cost). reverseStockMovement refuses unless the lot is whole.
+      for (const layer of layers) {
+        if (remaining === 0) break;
+        if (layer.movementId !== row.source_id) continue;
+        const removed = Math.min(remaining, layer.quantity);
+        layer.quantity -= removed;
+        remaining -= removed;
+      }
+      for (let index = layers.length - 1; index >= 0; index -= 1) {
+        if (layers[index]?.quantity === 0) layers.splice(index, 1);
+      }
+      continue;
+    }
     if (row.movement_type === "PURCHASE_REVERSAL") {
       // Removes this purchase's own lot (same source and cost), never the oldest lot.
       for (const layer of layers) {

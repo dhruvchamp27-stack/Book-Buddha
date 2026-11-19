@@ -709,10 +709,31 @@ export interface StockMovement {
   readonly fairId?: string;
   /** The journal entry this movement posted, when it posted one (OPENING and ADJUSTMENT, R4c). */
   readonly journalEntryId?: string;
-  readonly movementType: StockMovementType | "SALE" | "SALE_REVERSAL" | "PURCHASE_REVERSAL";
+  readonly movementType: StockMovementType | "SALE" | "SALE_REVERSAL" | "PURCHASE_REVERSAL" | "ADJUSTMENT_OUT" | "ADJUSTMENT_REVERSAL";
   readonly quantityDelta: number;
   readonly unitCostPaise: number;
   readonly occurredAt: string;
+}
+
+/** What `writeDownStock` did (ruling S10-4). `journalEntryId` is absent only for a zero-cost write-down. */
+export interface StockWriteDownResult {
+  readonly writedownId: string;
+  readonly itemId: string;
+  readonly quantity: number;
+  readonly valuePaise: number;
+  /** One ADJUSTMENT_OUT row per FIFO layer eaten, oldest first. */
+  readonly movementIds: readonly string[];
+  readonly journalEntryId?: string;
+}
+
+/** What `reverseStockMovement` did (ruling S10-4). */
+export interface StockReversalResult {
+  /** The reversed movement id, or the write-down id when a whole write-down was reversed. */
+  readonly reversedId: string;
+  readonly kind: "MOVEMENT" | "WRITE_DOWN";
+  readonly valuePaise: number;
+  readonly movementIds: readonly string[];
+  readonly journalEntryId?: string;
 }
 
 /** One hand-entered stock movement the R4c backfill would post, or has nothing to post for. */
@@ -1434,6 +1455,265 @@ export class AccountingRepository {
       }
       this.insertAuditEvent({ action: "stock.movement_added", entityId: movement.itemId, occurredAt: movement.occurredAt });
       return movement;
+    })();
+  }
+
+  /**
+   * Ruling S10-4. Takes stock OUT by hand: shrinkage, breakage, a recount that found less.
+   *
+   * It consumes the FIFO queue exactly as a sale does - oldest layer first, one `ADJUSTMENT_OUT`
+   * row per layer eaten, each at THAT layer's own unit cost, negative delta - and posts ONE entry,
+   * `Dr STOCK_ADJUSTMENT / Cr INVENTORY`, for the summed layer cost. Every row carries the same
+   * `source_id`, the write-down id minted here, so the whole write-down can be reversed as a unit.
+   *
+   * It refuses more than the layers hold (the item would go negative), zero, a negative or
+   * fractional quantity, and an item that does not track stock. Like every other posting it goes
+   * through the one door, so a locked financial year refuses it and rolls the rows back too.
+   *
+   * DATE. `occurredOn` dates the ENTRY only (default: today, IST). The rows keep `occurred_at` =
+   * the insertion instant, because FIFO order is `occurred_at, rowid` and the ledger is dated
+   * truthfully while the layers stay append-only - the same rule as `addStockMovement`.
+   */
+  public writeDownStock(input: {
+    itemId: string;
+    quantity: number;
+    occurredOn?: string;
+    reason?: string;
+    businessId?: string;
+    fairId?: string;
+  }): StockWriteDownResult {
+    if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
+      throw new RepositoryValidationError("A write-down quantity must be a positive whole number.");
+    }
+    const item = this.db.prepare("SELECT name, track_stock, company_id FROM items WHERE id = ?").get(input.itemId) as
+      | { name: string; track_stock: number; company_id: string }
+      | undefined;
+    if (item === undefined) throw new RepositoryValidationError(`Item ${input.itemId} was not found.`);
+    if (item.track_stock !== 1) {
+      throw new RepositoryValidationError("Stock can only be written down for an item with stock tracking enabled.");
+    }
+    if (input.occurredOn !== undefined) this.assertIsoDate("The write-down date", input.occurredOn);
+    if (input.fairId !== undefined) this.assertFairExists(input.fairId);
+    const reason = input.reason?.trim() === "" ? undefined : input.reason?.trim();
+
+    const layers = this.getStockLayers(input.itemId);
+    const onHand = layers.reduce((total, layer) => total + layer.quantity, 0);
+    if (input.quantity > onHand) {
+      throw new RepositoryValidationError(
+        `Only ${onHand} of ${item.name} ${onHand === 1 ? "is" : "are"} on hand, so ${input.quantity} cannot be written down.`,
+      );
+    }
+    // The plan: which layers are eaten, and at what cost. Nothing is written until it is complete.
+    const eaten: Array<{ quantity: number; unitCostPaise: number }> = [];
+    let remaining = input.quantity;
+    for (const layer of layers) {
+      if (remaining === 0) break;
+      const quantity = Math.min(remaining, layer.quantity);
+      eaten.push({ quantity, unitCostPaise: layer.unitCostPaise });
+      remaining -= quantity;
+    }
+    const valuePaise = eaten.reduce((total, part) => total + part.quantity * part.unitCostPaise, 0);
+    const businessId = valuePaise > 0
+      ? this.resolveStockMovementBusiness(item.company_id, input.businessId, "ADJUSTMENT")
+      : undefined;
+    const entryDate = input.occurredOn ?? istDateOf();
+    const writedownId = randomUUID();
+    const journalEntryId = `je-stock-writedown-${writedownId}`;
+
+    return this.db.transaction(() => {
+      const movementIds: string[] = [];
+      for (const part of eaten) {
+        movementIds.push(this.insertStockMovement({
+          itemId: input.itemId, sourceId: writedownId, movementType: "ADJUSTMENT_OUT",
+          quantityDelta: -part.quantity, unitCostPaise: part.unitCostPaise, ...fairDim(input.fairId),
+        }));
+      }
+      if (businessId !== undefined) {
+        this.insertJournalEntry(
+          {
+            id: journalEntryId,
+            sourceId: writedownId,
+            sourceType: "STOCK_MOVEMENT",
+            description: `Stock write-down of ${input.quantity} ${item.name} as at ${entryDate}${reason === undefined ? "" : `: ${reason}`}`,
+            isReversal: false,
+            lines: [
+              { account: "STOCK_ADJUSTMENT", debitPaise: valuePaise, creditPaise: 0 },
+              { account: "INVENTORY", debitPaise: 0, creditPaise: valuePaise },
+            ],
+          },
+          { businessId, entryDate, ...fairDim(input.fairId) },
+        );
+      }
+      this.insertAuditEvent({
+        action: "stock.written_down", entityId: writedownId, occurredAt: new Date().toISOString(),
+        ...(reason === undefined ? {} : { reason }),
+      });
+      return {
+        writedownId,
+        itemId: input.itemId,
+        quantity: input.quantity,
+        valuePaise,
+        movementIds,
+        ...(businessId === undefined ? {} : { journalEntryId }),
+      };
+    })();
+  }
+
+  /**
+   * Ruling S10-4. Undoes a hand-entered stock movement without deleting anything: a reversing
+   * movement is added beside it and the ledger gets the mirror entry, dated TODAY (S11-3 - the
+   * period it happens in, never the original's date), so a locked year refuses it only when TODAY
+   * is locked. A reversal is NOT a back-dated layer (S10-2).
+   *
+   * `id` is either a hand-entered `OPENING`/`ADJUSTMENT` movement, or a write-down (its id, or the
+   * id of any one of its rows) - a write-down is always reversed whole.
+   *
+   *  - OPENING / ADJUSTMENT: that movement's OWN lot comes out (never the oldest), as one negative
+   *    `ADJUSTMENT_REVERSAL` row whose `source_id` is the reversed movement's id. Refused if any of
+   *    the lot has already gone out - the goods are gone, so the honest correction is a write-down.
+   *  - Write-down: the goods go back as positive `ADJUSTMENT_REVERSAL` rows, one per row, each at
+   *    that row's unit cost. They open new lots at the END of the queue: restoring stock never
+   *    jumps ahead of lots already waiting.
+   *
+   * Refused: reversing twice, reversing a reversal, a sale or credit-note or bill-reversal
+   * movement, a purchase that has a bill (the bill has its own cancel), and a bare source-less
+   * purchase (it posted nothing, so reversing it would drive the stock further from the ledger).
+   */
+  public reverseStockMovement(id: string, options: { reason?: string } = {}): StockReversalResult {
+    const reason = options.reason?.trim() === "" ? undefined : options.reason?.trim();
+    const row = this.db.prepare(
+      "SELECT id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, fair_id FROM stock_movements WHERE id = ?",
+    ).get(id) as
+      | { id: string; item_id: string; source_id: string | null; movement_type: string; quantity_delta: number; unit_cost_paise: number; fair_id: string | null }
+      | undefined;
+
+    let writedownId: string | undefined;
+    if (row === undefined) {
+      const isWritedown = this.db.prepare(
+        "SELECT 1 FROM stock_movements WHERE source_id = ? AND movement_type = 'ADJUSTMENT_OUT' LIMIT 1",
+      ).get(id) !== undefined;
+      if (!isWritedown) throw new RepositoryValidationError(`Stock movement ${id} was not found.`);
+      writedownId = id;
+    } else {
+      switch (row.movement_type) {
+        case "ADJUSTMENT_REVERSAL":
+          throw new RepositoryValidationError("That movement is itself a reversal. To take the stock out again, write it down.");
+        case "SALE":
+        case "SALE_REVERSAL":
+          throw new RepositoryValidationError("That movement belongs to an invoice or credit note. Cancel the document instead.");
+        case "PURCHASE_REVERSAL":
+          throw new RepositoryValidationError("That movement belongs to a cancelled bill or a purchase return and cannot be reversed here.");
+        case "PURCHASE":
+          throw new RepositoryValidationError(
+            row.source_id === null
+              ? "This purchase was entered without a bill and posted nothing to the ledger, so reversing it would put the stock further out of step with the books. Write the stock down instead."
+              : "This purchase belongs to a bill. Cancel the bill instead.",
+          );
+        case "ADJUSTMENT_OUT":
+          if (row.source_id === null) throw new RepositoryValidationError("This write-down row has no write-down id and cannot be reversed.");
+          writedownId = row.source_id;
+          break;
+        default:
+          break;
+      }
+    }
+
+    const reversalKey = writedownId ?? id;
+    if (this.db.prepare("SELECT 1 FROM stock_movements WHERE movement_type = 'ADJUSTMENT_REVERSAL' AND source_id = ? LIMIT 1").get(reversalKey) !== undefined) {
+      throw new RepositoryValidationError("That has already been reversed.");
+    }
+
+    if (writedownId !== undefined) return this.reverseWriteDown(writedownId, reason);
+    if (row === undefined) throw new RepositoryValidationError(`Stock movement ${id} was not found.`);
+
+    // OPENING or ADJUSTMENT: take that movement's own lot back out.
+    const layer = this.getStockLayers(row.item_id).find((candidate) => candidate.movementId === row.id);
+    if (layer === undefined || layer.quantity < row.quantity_delta) {
+      const left = layer?.quantity ?? 0;
+      throw new RepositoryValidationError(
+        `${row.quantity_delta - left} of the ${row.quantity_delta} units from this entry have already gone out (sold or written down), so it cannot be reversed. Write down what is left instead.`,
+      );
+    }
+    const valuePaise = row.quantity_delta * row.unit_cost_paise;
+    const originalEntryId = `je-stock-movement-${row.id}`;
+    const original = this.db.prepare("SELECT business_id, fair_id FROM journal_entries WHERE id = ?").get(originalEntryId) as
+      | { business_id: string; fair_id: string | null }
+      | undefined;
+    if (valuePaise > 0 && original === undefined) {
+      throw new RepositoryValidationError(
+        "This entry has no ledger entry to reverse (it pre-dates stock posting). Run the stock journal backfill first, then reverse it.",
+      );
+    }
+    const entryDate = istDateOf();
+    const kind = row.movement_type === "OPENING" ? "opening stock" : "stock adjustment";
+    return this.db.transaction(() => {
+      const movementId = this.insertStockMovement({
+        itemId: row.item_id, sourceId: row.id, movementType: "ADJUSTMENT_REVERSAL",
+        quantityDelta: -row.quantity_delta, unitCostPaise: row.unit_cost_paise,
+        ...fairDim(row.fair_id ?? undefined),
+      });
+      let journalEntryId: string | undefined;
+      if (valuePaise > 0 && original !== undefined) {
+        journalEntryId = `${originalEntryId}-reversal`;
+        const mirror = this.reversalOfPostedEntry(
+          originalEntryId, journalEntryId, row.id,
+          `Reversal of ${kind}${reason === undefined ? "" : `: ${reason}`}`,
+        );
+        this.insertJournalEntry(
+          { ...mirror, sourceType: "STOCK_MOVEMENT" },
+          { businessId: original.business_id, entryDate, ...fairDim(original.fair_id ?? undefined) },
+        );
+      }
+      this.insertAuditEvent({
+        action: "stock.movement_reversed", entityId: row.id, occurredAt: new Date().toISOString(),
+        ...(reason === undefined ? {} : { reason }),
+      });
+      return {
+        reversedId: row.id, kind: "MOVEMENT" as const, valuePaise, movementIds: [movementId],
+        ...(journalEntryId === undefined ? {} : { journalEntryId }),
+      };
+    })();
+  }
+
+  private reverseWriteDown(writedownId: string, reason: string | undefined): StockReversalResult {
+    const rows = this.db.prepare(
+      "SELECT item_id, quantity_delta, unit_cost_paise, fair_id FROM stock_movements WHERE source_id = ? AND movement_type = 'ADJUSTMENT_OUT' ORDER BY rowid",
+    ).all(writedownId) as Array<{ item_id: string; quantity_delta: number; unit_cost_paise: number; fair_id: string | null }>;
+    const valuePaise = rows.reduce((total, row) => total + Math.abs(row.quantity_delta) * row.unit_cost_paise, 0);
+    const originalEntryId = `je-stock-writedown-${writedownId}`;
+    const original = this.db.prepare("SELECT business_id, fair_id FROM journal_entries WHERE id = ?").get(originalEntryId) as
+      | { business_id: string; fair_id: string | null }
+      | undefined;
+    if (valuePaise > 0 && original === undefined) {
+      throw new RepositoryValidationError("This write-down has no ledger entry to reverse.");
+    }
+    const entryDate = istDateOf();
+    return this.db.transaction(() => {
+      const movementIds = rows.map((row) => this.insertStockMovement({
+        itemId: row.item_id, sourceId: writedownId, movementType: "ADJUSTMENT_REVERSAL",
+        quantityDelta: Math.abs(row.quantity_delta), unitCostPaise: row.unit_cost_paise,
+        ...fairDim(row.fair_id ?? undefined),
+      }));
+      let journalEntryId: string | undefined;
+      if (valuePaise > 0 && original !== undefined) {
+        journalEntryId = `${originalEntryId}-reversal`;
+        const mirror = this.reversalOfPostedEntry(
+          originalEntryId, journalEntryId, writedownId,
+          `Reversal of stock write-down${reason === undefined ? "" : `: ${reason}`}`,
+        );
+        this.insertJournalEntry(
+          { ...mirror, sourceType: "STOCK_MOVEMENT" },
+          { businessId: original.business_id, entryDate, ...fairDim(original.fair_id ?? undefined) },
+        );
+      }
+      this.insertAuditEvent({
+        action: "stock.writedown_reversed", entityId: writedownId, occurredAt: new Date().toISOString(),
+        ...(reason === undefined ? {} : { reason }),
+      });
+      return {
+        reversedId: writedownId, kind: "WRITE_DOWN" as const, valuePaise, movementIds,
+        ...(journalEntryId === undefined ? {} : { journalEntryId }),
+      };
     })();
   }
 
@@ -4074,16 +4354,18 @@ export class AccountingRepository {
   private insertStockMovement(input: {
     itemId: string;
     sourceId: string;
-    movementType: "SALE" | "SALE_REVERSAL" | "PURCHASE" | "PURCHASE_REVERSAL";
+    movementType: "SALE" | "SALE_REVERSAL" | "PURCHASE" | "PURCHASE_REVERSAL" | "ADJUSTMENT_OUT" | "ADJUSTMENT_REVERSAL";
     quantityDelta: number;
     unitCostPaise: number;
     /** Reporting tag ONLY. Never read by getStockLayers or any cost/quantity calculation. */
     fairId?: string;
-  }): void {
+  }): string {
     if (input.fairId !== undefined) this.assertFairExists(input.fairId);
+    const id = randomUUID();
     this.db.prepare(
       "INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at, fair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(randomUUID(), input.itemId, input.sourceId, input.movementType, input.quantityDelta, input.unitCostPaise, new Date().toISOString(), input.fairId ?? null);
+    ).run(id, input.itemId, input.sourceId, input.movementType, input.quantityDelta, input.unitCostPaise, new Date().toISOString(), input.fairId ?? null);
+    return id;
   }
 
   /**

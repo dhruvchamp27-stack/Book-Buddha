@@ -17,6 +17,7 @@ import { applyBillDiscountSchema } from "./bill-discount-schema.js";
 import { applyPurchaseReturnsSchema } from "./purchase-returns-schema.js";
 import { applyCreditNoteDateSchema } from "./credit-note-date-schema.js";
 import { applyCashRoundingSchema } from "./cash-rounding-schema.js";
+import { applyStockAdjustmentSchema } from "./stock-adjustment-schema.js";
 
 export interface Migration {
   version: number;
@@ -275,6 +276,16 @@ export const migrations: readonly Migration[] = [
     // can show the paise by which per-line rounding differs from the cash that moved. No table is
     // rebuilt, nothing is backfilled. Default (transactional).
     up: applyCashRoundingSchema,
+  },
+  {
+    version: 22,
+    name: "stock_adjustment",
+    // Rebuilds stock_movements ONCE to widen the movement_type CHECK with ADJUSTMENT_OUT and
+    // ADJUSTMENT_REVERSAL (ruling S10-4). rowid and fair_id are copied, both indexes are recreated,
+    // any trigger on the table is replayed, and a changed column set makes it throw. No account, no
+    // seed list, nothing backfilled. Default (transactional): nothing references stock_movements,
+    // so no foreign key needs switching off.
+    up: applyStockAdjustmentSchema,
   },
 ];
 

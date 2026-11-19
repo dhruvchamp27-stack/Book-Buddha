@@ -266,6 +266,19 @@ const stockMovementInput = z.object({
   /** R4c: the date the journal entry carries. The stock layer itself stays append-only. */
   occurredOn: z.string().date().optional(),
 });
+/** S10-4: take stock out by hand (shrinkage, breakage). Strict: an unknown key is a 400, not ignored. */
+const stockWriteDownInput = z.object({
+  itemId: id,
+  quantity: z.number().int().positive(),
+  occurredOn: z.string().date().optional(),
+  reason: z.string().trim().min(1).max(500).optional(),
+  businessId: id.optional(),
+  fairId: id.optional(),
+}).strict();
+/** S10-4: reverse a hand-entered movement or a whole write-down. */
+const stockReverseInput = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+}).strict();
 /** R4c: posting the journal entries that hand-entered stock movements never got. */
 const stockBackfillInput = z.object({
   businessId: id,
@@ -1000,6 +1013,28 @@ export function buildApi(
       ...(input.businessId === undefined ? {} : { businessId: input.businessId }),
       ...(input.occurredOn === undefined ? {} : { occurredOn: input.occurredOn }),
     }));
+  });
+
+  /** S10-4. Write stock down (FIFO, one posted entry). 400 for more than is on hand or a locked year. */
+  app.post("/inventory/write-downs", async (request, reply) => {
+    const input = parseBody(stockWriteDownInput, request.body);
+    return reply.code(201).send(repository.writeDownStock({
+      itemId: input.itemId,
+      quantity: input.quantity,
+      ...(input.occurredOn === undefined ? {} : { occurredOn: input.occurredOn }),
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(input.businessId === undefined ? {} : { businessId: input.businessId }),
+      ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+    }));
+  });
+
+  /** S10-4. Reverse a hand-entered movement, or a whole write-down (pass its id). Nothing is deleted. */
+  app.post<{ Params: { id: string } }>("/inventory/movements/:id/reverse", async (request, reply) => {
+    const input = parseBody(stockReverseInput, request.body ?? {});
+    return reply.code(201).send(repository.reverseStockMovement(
+      request.params.id,
+      input.reason === undefined ? {} : { reason: input.reason },
+    ));
   });
 
   /**
