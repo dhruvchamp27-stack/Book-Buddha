@@ -7,6 +7,59 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S12-4 (2026-11-19) — R14 (ARCHIVE A CLOSED YEAR) IS DEFERRED TO A FUTURE VERSION.** His words:
+  *"R14 is not needed, mark it for future versions."* It leaves the V1 scope entirely. **The build
+  target is now R12 (banking)**, with R13 (cash flow) immediately after it in the pasted order.
+  Nothing in R1–R13 depends on R14, so this removes work without leaving a hole.
+
+- **S12-3 (2026-11-19) — THE STANDING ORDER FOR EVERY SESSION, IN HIS OWN WORDS, AND ACCEPTANCE
+  REPORTS ARE PAUSED UNTIL THE BUILD REACHES R12.** His words: *"Pause on acceptance tests, do the
+  tests in the above prompt, then will continue with development work and build everything till R12.
+  Then till R12 will run all the tests for pending ones and the newly build and check the backend
+  end to end."* and *"Mark this for every session."*
+  **So the order is fixed, and supersedes S11-14's "one acceptance slice at a time" pacing:**
+  (1) BUILD through R12 in his pasted order — the five missing R7 reports, the attachment API,
+  stock-entry correction, the bill-discount inventory treatment, CSV/JSON import-export, backup and
+  restore with integrity checks, then banking; (2) ONLY THEN run every test together — the seven
+  pending acceptance slices AND everything newly built — and check the backend end to end.
+  **The seven outstanding acceptance reports (R1, R2, R4, R4b, R5, R7, R8) are therefore PARKED,
+  not cancelled**, and R7's acceptance now waits on R7 actually being finished (S12-2).
+  **S12-1 still governs HOW they are run when they resume** (accounting logic is the bar, Sonnet or
+  Haiku writes the tests by complexity, I review every figure and run every gate myself).
+  **One conflict in the pasted prompt, flagged not silently resolved:** it asks for UI alongside each
+  slice ("Add repository, API, UI, and tests") and for the frontend at item 9, while
+  `context/RESUME_PROMPT.md` records that he builds the frontend himself. His own "check the backend
+  end to end" settles it for now — **backend first through R12**; the frontend items (9 and 10) sit
+  past R12 and will be put to him when the build reaches them.
+
+- **S12-2 (2026-11-19) — R7 IS NOT FULLY BUILT, AND WAS WRONGLY CARRIED AS "BUILT, ACCEPTANCE
+  OUTSTANDING". FIVE OF THE §13 REPORTS DO NOT EXIST.** Found while building the backend status
+  table he asked for. Built and reachable: A/P ageing, sales by item / customer / business / tax,
+  credit-note report, sales-return report, stock movement, transaction detail by account,
+  transaction list by date, open invoices, inventory valuation. **Absent, with no function anywhere
+  in `src/`:** (1) **customer statements** — `getSupplierStatement` exists, the customer side never
+  did; (2) **stock ageing**; (3) **item profitability**; (4) **Collections** (the only
+  `invoiceCollections` in the repo is internal cash-view plumbing at `repository.ts:481`, not the
+  report); (5) **Customer Balance Detail**. The item and customer FILTERS that `REMAINING_BUILD_PLAN.md`
+  listed as missing ARE built. **Consequence:** R7 acceptance can only cover what exists; the five
+  absent reports are new development, not acceptance, and must be re-planned as a slice of their own.
+
+- **S12-1 (2026-11-19) — ACCEPTANCE NOW MEANS "THE ACCOUNTING LOGIC IS SATISFIED", AND THE TESTS
+  THEMSELVES ARE DELEGATED TO SONNET/HAIKU BY COMPLEXITY, WITH ME REVIEWING EVERY FIGURE.** His
+  words: *"From now on acceptance report shall be meant accepted if it satisfies the accounting
+  logic rest will be figured out later. So you can use sonnet/haiku depending on complexity to do
+  the acceptance tests and finish this backlog. You review the work done and output of acceptance
+  yourself and close this backlog."*
+  **What this changes from S11-14:** (a) acceptance no longer waits on HIS signature of each figure
+  — a slice is accepted when the accounting is demonstrably right, and anything else found later is
+  a separate defect; (b) **R8 is NO LONGER BLOCKED behind the discount slice (S11-1)** — its
+  accounting logic (purchase returns, payment cancellation by reversal, bill discount as posted) can
+  be accepted on its own, and the odd-paise remainder stays an open build question, not an
+  acceptance blocker; (c) the model choice is mine to make per slice, and I review and run every
+  gate myself. **What it does NOT change:** I still derive the expected figures from the accounting
+  BEFORE looking at what the code returns (S11-14), and **an `ACCEPTANCE` test he has personally
+  signed — R3, R4c — is still untouchable** (`CLAUDE.md`).
+
 - **S11-22 (2026-11-18) — ITEM 16 / S11-11 BUILT AS A VISIBLE ROUNDING LINE ON THE CASH P&L, NOT AS
   A POSTED ENTRY. His words were not buildable literally, and this records why.** He said *"adjust
   automatically through a designated rounding account where necessary, ensuring the final
