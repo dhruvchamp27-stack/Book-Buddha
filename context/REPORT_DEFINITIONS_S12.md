@@ -63,7 +63,9 @@ Therefore: **`openCustomerItemRows` gains `fairId` and `includeSettled` only.** 
   balance.
 
 **Do NOT write a second "what is owed" query.** Extend this one:
-`openCustomerItemRows({ businessId?, customerId?, fairId?, asAtDate?, includeSettled? })`.
+`openCustomerItemRows(db, { businessId?, customerId?, fairId?, includeSettled? })`. **No
+`asAtDate`** — see the trap above. BUILT in `63bb874`; it now lives in
+`src/database/open-items.ts` so a `reports-*.ts` module can read it.
 
 **`fairId` is required by the spec, not optional polish.** The Design Document (authority #1,
 line 366) says every report except the Balance Sheet is viewable fair by fair, and that fair-level
@@ -197,7 +199,7 @@ differ, the report is wrong — do not adjust the expected figure to match the c
 **Plain English:** every customer, and under each one every document still unpaid, with what is
 left on it — the detail behind the A/R total.
 
-Built on `openCustomerItemRows({ businessId?, customerId?, fairId?, asAtDate? })`, grouped by
+Built on `openCustomerItemRows(db, { businessId?, customerId?, fairId? })`, grouped by
 customer, each group carrying its own subtotal, plus a report total.
 
 **TIE-OUT:** report total **must equal** `getReceivables` for the same filter, and (with no
@@ -294,7 +296,7 @@ the note's date is read from that entry.
 this one report would be measured over different sets of sales. So join each stock row's source
 through to the document and require what `salesByItem` requires: the invoice FINALIZED, the entry
 not a reversal. A cancelled invoice's stock rows must be excluded on the same test that excludes
-its revenue — check how `cancelInvoice` writes and dates its stock rows before relying on this.
+its revenue. **That check has now been done — see RESOLUTION R7, which answers it.**
 
 **TIE-OUT:** total COGS in this report must equal the sum of COGS-account debits less credits in
 the posted journal. **Assert this with no date filter**, where it must hold exactly. With a date
@@ -311,6 +313,99 @@ question still waiting on his odd-paise ruling (S11-1/S11-2); until he rules, th
 invent an answer.
 
 ---
+
+## RESOLUTIONS — settled after 0a was built, and they override anything above
+
+Five things the sections above got wrong or left open. They were found by reading the code the
+reports were about to touch, which is why 0a was built and gated before a line of report code was
+written. **Where these disagree with a section above, these win.**
+
+### R1. There is ONE as-at predicate, and reports 2 and 3 must share it
+`openCustomerItemRows` takes no `asAtDate` (the trap in 0a). So each report that offers one does
+its own filtering — and if each writes its own `.filter(...)` they will drift, which is the exact
+defect 0a exists to prevent. **Write one exported helper and have both call it:**
+
+```ts
+/** Documents that existed on the as-at date. The established meaning: see the as-at trap. */
+export function existingOn<T extends { date: string }>(rows: readonly T[], asAtDate?: string): readonly T[]
+```
+
+It must be the SAME comparison `buildAgeingReport` makes (`repository.ts:2750`): compare
+`row.date.slice(0, 10) > asAtDate` and drop, and **only when the caller actually asked for a
+date** — with none, nothing is dropped, because "what is owed now" includes an invoice dated
+tomorrow. `getReceivables` makes the identical comparison at `repository.ts:2700`.
+
+This is now safe to share because `openCustomerItemRows.date` was corrected in `63bb874` and can
+no longer be a timestamp. The `.slice(0, 10)` stays anyway: opening balances and the supplier
+mirror feed the same helper.
+
+### R2. The statement's settlement rows come FROM the documents, not from a second sweep
+Do **not** query `payments`, `credit_note_applications` and `opening_balance_receipts` for the
+customer independently. Take the documents from
+`openCustomerItemRows(db, { customerId, includeSettled: true })` and, for each one, read its own
+settlements. Two reasons: a payment against an invoice the shared query excluded (a CASH invoice,
+another business, another fair) would otherwise appear on the statement with no invoice above it
+and break the running balance; and it keeps one definition of which documents are in scope.
+
+**Then assert it per document, not just in total:** for every document, the settlement rows under
+it must sum to that document's `settledPaise`. A total-only tie-out passes even when two documents
+are wrong in opposite directions.
+
+### R3. `je-credit-note-%` also matches `je-credit-note-inventory-%`
+The inventory entry (`je-credit-note-inventory-<id>`) carries the same prefix and must not become
+a statement row. The shared query already avoids it by taking only lines on the invoice's own
+payment account (`jl.account = i.payment_account`), and the statement must filter the same way —
+the inventory entry touches INVENTORY and COGS, never RECEIVABLES, so a receivable-account filter
+excludes it by construction rather than by matching on the id.
+
+### R4. The fair tie-out in report 1 and 2 above is WRONG as stated
+"A fair-wise total plus its excluded openings equals the consolidated total" does not hold, because
+invoices tagged to no fair belong to neither side of it. The decomposition that holds, and the one
+now tested in `open-items.test.ts`, is:
+
+> **consolidated = Σ (each fair) + (invoices with `fair_id IS NULL`) + (opening balances)**
+
+`excludedOpeningBalancesPaise` is a DISCLOSURE — it tells the reader why a fair-wise figure is
+smaller — not a bridging figure that makes the two views add up.
+
+### R5. Every report entry point calls `assertReportFairExists` first
+Already the house rule (`report-filters-sql.ts:21`), stated here because these reports take
+`fairId` without going through `reportConditions`, so it will not happen by itself. A report asked
+for a fair that does not exist must say so, not answer zero rows — which reads as "nothing owed".
+
+### R6. A defect this work uncovered, already fixed in `fadb6c8`
+`saveDraft` defaulted an invoice's date to the UTC calendar date, so an invoice entered between
+00:00 and 05:29 IST was stored, and posted, one day early — across 31 March, into the year that
+had just closed. It is `istDateOf()` now. Relevant here because every one of these reports dates
+documents, and three of them age them.
+
+### R7. How a cancellation and a credit note write their stock rows — the check report 6 was told to make
+Read in `repository.ts` before report 6 is coded, so it does not have to be guessed at:
+
+| what happened | `movement_type` | `source_id` | written by |
+|---|---|---|---|
+| invoice finalized | `SALE`, one row per FIFO layer, negative delta | **the invoice** | `consumeInvoiceStock` |
+| invoice CANCELLED | `SALE_REVERSAL`, positive delta | **the invoice** (the same id) | `restoreInvoiceStock` |
+| credit note finalized | `SALE_REVERSAL`, positive delta | **the NOTE** | `restoreCreditNoteStock` |
+| credit note cancelled | `SALE`, negative delta | **the NOTE** | `cancelCreditNote` |
+
+Three consequences for report 6:
+
+1. **A cancelled invoice needs no special case, and is excluded twice over.** Its `SALE_REVERSAL`
+   rows carry the invoice's own `source_id`, so they net its `SALE` rows to zero on their own; and
+   joining each stock row through to its invoice and requiring FINALIZED (what `salesByItem`
+   requires) drops both sides anyway. Build the join, because it is the rule that makes revenue
+   and cost cover the same sales — but know that the netting is the belt to its braces.
+2. **A `SALE` row is NOT always an invoice.** `cancelCreditNote` writes `SALE` under the NOTE's
+   id. A COGS query that assumes `movement_type = 'SALE'` ⇒ `source_id` is an invoice will fail to
+   join and silently drop the row. Resolve the source by looking for the id in `invoices` first
+   and then in `credit_notes`, never by the movement type.
+3. **A cancellation is dated the day it happens, never the invoice's date** — `cancelInvoice`
+   stamps its reversal `entryDate: istDateOf()` (`repository.ts:2474`). So in a DATE-FILTERED
+   report the stock side (dated from the source document) and the journal side (dated when the
+   cancellation was posted) legitimately disagree. This is exactly the divergence section 6
+   predicted; it is now confirmed in the code, and it is why the COGS tie-out is asserted **with
+   no date filter only**.
 
 ## Known limitations to record, not to fix in this slice
 - A fair-wise A/R total is less than the consolidated total by the opening balances, for the
