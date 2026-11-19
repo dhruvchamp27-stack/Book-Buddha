@@ -1,8 +1,10 @@
 import Fastify, { type FastifyContextConfig, type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { registerAttachmentRoutes } from "./attachment-routes.js";
+import { registerBackupRoutes } from "./backup-routes.js";
 import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
@@ -588,6 +590,20 @@ export interface BuildApiOptions {
    * temporary folder rather than rely on that.
    */
   readonly attachmentStorageRoot?: string;
+  /**
+   * Folder the BACKUPS live in (R11). Omitted, it is `backups/` beside the database file, for the
+   * same reason attachments sit beside it. An in-memory database falls back to the OS temporary
+   * folder — deliberately NOT the working directory, so no test can ever write a backup into the
+   * repository.
+   */
+  readonly backupsRoot?: string;
+}
+
+/** Where backups go: the explicit option, then beside the database, then the OS temp folder. */
+export function resolveBackupsRoot(databaseName: string, explicit?: string): string {
+  if (explicit !== undefined) return path.resolve(explicit);
+  if (databaseName === "" || databaseName === ":memory:") return path.join(os.tmpdir(), "book-buddha-memory-backups");
+  return path.join(path.dirname(path.resolve(databaseName)), "backups");
 }
 
 /**
@@ -1603,6 +1619,14 @@ export function buildApi(
   registerAttachmentRoutes(app, {
     db: repository.db,
     storageRoot: resolveAttachmentStorageRoot(repository.db.name, options.attachmentStorageRoot),
+  });
+
+  // ---- Backups (R11). Create, list, verify. There is deliberately no restore route: restoring
+  // replaces the open database, which belongs to the app shell (see src/backup/backup.ts).
+  registerBackupRoutes(app, {
+    db: repository.db,
+    backupsRoot: resolveBackupsRoot(repository.db.name, options.backupsRoot),
+    attachmentsRoot: resolveAttachmentStorageRoot(repository.db.name, options.attachmentStorageRoot),
   });
 
   return app;
