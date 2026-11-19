@@ -7,6 +7,37 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S12-7 (2026-11-19) — PAUSED MID-SLICE, NOTHING HALF-BUILT.** He asked to pause. The four
+  remaining §13 reports (customer statement, balance detail, collections, item profitability) are
+  **fully specified and not yet coded**. The Sonnet build agent was dispatched and died at its
+  first step on the account's 5-hour rate limit, **writing nothing to the repo** — verified with
+  `git status`. So the resume point is clean: start the build, do not look for partial work.
+  Brief: `context/BRIEF_customer_reports.md`; spec: `context/REPORT_DEFINITIONS_S12.md`.
+
+- **S12-6 (2026-11-19) — MY FINDING, NOT HIS RULING: A `SALE` STOCK ROW IS NOT ALWAYS AN INVOICE,
+  AND A CANCELLATION IS DATED THE DAY IT HAPPENS.** Read out of `repository.ts` before coding
+  report 6, because the definitions flagged it as unverified. `consumeInvoiceStock` writes `SALE`
+  under the INVOICE's id; `restoreInvoiceStock` (cancellation) writes `SALE_REVERSAL` under the
+  **same invoice id**; `restoreCreditNoteStock` writes `SALE_REVERSAL` under the **NOTE's** id; and
+  `cancelCreditNote` writes `SALE` under the **NOTE's** id. So a COGS query that assumes
+  `movement_type = 'SALE'` implies an invoice will silently drop rows. Also: `cancelInvoice` stamps
+  its reversal `entryDate: istDateOf()` — the cancellation day, never the invoice's date — which is
+  why report 6's COGS tie-out is asserted **with no date filter only**. Written up in full as
+  RESOLUTION R7 in `context/REPORT_DEFINITIONS_S12.md`.
+
+- **S12-5 (2026-11-19) — A REAL DATING BUG WAS FOUND IN THE POSTED BOOKS AND FIXED (`fadb6c8`).
+  HE SHOULD KNOW THIS ONE.** `saveDraft` dated an invoice that carried no explicit date by
+  `new Date().toISOString().slice(0, 10)` — the **UTC** calendar — while the whole app's business
+  date is **IST (UTC+5:30)**, a rule already written into `journal-dimensions-schema.ts`. An
+  invoice entered between 00:00 and 05:29 IST was therefore stored a day early; `invoiceEntryDate`
+  reads that column back, so the **posted journal entry**, the P&L period, the General Ledger and
+  the ageing reports all carried the wrong day. Across 31 March the sale landed in the financial
+  year that had just closed. Treated as a bug against an already-settled rule rather than an open
+  accounting question, so it was fixed (`istDateOf()`) with three tests
+  (`src/database/invoice-date-ist.test.ts`) rather than stopping to ask. **Two read fallbacks
+  remain** (`repository.ts:1678` and `:2374`) that still default a legacy NULL `invoiceDate` to a
+  raw `created_at` timestamp — not fixed this session, recorded here so it is not forgotten.
+
 - **S12-4 (2026-11-19) — R14 (ARCHIVE A CLOSED YEAR) IS DEFERRED TO A FUTURE VERSION.** His words:
   *"R14 is not needed, mark it for future versions."* It leaves the V1 scope entirely. **The build
   target is now R12 (banking)**, with R13 (cash flow) immediately after it in the pasted order.
