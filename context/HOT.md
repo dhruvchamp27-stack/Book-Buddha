@@ -8,40 +8,38 @@ run everything together. **R14 deferred (S12-4).** Order: reports → attachment
 → bill discount → import/export → backup → banking.
 
 ## Last session
-2026-11-18 (session 11) — nineteen questions answered, backlog CLEARED (S11-1..S11-22); four items
-built and pushed (**v20**, **v21**). Session 12: R9 HTTP seam committed (`d6da71d`); the engine fuzz
-test given a 30s timeout (CPU contention, not a wrong figure — same cause and fix as `49c31f9`).
+Session 11 — nineteen questions answered, backlog CLEARED (S11-1..S11-22); four items built and
+pushed (**v20**, **v21**). Session 12: R9 HTTP seam (`d6da71d`); fuzz test given a 30s timeout
+(CPU contention, not a wrong figure, as `49c31f9`); stock ageing + valuation detail built.
 
 ## State now
-Branch `autonomous/book-buddha-finish`. Gates **all green, re-run 19 Nov: tsc 0 · 594 tests,
-48 files · vite build clean.** Migration **v21**. Verify, never quote: `git log --oneline
+Branch `autonomous/book-buddha-finish`. Gates **all green, re-run 19 Nov: tsc 0 · 609 tests,
+49 files · vite build clean.** Migration **v21**. Verify, never quote: `git log --oneline
 @{u}..HEAD | wc -l`. **PUSHING: never in the foreground, and ASK HIM EVERY TIME (S11-17).**
 **ACCEPTANCE (parked): hand-verified R3, R4c · on trust 7d, 8c · outstanding R1, R2, R4, R4b,
 R5, R7, R8.** Under **S12-1** acceptance = the accounting logic is satisfied.
 
 ## NEXT STEP
-**SIX §13 reports are absent, not five (S12-2 undercounted):** customer statement · customer
-balance detail · collections · stock ageing · **inventory valuation DETAIL** · item profitability.
-Definitions and tie-outs: `context/REPORT_DEFINITIONS_S12.md`. Follow `reports-sales.ts`: `db`
-first, `reportConditions` + `assertReportFairExists`, read the POSTED JOURNAL. Then R9 routes 2–5 →
-stock correction (v22 drafted, `src/database/stock-adjustment-schema.ts`, **unregistered**) → bill
+**FOUR of the six §13 reports remain:** customer statement · customer balance detail · collections ·
+item profitability. Stock ageing and inventory valuation DETAIL are **BUILT**. Definitions:
+`context/REPORT_DEFINITIONS_S12.md` — do **0a first** (`fairId` + `includeSettled` on
+`openCustomerItemRows`; the three existing callers' tests must pass UNCHANGED). Then R9 routes 2–5 →
+stock correction (v22 draft `src/database/stock-adjustment-schema.ts`, **unregistered**) → bill
 discount (**needs his odd-paise ruling**) → R10 → R11 → R12. Brief: `context/RESUME_PROMPT.md`.
 
 ## Uncommitted / blocked
-Uncommitted: `src/accounting/engine.test.ts` (timeout fix), `context/decisions.md` (S12-1..4),
-`context/HOT.md`, untracked `stock-adjustment-schema.ts` and `context/AGENT_BRIEF_R9_ROUTES.md`
-(**dead — the agent was cancelled; offered to delete, no answer**). **Waiting on him:** (1) the
-**odd-paise ruling** — Rs 150 off 7 units will not divide into whole paise; S11-22 is the precedent,
-show the remainder; (2) his prompt asks for UI, `RESUME_PROMPT.md` says he builds the frontend —
-resolved as **backend-first through R12**, items 9–10 to be put to him there; (3) purchase-return
-back-dating warning? (4) base64 for attachments (S11-19, defaulted never answered); (5) §D6 TWO
-Uncategorized accounts (S11-8) before R12. **Still NO real database (S11-16)** — never touch his file.
+Untracked and unregistered: `stock-adjustment-schema.ts` (v22 draft) · `AGENT_BRIEF_R9_ROUTES.md`
+(**dead, agent cancelled; offered to delete, no answer**). **Waiting on him:** (1) the **odd-paise
+ruling** — Rs 150 off 7 units will not divide into whole paise; S11-22 is the precedent, show the
+remainder; (2) his prompt asks for UI, `RESUME_PROMPT.md` says he builds the frontend — resolved
+**backend-first through R12**, items 9–10 to him there; (3) purchase-return back-dating warning?
+(4) base64 for attachments (S11-19, defaulted never answered); (5) §D6 TWO Uncategorized accounts
+(S11-8) before R12. **Still NO real database (S11-16)** — never touch his file.
 
 ## Corrections that must not be re-inherited
 **`getTrialBalance` returns NET balances** (his find, S10-5). **THREE gates, not four.**
-`applyPurchasingExpensesSchema` is **v4, not v18** — any NEW `stock_movements` rebuild must carry
-`fair_id` (v22 asserts the column set). `salesByItem` deliberately does **not** spread header
-discount/charges/GST across lines; item profitability inherits that limit.
+`applyPurchasingExpensesSchema` is **v4, not v18** — a new `stock_movements` rebuild must carry
+`fair_id`. `salesByItem` deliberately does **not** spread header discount/GST across lines.
 
 ## Workflow
 Gates from `book-buddha/`: `tsc.cmd` **first** (vitest does NOT type-check) · `vitest.cmd run
