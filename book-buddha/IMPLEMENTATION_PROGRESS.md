@@ -282,6 +282,84 @@ npm run build
 npm run build:web
 ```
 
+## Session 12 (continued) — an IST dating defect, and the open-items query moved out (19 Nov 2026)
+
+Two further commits after the stock reports, kept deliberately apart because one is a fix to the
+posted books and the other is a refactor. Splitting them means the fix can be reverted on its own.
+
+### `fadb6c8` — an invoice with no date of its own was dated by the UTC calendar
+
+**The defect.** `saveDraft` defaulted a missing invoice date to
+`new Date().toISOString().slice(0, 10)` — the **UTC** calendar — while the whole application's
+business date is **India Standard Time (UTC+5:30)**, a rule already written into
+`journal-dimensions-schema.ts` and already honoured by the v5 backfill (`'+330 minutes'`).
+
+**Why it mattered beyond the invoice.** `invoiceEntryDate` reads `invoice_date` back, and that is
+the date `finalizeInvoice` POSTS. So an invoice entered between 00:00 and 05:29 IST carried the
+previous day into the journal entry, the P&L period, the General Ledger and both ageing reports.
+Across 31 March the sale landed in the financial year that had just closed.
+
+**How it was found.** Not by reading — by probing. A test of the open-items date fallback failed
+with the wrong day, so a throwaway probe test printed the stored row instead of guessing at the
+cause. The probe showed `saveDraft` always stores a date, and stores it from the wrong calendar.
+
+Changed: `src/database/repository.ts` — both `saveDraft` write sites now use `istDateOf()`.
+New: `src/database/invoice-date-ist.test.ts` — 3 tests. The 00:30 IST case (stored and posted date
+is the 2nd while `created_at` is still the 1st); the 31 March year-end case (posts to 2026-27, not
+the closing year); and an explicit date is never overridden.
+
+No migration. Rows already written keep whatever date they were given; this corrects new ones.
+
+### `63bb874` — section 0a: one definition of what a customer owes, with a fair filter
+
+`openCustomerItemRows` was a private method on `AccountingRepository`, and four reports were about
+to need it. Rather than let any of them re-query "what is still owed", it moved to its own module.
+
+**Moved verbatim FIRST, and gate-proved before anything was added** — the full suite passed with
+**zero test edits**, which is what makes the move trustworthy: any test that goes red later names
+a real change, not the move.
+
+New: `src/database/open-items.ts` — `openCustomerItemRows(db, filter)` plus
+`excludedOpeningBalances(db, filter)`. Takes the database handle first, per the report house rule.
+Then extended with:
+- **`fairId`** — fair-wise A/R, per Design Document line 366. Opening balances are **excluded**
+  under a fair filter and that is correct, not a gap: an opening balance predates every fair.
+  A fair-wise total is therefore smaller than the consolidated one, so `excludedOpeningBalances`
+  exists to disclose the difference rather than let a receivable vanish quietly.
+- **`includeSettled`** — the default is an open-item list, which is right for receivables and
+  ageing and wrong for a statement: a statement that dropped a paid invoice would not show the
+  payment either, and would not add up.
+- **a corrected date fallback** — was `COALESCE(i.invoice_date, i.created_at)`, a UTC timestamp;
+  now falls back to the POSTED entry's own date, so the document and the ledger agree.
+
+New: `src/database/open-items.test.ts` — 7 tests. The one that matters is the **tie-out**, and it
+corrected a decomposition that would otherwise have shipped as a false invariant:
+
+> **consolidated = Σ (each fair) + (invoices tagged to no fair) + (opening balances)**
+
+"One fair plus its excluded openings equals the whole" does **not** hold, because untagged
+invoices belong to neither side of it.
+
+Changed: `src/database/repository.ts` — the query body replaced by a delegation; the
+`OpenCustomerItem` type now lives in `open-items.ts` and is re-exported, so no caller changed.
+
+No migration: all of this reads what is already stored.
+
+**Gates, run in order from `book-buddha/` on 19 Nov 2026, on the final tree:**
+
+- `./node_modules/.bin/tsc.cmd` — exit 0, no output.
+- `./node_modules/.bin/vitest.cmd run --root .` — **619 passed, 51 files**, exit 0 (was 609/49
+  after the stock reports; +7 from `open-items.test.ts`, +3 from `invoice-date-ist.test.ts`).
+- `./node_modules/.bin/vite.cmd build` — built in 1.24s, exit 0.
+
+### Where this slice stopped
+
+The four remaining §13 reports — **customer statement, customer balance detail, collections and
+item profitability** — are **fully specified and not coded**. The specification is
+`context/REPORT_DEFINITIONS_S12.md` (read its **RESOLUTIONS R1–R7**, which override everything
+earlier in that file) and the agent brief is `context/BRIEF_customer_reports.md`. Section 0a, the
+shared foundation all three customer reports stand on, is done and committed.
+
 ## Session 12 — R7c, the two absent stock reports (19 Nov 2026)
 
 The Design Document §13 names six reports that were specified and never built. Two of them are
