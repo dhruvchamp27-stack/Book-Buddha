@@ -162,6 +162,26 @@ export function openCustomerItemRows(
 }
 
 /**
+ * Documents that existed on the as-at date. With no date, `rows` is returned unchanged.
+ *
+ * THE ESTABLISHED AS-AT MEANING, and the only one this codebase has: "what is outstanding NOW,
+ * excluding documents that did not yet exist on that date." It is NOT the balance as it stood
+ * that day -- settlements, cancellations and reversals made after the date are NOT rolled back.
+ *
+ * This is deliberately the same comparison `buildAgeingReport` and `getReceivables` make in
+ * `repository.ts` (`date.slice(0, 10) > asAtDate` drops the row, and only when the caller asked
+ * for a date), which is why it is shared: two reports that each wrote their own filter would
+ * drift apart, and then disagree about who owes what.
+ */
+export function existingOn<T extends { readonly date: string }>(
+  rows: readonly T[],
+  asAtDate?: string,
+): readonly T[] {
+  if (asAtDate === undefined) return rows;
+  return rows.filter((row) => row.date.slice(0, 10) <= asAtDate);
+}
+
+/**
  * What a fair-filtered A/R figure leaves out: the opening balances still outstanding for the
  * same business and customer. Not a receivable that went missing -- one that belongs to no
  * fair. Every fair-filtered report shows this so the difference from the consolidated total is
