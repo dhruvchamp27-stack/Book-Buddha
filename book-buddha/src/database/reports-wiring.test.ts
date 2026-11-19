@@ -253,3 +253,97 @@ describe("R7b: the General Ledger shows the transaction date, not when it was po
     }
   });
 });
+
+// Session 12: the four remaining §13 reports, reached over HTTP like every other report.
+describe("Session 12: customer statement, balance detail, collections and item profitability over HTTP", () => {
+  interface Balance { totalPaise: number; groups: Array<{ items: Array<{ documentId: string; outstandingPaise: number }> }> }
+  interface Collections { rows: Array<{ documentId: string; outstandingPaise: number }>; totalOverduePaise: number }
+
+  it("answers 200 with real data on all four routes", async () => {
+    const w = books();
+    try {
+      const get = api(w);
+      const statement = await get(`/reports/customer-statement?customerId=${w.customerId}`);
+      expect(statement.statusCode).toBe(200);
+      expect(statement.json<{ rows: unknown[] }>().rows.length).toBeGreaterThan(0);
+      const detail = await get("/reports/customer-balance-detail");
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json<Balance>().groups.length).toBeGreaterThan(0);
+      const collections = await get("/reports/collections");
+      expect(collections.statusCode).toBe(200);
+      expect(collections.json<Collections>().rows.length).toBeGreaterThan(0);
+      const profit = await get("/reports/item-profitability");
+      expect(profit.statusCode).toBe(200);
+      expect(profit.json<{ rows: unknown[] }>().rows.length).toBeGreaterThan(0);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("refuses a missing customerId, an unknown key and an unknown customer or fair with 400, never 500", async () => {
+    const w = books();
+    try {
+      const get = api(w);
+      expect((await get("/reports/customer-statement")).statusCode).toBe(400);
+      expect((await get(`/reports/customer-statement?customerId=${w.customerId}&asAtDate=2026-07-01`)).statusCode).toBe(400);
+      expect((await get("/reports/customer-balance-detail?nonsense=1")).statusCode).toBe(400);
+      expect((await get("/reports/collections?nonsense=1")).statusCode).toBe(400);
+      expect((await get("/reports/item-profitability?nonsense=1")).statusCode).toBe(400);
+      expect((await get("/reports/customer-statement?customerId=no-such-customer")).statusCode).toBe(400);
+      expect((await get("/reports/customer-balance-detail?fairId=no-such-fair")).statusCode).toBe(400);
+      expect((await get("/reports/receivables?fairId=no-such-fair")).statusCode).toBe(400);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("receivables and balance detail agree, consolidated and under a fair", async () => {
+    const w = books();
+    try {
+      const get = api(w);
+      const sum = (rows: Array<{ outstandingPaise: number }>): number => rows.reduce((t, r) => t + r.outstandingPaise, 0);
+      for (const query of ["", `?fairId=${w.fairId}`]) {
+        const receivables = (await get(`/reports/receivables${query}`)).json<Array<{ outstandingPaise: number }>>();
+        const detail = (await get(`/reports/customer-balance-detail${query}`)).json<Balance>();
+        expect(detail.totalPaise).toBe(sum(receivables));
+      }
+      // Under the Kochi fair only INV-1 (60000 less its 20000 credit note) is in scope.
+      const fair = (await get(`/reports/customer-balance-detail?fairId=${w.fairId}`)).json<Balance>();
+      expect(fair.totalPaise).toBe(40000);
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("collections rows are a subset of balance-detail rows", async () => {
+    const w = books();
+    try {
+      const get = api(w);
+      const detail = (await get("/reports/customer-balance-detail")).json<Balance>();
+      const collections = (await get("/reports/collections")).json<Collections>();
+      const detailById = new Map(detail.groups.flatMap((g) => g.items).map((i) => [i.documentId, i.outstandingPaise]));
+      expect(collections.rows.length).toBeGreaterThan(0);
+      for (const row of collections.rows) expect(detailById.get(row.documentId)).toBe(row.outstandingPaise);
+      expect(collections.totalOverduePaise).toBe(collections.rows.reduce((t, r) => t + r.outstandingPaise, 0));
+    } finally {
+      w.repository.close();
+    }
+  });
+
+  it("item profitability totals equal the sum of its rows", async () => {
+    const w = books();
+    try {
+      const get = api(w);
+      const report = (await get("/reports/item-profitability"))
+        .json<{ rows: Array<{ netSalesPaise: number; cogsPaise: number; grossMarginPaise: number }>;
+                totals: { netSalesPaise: number; cogsPaise: number; grossMarginPaise: number } }>();
+      expect(report.rows.length).toBeGreaterThan(0);
+      for (const key of ["netSalesPaise", "cogsPaise", "grossMarginPaise"] as const) {
+        expect(report.totals[key]).toBe(report.rows.reduce((t, r) => t + r[key], 0));
+      }
+      expect(report.totals.netSalesPaise).toBe(80000);
+    } finally {
+      w.repository.close();
+    }
+  });
+});

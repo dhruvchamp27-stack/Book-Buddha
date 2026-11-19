@@ -434,6 +434,37 @@ const customerOpenItemsQuery = z.object({
   customerId: id.optional(),
   asAtDate: reportDate.optional(),
 }).strict().transform((value) => definedOnly(value));
+/**
+ * `/reports/receivables` also takes a fair, so Balance Detail under a fair can be tied to it. A
+ * separate schema, NOT a fairId on `customerOpenItemsQuery`: receivables-ageing shares that one and
+ * its repository method has no fair filter, so accepting one there would be silently ignored.
+ */
+const receivablesQuery = z.object({
+  businessId: id.optional(),
+  customerId: id.optional(),
+  fairId: id.optional(),
+  asAtDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
+/** Session 12. Customer Balance Detail and Collections: the open-items filters plus a fair. */
+const customerBalanceQuery = receivablesQuery;
+/** Session 12. One customer's statement: the customer is required, there is no date. */
+const customerStatementQuery = z.object({
+  customerId: id,
+  businessId: id.optional(),
+  fairId: id.optional(),
+}).strict().transform((value) => ({
+  customerId: value.customerId,
+  ...(value.businessId === undefined ? {} : { businessId: value.businessId }),
+  ...(value.fairId === undefined ? {} : { fairId: value.fairId }),
+}));
+/** Session 12. Item profitability: period, fair, business and an optional item. */
+const itemProfitabilityQuery = z.object({
+  businessId: id.optional(),
+  fairId: id.optional(),
+  itemId: id.optional(),
+  fromDate: reportDate.optional(),
+  toDate: reportDate.optional(),
+}).strict().transform((value) => definedOnly(value));
 /** The supplier mirror. */
 const openItemsQuery = z.object({
   businessId: id.optional(),
@@ -1482,6 +1513,16 @@ export function buildApi(
     repository.getStockAgeing(parseBody(stockReportQuery, request.query)));
   app.get("/reports/inventory-valuation-detail", async (request) =>
     repository.getInventoryValuationDetail(parseBody(stockReportQuery, request.query)));
+  // Session 12. The customer reports and item profitability. All read the shared open-items query
+  // or the stock sub-ledger, so none can disagree with /reports/receivables or the valuation.
+  app.get("/reports/customer-statement", async (request) =>
+    repository.getCustomerStatement(parseBody(customerStatementQuery, request.query)));
+  app.get("/reports/customer-balance-detail", async (request) =>
+    repository.getCustomerBalanceDetail(parseBody(customerBalanceQuery, request.query)));
+  app.get("/reports/collections", async (request) =>
+    repository.getCollections(parseBody(customerBalanceQuery, request.query)));
+  app.get("/reports/item-profitability", async (request) =>
+    repository.getItemProfitability(parseBody(itemProfitabilityQuery, request.query)));
   app.get("/reports/low-stock", async () => repository.getLowStockItems());
   // Session 9. Both of these used to take no filters and ignore credit notes. sales-by-item takes
   // the credit-note query because an item filter IS meaningful on a per-item report.
@@ -1518,7 +1559,7 @@ export function buildApi(
   app.get("/reports/stock-movements", async (request) =>
     repository.getStockMovementReport(parseBody(stockMovementQuery, request.query)));
   app.get("/reports/receivables", async (request) =>
-    repository.getReceivables(parseBody(customerOpenItemsQuery, request.query)));
+    repository.getReceivables(parseBody(receivablesQuery, request.query)));
   app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
   app.get("/reports/fair-sales", async (request) =>
     repository.getFairSales(parseBody(salesReportQuery, request.query)));

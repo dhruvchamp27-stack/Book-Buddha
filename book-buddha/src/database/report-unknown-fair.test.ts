@@ -44,6 +44,24 @@ function setup(): World {
 
 type Run = (w: World, fairId?: string) => unknown;
 const f = (fairId: string | undefined): { fairId?: string } => (fairId === undefined ? {} : { fairId });
+/** The one customer in this world (the fair host, who is also the buyer). */
+/**
+ * setup() sells for CASH, so nothing is owed. The open-items reports need an unpaid invoice in Fair A
+ * to have data to return; it is added only by the entries that need it, so every other entry keeps
+ * the exact figures above. Idempotent per world.
+ */
+function withUnpaidInvoice(w: World): World {
+  const one = (sql: string): string => (w.repository.db.prepare(sql).get() as { id: string }).id;
+  if (w.repository.db.prepare("SELECT 1 FROM invoices WHERE id = 'IR'").get() !== undefined) return w;
+  w.repository.saveDraft({
+    id: "IR", number: "IR", businessId: one("SELECT id FROM businesses LIMIT 1"), customerId: one("SELECT id FROM customers LIMIT 1"),
+    paymentAccount: "RECEIVABLES", status: "DRAFT", fairId: w.fairA, invoiceDate: "2026-11-06",
+    lines: [{ itemId: one("SELECT id FROM items LIMIT 1"), description: "Atlas", quantity: 1, unitPricePaise: 10000 }],
+  });
+  w.repository.finalizeInvoice("IR");
+  return w;
+}
+const hostCustomer = (w: World): string => (w.repository.db.prepare("SELECT id FROM customers LIMIT 1").get() as { id: string }).id;
 
 /** All ten public entry points (the trial balance, P&L and balance-sheet rows share one of them). */
 const ENTRY_POINTS: ReadonlyArray<{ name: string; run: Run; real: (result: any) => void }> = [
@@ -61,6 +79,12 @@ const ENTRY_POINTS: ReadonlyArray<{ name: string; run: Run; real: (result: any) 
   { name: "transactionListByDate", run: (w, id) => transactionListByDate(w.repository.db, f(id)), real: (r) => expect(r.length).toBeGreaterThan(0) },
   { name: "transactionDetailByAccount", run: (w, id) => transactionDetailByAccount(w.repository.db, f(id)), real: (r) => expect(r.length).toBeGreaterThan(0) },
   { name: "stockMovementReport", run: (w, id) => stockMovementReport(w.repository.db, f(id)), real: (r) => expect(r.length).toBeGreaterThan(0) },
+  // Session 12: the four customer / profitability reports, and getReceivables now that it takes a fair.
+  { name: "getReceivables (fairId)", run: (w, id) => withUnpaidInvoice(w).repository.getReceivables(f(id)), real: (r) => { expect(r).toHaveLength(1); expect(r[0]).toMatchObject({ invoiceId: "IR", outstandingPaise: 10000 }); } },
+  { name: "getCustomerStatement", run: (w, id) => withUnpaidInvoice(w).repository.getCustomerStatement({ customerId: hostCustomer(w), ...f(id) }), real: (r) => expect(r.rows.length).toBeGreaterThan(0) },
+  { name: "getCustomerBalanceDetail", run: (w, id) => withUnpaidInvoice(w).repository.getCustomerBalanceDetail(f(id)), real: (r) => expect(r.totalPaise).toBeGreaterThan(0) },
+  { name: "getCollections", run: (w, id) => withUnpaidInvoice(w).repository.getCollections(f(id)), real: (r) => expect(r.rows.length).toBeGreaterThan(0) },
+  { name: "getItemProfitability", run: (w, id) => w.repository.getItemProfitability(f(id)), real: (r) => expect(r.rows.length).toBeGreaterThan(0) },
 ];
 
 describe("a report for an unknown fair is an error, not an empty report (S11-9)", () => {

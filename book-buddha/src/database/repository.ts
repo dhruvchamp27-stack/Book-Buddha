@@ -37,6 +37,12 @@ import {
   inventoryValuationDetail, stockAgeing,
   type InventoryValuationDetailReport, type StockAgeingReport, type StockReportFilter,
 } from "./reports-stock.js";
+import {
+  buildCollectionsReport, buildCustomerBalanceDetail, buildCustomerStatement,
+  type CollectionsReport, type CustomerBalanceDetail, type CustomerBalanceFilter,
+  type CustomerStatement, type CustomerStatementFilter,
+} from "./reports-customers.js";
+import { itemProfitability, type ItemProfitabilityFilter, type ItemProfitabilityReport } from "./reports-profitability.js";
 import { datedStockLayers, type DatedStockLayer } from "./stock-layers.js";
 import { advanceRunDate, isValidIsoDate, type RecurrenceFrequency } from "../accounting/recurrence.js";
 import { runMigrations } from "./migrations.js";
@@ -1240,6 +1246,26 @@ export class AccountingRepository {
    */
   public getInventoryValuationDetail(filter: StockReportFilter = {}): InventoryValuationDetailReport {
     return inventoryValuationDetail(this.db, filter);
+  }
+
+  /** Session 12, report 1. One customer's account with a running balance. See reports-customers.ts. */
+  public getCustomerStatement(filter: CustomerStatementFilter): CustomerStatement {
+    return buildCustomerStatement(this.db, filter);
+  }
+
+  /** Session 12, report 2. Every customer's unpaid documents; its total equals `getReceivables`. */
+  public getCustomerBalanceDetail(filter: CustomerBalanceFilter = {}): CustomerBalanceDetail {
+    return buildCustomerBalanceDetail(this.db, filter);
+  }
+
+  /** Session 12, report 3. The overdue subset of Customer Balance Detail, with contact details. */
+  public getCollections(filter: CustomerBalanceFilter = {}): CollectionsReport {
+    return buildCollectionsReport(this.db, filter);
+  }
+
+  /** Session 12, report 6. Revenue less cost of goods, per item. See reports-profitability.ts. */
+  public getItemProfitability(filter: ItemProfitabilityFilter = {}): ItemProfitabilityReport {
+    return itemProfitability(this.db, filter);
   }
 
   /** Stock-tracked items at or below their reorder threshold. Items with no threshold are skipped. */
@@ -2687,7 +2713,10 @@ export class AccountingRepository {
    * filters as the open-items query it reads, and ages against `asAtDate` (today when omitted),
    * which is passed in rather than read from the clock.
    */
-  public getReceivables(filter: { businessId?: string; customerId?: string; asAtDate?: string } = {}): readonly ReceivableRow[] {
+  public getReceivables(filter: { businessId?: string; customerId?: string; fairId?: string; asAtDate?: string } = {}): readonly ReceivableRow[] {
+    // A fair that does not exist is an error, not an empty list (R5). Opening balances belong to no
+    // fair, so under a fairId they are left out, exactly as Customer Balance Detail does.
+    assertReportFairExists(this.db, filter.fairId);
     // One definition of "what a customer still owes": the shared open-items query, which reads
     // invoices (less payments, applied credit and credit notes from the POSTED journal) and
     // opening balances alike. This method only reshapes its rows.
@@ -2696,6 +2725,7 @@ export class AccountingRepository {
     return this.openCustomerItemRows({
       ...(filter.businessId === undefined ? {} : { businessId: filter.businessId }),
       ...(filter.customerId === undefined ? {} : { customerId: filter.customerId }),
+      ...(filter.fairId === undefined ? {} : { fairId: filter.fairId }),
       // Same rule as the ageing report, so the two cannot disagree on what is outstanding:
       // a document dated after the as-at date did not exist then.
     }).filter((item) => filter.asAtDate === undefined || item.date.slice(0, 10) <= asAtDate).map((item) => ({
@@ -6580,7 +6610,7 @@ export class AccountingRepository {
    * The query itself now lives in `open-items.ts` so the customer reports can read it too; see the
    * note there. This is a pass-through and nothing about the rows changed when it moved.
    */
-  private openCustomerItemRows(filter: { businessId?: string; customerId?: string }): OpenCustomerItemRow[] {
+  private openCustomerItemRows(filter: { businessId?: string; customerId?: string; fairId?: string }): OpenCustomerItemRow[] {
     return openCustomerItemRows(this.db, filter);
   }
 
