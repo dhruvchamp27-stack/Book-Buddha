@@ -20,9 +20,19 @@
  * already answers that with 400 and the engine's own message. A missing attachment is answered
  * 404 by the route itself rather than thrown, because "not found" is not a validation failure.
  */
+import fs from "node:fs";
 import type Database from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
-import { getAttachment } from "../attachments/attachments.js";
+import { z } from "zod";
+import {
+  ATTACHMENT_ENTITY_TYPES,
+  deleteAttachment,
+  getAttachment,
+  getAttachmentPath,
+  listAttachments,
+  storeAttachment,
+  type AttachmentEntityType,
+} from "../attachments/attachments.js";
 import { RepositoryValidationError } from "../database/repository.js";
 
 /**
@@ -79,6 +89,106 @@ export function registerAttachmentRoutes(app: FastifyInstance, context: Attachme
     return attachment;
   });
 
-  // The remaining routes (upload, list by entity, download, delete) are R9's build work.
-  // An upload route MUST carry `bodyLimit: ATTACHMENT_BODY_LIMIT_BYTES`; see the note at the top.
+  // Upload. The `bodyLimit` is REQUIRED here (see the note at the top): without it Fastify's 1 MB
+  // default refuses any file over ~750 KB once it is base64.
+  app.post("/attachments", { bodyLimit: ATTACHMENT_BODY_LIMIT_BYTES }, async (request, reply) => {
+    const parsed = uploadBody.safeParse(request.body);
+    if (!parsed.success) {
+      throw new RepositoryValidationError(
+        parsed.error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; "),
+      );
+    }
+    const input = parsed.data;
+    const content = decodeStrictBase64(input.contentBase64);
+    const stored = asRequestError(() =>
+      storeAttachment(context.db, context.storageRoot, {
+        entityType: input.entityType as AttachmentEntityType,
+        entityId: input.entityId,
+        originalFilename: input.fileName,
+        mimeType: input.mimeType,
+        content,
+      }),
+    );
+    return reply.code(201).send(stored);
+  });
+
+  // Everything attached to ONE entity. Both parameters are required: there is deliberately no
+  // "list everything" route.
+  app.get<{ Querystring: { entityType?: string; entityId?: string } }>("/attachments", async (request) => {
+    const { entityType, entityId } = request.query;
+    if (typeof entityType !== "string" || entityType === "" || typeof entityId !== "string" || entityId === "") {
+      throw new RepositoryValidationError("Both entityType and entityId are required.");
+    }
+    if (!(ATTACHMENT_ENTITY_TYPES as readonly string[]).includes(entityType)) {
+      throw new RepositoryValidationError(`Unknown attachment entity type: ${entityType}.`);
+    }
+    return asRequestError(() => listAttachments(context.db, entityType as AttachmentEntityType, entityId));
+  });
+
+  // The bytes. Registered after `/attachments/:id`; Fastify matches the longer static suffix.
+  app.get<{ Params: { id: string } }>("/attachments/:id/content", async (request, reply) => {
+    const attachment = asRequestError(() => getAttachment(context.db, request.params.id));
+    if (attachment === null) {
+      return reply.code(404).send({ error: `Attachment ${request.params.id} was not found.` });
+    }
+    // getAttachmentPath re-proves the file sits directly inside storageRoot (defence in depth).
+    const filePath = asRequestError(() => getAttachmentPath(context.storageRoot, attachment));
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return reply.code(404).send({ error: `The file for attachment ${attachment.id} is missing from disk.` });
+      }
+      throw error;
+    }
+    return reply
+      .header("content-type", attachment.mimeType)
+      .header("content-disposition", contentDispositionFor(attachment.originalFilename))
+      .header("x-content-type-options", "nosniff")
+      .send(bytes);
+  });
+
+  app.delete<{ Params: { id: string } }>("/attachments/:id", async (request, reply) => {
+    const attachment = asRequestError(() => getAttachment(context.db, request.params.id));
+    if (attachment === null) {
+      return reply.code(404).send({ error: `Attachment ${request.params.id} was not found.` });
+    }
+    asRequestError(() => deleteAttachment(context.db, context.storageRoot, attachment.id));
+    return reply.code(204).send();
+  });
+}
+
+const uploadBody = z
+  .object({
+    entityType: z.string(),
+    entityId: z.string(),
+    fileName: z.string(),
+    mimeType: z.string(),
+    contentBase64: z.string(),
+  })
+  .strict();
+
+/**
+ * Decode base64 or refuse. `Buffer.from(x, "base64")` silently skips junk, so the text is checked
+ * against the strict alphabet and padding rules first: length a multiple of 4, `=` only at the end.
+ */
+export function decodeStrictBase64(text: string): Buffer {
+  if (text.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) {
+    throw new RepositoryValidationError("contentBase64 is not valid base64.");
+  }
+  return Buffer.from(text, "base64");
+}
+
+/**
+ * A `Content-Disposition` header that cannot be broken out of. `"`, `\` and control characters are
+ * removed from the quoted form (a CR/LF there would split the header); the quoted form is also
+ * limited to printable ASCII, and `filename*=` (RFC 5987) carries the real UTF-8 name.
+ */
+export function contentDispositionFor(fileName: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = fileName.replace(/[\u0000-\u001f\u007f"\\]/g, "");
+  const fallback = cleaned.replace(/[^\x20-\x7e]/g, "_") || "attachment";
+  const encoded = encodeURIComponent(cleaned).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
