@@ -135,5 +135,7 @@ describe("allocateProportionally (cash-basis cumulative target)", () => {
       }
       expect(recognised).toEqual(lines);
     }
-  });
+  }, 30_000); // Deterministic (fixed seed 20261115) but CPU-heavy: 2.1s alone, 5.3s against
+  // vitest's 5s default when the other 47 files compete for the machine. Not flakiness — the same
+  // cause and the same fix as the purchasing fuzz test in 49c31f9.
 });
