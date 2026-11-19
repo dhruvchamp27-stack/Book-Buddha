@@ -1,6 +1,8 @@
 import Fastify, { type FastifyContextConfig, type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { z } from "zod";
+import { registerAttachmentRoutes } from "./attachment-routes.js";
 import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
@@ -522,6 +524,31 @@ export interface BuildApiOptions {
    * here, in code, where a reader can see it.
    */
   readonly __unsafeDisableAuthForTests?: boolean;
+
+  /**
+   * Folder the attachment FILES live in (R9). The metadata rows live in the database like
+   * everything else; only the bytes are on disk.
+   *
+   * Omitted, it is derived from the database's own location — `attachments/` beside the database
+   * file — so a backup of the folder holding the database holds the documents too, which is what a
+   * single-PC offline app needs. An in-memory database has no folder, so it falls back to
+   * `attachments/` under the working directory; a test that stores anything should pass its own
+   * temporary folder rather than rely on that.
+   */
+  readonly attachmentStorageRoot?: string;
+}
+
+/**
+ * Where attachment files go. Kept as one function so the rule is in a single place: the explicit
+ * option wins, then the database's own folder, then the working directory.
+ *
+ * `db.name` is better-sqlite3's own record of what the connection was opened with — the database
+ * path for a file, the literal `:memory:` for an in-memory one.
+ */
+export function resolveAttachmentStorageRoot(databaseName: string, explicit?: string): string {
+  if (explicit !== undefined) return path.resolve(explicit);
+  if (databaseName === "" || databaseName === ":memory:") return path.resolve("attachments");
+  return path.join(path.dirname(path.resolve(databaseName)), "attachments");
 }
 
 export function buildApi(
@@ -1481,6 +1508,12 @@ export function buildApi(
   app.get("/reports/upcoming-recurring-invoices", async () => repository.getUpcomingRecurringInvoices());
   app.get("/reports/fair-sales", async (request) =>
     repository.getFairSales(parseBody(salesReportQuery, request.query)));
+
+  // ---- Attachments (R9). Their own file: they are the only routes that touch the file system.
+  registerAttachmentRoutes(app, {
+    db: repository.db,
+    storageRoot: resolveAttachmentStorageRoot(repository.db.name, options.attachmentStorageRoot),
+  });
 
   return app;
 }
