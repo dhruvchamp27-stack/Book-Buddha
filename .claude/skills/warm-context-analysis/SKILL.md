@@ -94,7 +94,7 @@ Don't just recommend it and wait. But respect the gate: saving state and restart
 
 1. **Confirm once (single line).** `"Verdict is HURTING — {one-line why}. Save state and start a fresh session. Go?"` Wait for the user's go. (If they self-invoked with an explicit "yes, restart," skip the confirm.)
 
-2. **Save the session's state.** Before anything closes, make sure what this session learned survives into the project's context files — update `context/HOT.md` (current status, blockers, next step) and any allied file that changed (`decisions.md`, `todos.md`), or run the project's end-of-session flow. The goal: a fresh session can pick up exactly where this one left off with nothing lost.
+2. **Save the session's state.** Before anything closes, make sure what this session learned survives into the project's context files — update `context/HOT.md` (current status, blockers, next step) and any allied file that changed (`decisions.md`, `Progress.md`), or run the project's end-of-session flow. The goal: a fresh session can pick up exactly where this one left off with nothing lost.
 
 3. **Start fresh and re-orient.** The user opens a new session and runs `/resume` so the fresh session loads the saved state. Confirm the new session came up with the right context before continuing the work.
 

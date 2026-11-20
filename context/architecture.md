@@ -3,7 +3,7 @@
 *On-demand allied file (not auto-loaded). Seeded 2026-11-14 from the repo docs.
 Sources cited inline: DD = spec/Design Document (9 Nov), ARCH = ARCHITECTURE_AND_DATABASE.md,
 PROTO = book-buddha/ prototype files. Anything uncertain is flagged — do not treat
-this as settled truth; see `decisions.md` and `todos.md` for open conflicts.*
+this as settled truth; see `decisions.md` and `Progress.md` → Open to-dos and questions for open conflicts.*
 
 ## Two realities (read this first)
 The repo holds **two different things** and they do not fully agree:
@@ -15,7 +15,7 @@ The repo holds **two different things** and they do not fully agree:
 Do **not** assume a target screen or table already exists in the prototype. Label work
 as **Target** or **Current prototype**. The README/handoffs say "nothing is built,"
 which is stale — the prototype exists and self-reports passing tests. (conflict, see
-`todos.md`)
+`Progress.md` → Open to-dos and questions)
 
 ## Target architecture (ARCH §3–§4, DD §2)
 Browser UI (React) → local app over HTTP/JSON on localhost. Layers:
@@ -39,7 +39,7 @@ checks at startup and before backup/restore.
 
 ## Technology stack
 - **Target spec:** sets no formal language/framework; names SQLite as the DB and
-  React for UI. Formal stack choice is still officially "pending" (see `todos.md`).
+  React for UI. Formal stack choice is still officially "pending" (see `Progress.md` → Open to-dos and questions).
 - **Current prototype (PROTO package.json / tsconfig / vite.config / README):**
   TypeScript (strict, ES2022, NodeNext) · SQLite via `better-sqlite3` ^13 ·
   **Fastify** ^5 API · **Zod** ^4 validation · **React 19** + **Vite 7** frontend
@@ -51,7 +51,7 @@ checks at startup and before backup/restore.
   (IMPLEMENTATION_PROGRESS). Packaging is last in the delivery order.
 - **PDF/OCR (from Feature Design):** cites pdfplumber / Camelot (Python) and
   Tesseract / PaddleOCR — note these are Python, while the prototype is TypeScript.
-  Unresolved (see `todos.md`).
+  Unresolved (see `Progress.md` → Open to-dos and questions).
 
 ## Prototype structure & progress (PROTO/IMPLEMENTATION_PROGRESS.md — self-reported, unverified)
 Top level: `src/` (accounting/types.ts, accounting/engine.ts, database/schema.ts,

@@ -15,7 +15,7 @@ himself. No file names in the table, no jargon, no commit hashes in the headline
 
 > **Never report a status you have not just measured.**
 >
-> Do not recite status from `HOT.md`, from `IMPLEMENTATION_PROGRESS.md`, from a
+> Do not recite status from `HOT.md`, from `context/Progress.md`, from a
 > previous reply, or from memory. Those tell you what *was* true when someone
 > last wrote them down. Go and look at the code.
 
@@ -67,6 +67,10 @@ find book-buddha/web/src -name '*.tsx' -o -name '*.ts' | xargs wc -l | tail -1
 
 Add probes as the project grows. **Each row you print must have a probe behind
 it.** If you cannot measure something, say "I could not check this" — never guess.
+
+**The list of slices** may come from the "Development — by slice" table in the
+summary of `context/Progress.md`. The table only tells you *which* slices to
+measure; every State and every "what is left" is still measured off the code.
 
 ## Step 2 — The gates
 

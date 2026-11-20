@@ -46,6 +46,29 @@ function Write-BriefingBlock($HotPath, $ContextPath, $HeaderLine) {
     Get-Content -Raw -Encoding UTF8 $HotPath
     Write-Output "<<< END HOT >>>"
     Write-Output ""
+    # Progress.md: load ONLY the summary above the END OF SUMMARY marker (the
+    # working area below it is on-demand). Missing file or missing marker must
+    # never break the briefing: no file -> one line saying so; no marker -> the
+    # first 50 lines, flagged, so a broken marker is visible rather than silent.
+    $PROGRESS = Join-Path $ContextPath "Progress.md"
+    Write-Output "<<< BEGIN PROGRESS SUMMARY >>>"
+    if (Test-Path $PROGRESS) {
+        $PLINES = @(Get-Content -Encoding UTF8 $PROGRESS)
+        $CUT = -1
+        for ($i = 0; $i -lt $PLINES.Count; $i++) {
+            if ($PLINES[$i] -like "*END OF SUMMARY*") { $CUT = $i; break }
+        }
+        if ($CUT -ge 0) {
+            if ($CUT -gt 0) { $PLINES[0..($CUT - 1)] }
+        } else {
+            Write-Output "(WARNING: no END OF SUMMARY marker in Progress.md - showing first 50 lines; fix the marker)"
+            $PLINES | Select-Object -First 50
+        }
+    } else {
+        Write-Output "(Progress.md not found at $PROGRESS - tell the user.)"
+    }
+    Write-Output "<<< END PROGRESS SUMMARY >>>"
+    Write-Output ""
     Write-Output "HOW TO USE THIS ON YOUR FIRST REPLY:"
     Write-Output "- If the user's first message is a greeting or vague (e.g. 'hi', 'where were we?'),"
     Write-Output "  give the FULL briefing - follow the session-start skill exactly."
@@ -56,8 +79,9 @@ function Write-BriefingBlock($HotPath, $ContextPath, $HeaderLine) {
     Write-Output "- Never state status from memory - read the file or ask."
     Write-Output "- Context folder: $ContextPath"
     Write-Output "- Hook that produced this: $PSCommandPath"
-    Write-Output "- On-demand only, do NOT auto-read: architecture.md, decisions.md, todos.md"
-    Write-Output "  (in that folder) - open one only when the task needs it."
+    Write-Output "- On-demand only, do NOT auto-read: architecture.md, decisions.md, and the"
+    Write-Output "  working area of Progress.md (below its marker) - open one only when the task needs it."
+    Write-Output "- CBM first (hard rule 11): codebase-memory tools before whole-file reads or grep."
     Write-Output "========================================================================="
 }
 

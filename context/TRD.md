@@ -38,7 +38,7 @@
 ## 3. Technology stack (status: formally "pending")
 - **Spec-level:** no formal language/framework chosen. Spec names only **SQLite** (DB)
   and **React** (UI). The formal stack choice is recorded as **pending** *(ARCH, citing
-  todos.md)*.
+  Progress.md → Open to-dos and questions)*.
 - **Prototype actually uses** *(prototype — unverified; ARCH from package.json/tsconfig/
   vite.config)*: TypeScript (strict, ES2022, NodeNext) · Fastify ^5 (API) · better-sqlite3
   ^13 · Zod ^4 (validation) · React 19 · Vite 7 (web root, `/api` → :3000, dev :5173) ·
@@ -123,7 +123,7 @@
 - **Rounding:** **DECISION PENDING / CONTESTED.** DD §7.4 + PRD §5.5/§9 round invoice &
   quotation **totals** to the nearest whole rupee (50p up), receipts keep paise ("adopted
   12 Nov 2026 from Magazine PRD v4"); DEC marks this **contested** — ANTI and the test
-  files say **exact paise**. Lock before building any totals math *(see `todos.md`)*.
+  files say **exact paise**. Lock before building any totals math *(see `Progress.md` → Open to-dos and questions)*.
 - **Tax:** optional; user-named names/rates; **per item line**; inclusive or exclusive;
   tax-exempt option; optional GSTIN *(DD §13.1; PRD §5.11)*. *(Prototype diverges —
   invoice-level CGST/SGST/IGST — ARCH.)* GST legal classification recorded **unconfirmed**
@@ -151,7 +151,7 @@
 - See `Testing.md` for the full test plan.
 
 ## 10. Open technical decisions
-Carried in `todos.md`; the live ones that gate building:
+Carried in `Progress.md` → Open to-dos and questions; the live ones that gate building:
 - Formal **tech-stack** confirmation *(ARCH)*.
 - **Desktop packaging** — Tauri vs Electron *(ARCH)*.
 - **PDF/OCR** library + language (Python vs TS) *(ARCH)*.

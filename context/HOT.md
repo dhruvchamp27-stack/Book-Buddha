@@ -21,7 +21,7 @@ outstanding R1, R2, R4, R4b, R5, R7, R8.** All six §13 reports DONE and reachab
 ## NEXT STEP — resume here, nothing is half-built
 **R10 import / export** (spec §14.1–14.2, REMAINING_BUILD_PLAN S10). Needs a DESIGN first — a
 shared preview → column-map → review → post engine (CSV + JSON; .xlsx/PDF need an install =
-ask). Write a definitions file like `REPORT_DEFINITIONS_S12.md`, then a brief, then Sonnet builds.
+ask). Write the definitions into `Progress.md` → Definitions, then a brief in Progress.md → Active briefs, then Sonnet builds.
 Then R12 banking (accounts, transfers, reconciliation; §D6 two Uncategorized first, S11-8).
 
 ## Waiting on him (ask when a slice touches it, not as a batch)
@@ -42,5 +42,5 @@ Then R12 banking (accounts, transfers, reconciliation; §D6 two Uncategorized fi
 ## Workflow
 Gates from `book-buddha/`: `tsc.cmd` **first** · `vitest.cmd run --root .` · `vite.cmd build` —
 **never through a pipe; READ the count.** **An `ACCEPTANCE` test going red = STOP.** Two Sonnet
-builders in parallel on DISJOINT files, briefs written to `context/BRIEF_*.md` first; Haiku for
+builders in parallel on DISJOINT files, briefs written into `Progress.md` → Active briefs first; Haiku for
 search; CBM for navigation; I review, mutation-prove, gate and commit one slice per commit.

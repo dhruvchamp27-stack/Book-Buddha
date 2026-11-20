@@ -35,14 +35,17 @@ Resolution order — stop at the first that matches:
 Everywhere below, `<CONTEXT>/` means the folder resolved here.
 
 **Note on the hook:** the SessionStart hook auto-loads the **root layout's**
-HOT only. In the per-automation layout nothing may be pre-loaded — in that
-case read the single resolved `<CONTEXT>/HOT.md`, and nothing else.
+`HOT.md` and the summary at the top of `Progress.md` (everything above its
+`<!-- END OF SUMMARY ... -->` marker). In the per-automation layout nothing may be
+pre-loaded — in that case read only the resolved `<CONTEXT>/HOT.md` and
+`<CONTEXT>/Progress.md` summary, and nothing else.
 
 ## The one rule that keeps startup lean
 
 > ⚠️ **LOAD ALLIED FILES ONLY WHEN NEEDED.**
-> Work from `<CONTEXT>/HOT.md` alone by default. Do **NOT** auto-read
-> `todos.md`, `decisions.md`, or `architecture.md` at startup. Read one of them
+> Work from `<CONTEXT>/HOT.md` and the `Progress.md` summary by default. Do **NOT**
+> auto-read `decisions.md`, `architecture.md`, or the working area of `Progress.md`
+> (active briefs, history) at startup. Read one of them
 > **only** when the actual task in front of you needs that depth (e.g. the user
 > asks about the task list, or about *why* a past decision was made). Every file
 > you read at startup is context you're spending — the whole point of this skill
@@ -52,14 +55,14 @@ case read the single resolved `<CONTEXT>/HOT.md`, and nothing else.
 
 1. **Do NOT read handoff files.** Ignore anything under `handoffs/`. That is the old system and reading it is exactly the double-load this skill exists to avoid.
 
-2. **Work from `<CONTEXT>/HOT.md`** — resolved in Step 0. In the root layout it's already in context from the hook (no re-read needed unless it's missing); in the per-automation layout, read that one file.
+2. **Work from `<CONTEXT>/HOT.md` and the summary of `<CONTEXT>/Progress.md`** — resolved in Step 0. Read only the part of `Progress.md` above its `<!-- END OF SUMMARY ... -->` marker. In the root layout both are already in context from the hook (no re-read needed unless missing); in the per-automation layout, read those files only.
 
 3. **Give the plain-English briefing** — five short sections, bullet points, no jargon (the reader is an accountant, not an engineer):
    - **Project** — one line on what this project is.
    - **Last session** — read the `## Last session` line at the top of HOT and say what the previous session did.
    - **Current state** — what's built, what works, what's broken (from HOT's "Active now" / "Broken / blocked").
    - **Next steps** — the immediate items, highest priority first.
-   - **Open items** — anything unresolved or waiting on the team.
+   - **Open items** — anything unresolved or waiting on the team: HOT's "Broken / blocked" plus the **Known Issues** section of the `Progress.md` summary.
 
 4. **Show "what changed since last session"** — this comes straight from the `## Last session` line in HOT. If that line is missing, say so plainly (it means the previous session didn't run `/session-end`).
 
@@ -67,7 +70,8 @@ case read the single resolved `<CONTEXT>/HOT.md`, and nothing else.
 
 ## When to pull in an allied file (on demand only)
 
-- User asks about the task list, or "what's left" in detail → read `<CONTEXT>/todos.md`.
+- User asks about the task list, or "what's left" in detail → read the "Open to-dos and questions" section of the working area in `<CONTEXT>/Progress.md` (below the marker).
+- User asks about a brief in progress → read "Active briefs" in `<CONTEXT>/Progress.md`.
 - User asks *why* something was decided, or the history behind a choice → read `<CONTEXT>/decisions.md`.
 - User asks how a part is wired / where a file goes → read `<CONTEXT>/architecture.md`.
 

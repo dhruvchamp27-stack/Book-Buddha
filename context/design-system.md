@@ -46,7 +46,7 @@
 - Money numerals: integer-paise storage means totals display needs a consistent money
   format (tabular/aligned figures recommended); the **rounding display** rule is still
   **DECISION PENDING** (whole-rupee shows amount-before-rounding + round-off line + final
-  total; receipts keep paise) *(DD §7.4 — contested, see `todos.md`)*.
+  total; receipts keep paise) *(DD §7.4 — contested, see `Progress.md` → Open to-dos and questions)*.
 
 ## 5. Layout & spacing
 - Grid / spacing scale / density: **OWNER DECISION — not in docs.**

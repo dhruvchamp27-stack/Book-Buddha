@@ -1,6 +1,6 @@
 ---
 name: session-end
-description: "Close out a work session cleanly by saving its state into the context files, so a fresh session can pick up with nothing lost. Updates HOT (current status, blockers, next step), overwrites the one-line 'Last session' summary at the top, and updates any allied file that actually changed. Use when the user says 'wrap up', 'close the session', 'end of session', 'save state', 'close out', 'done for today', 'end session', '/session-end'. Writes NO fat handoff note — the context files ARE the handoff."
+description: "Close out a work session cleanly by saving its state into the context files, so a fresh session can pick up with nothing lost. Updates HOT (current status, blockers, next step), overwrites the one-line 'Last session' summary at the top, refreshes the Progress.md summary and working area, and updates any allied file that actually changed. Use when the user says 'wrap up', 'close the session', 'end of session', 'save state', 'close out', 'done for today', 'end session', '/session-end'. Writes NO fat handoff note — the context files ARE the handoff."
 ---
 
 # /session-end — Save state, lean and pure
@@ -37,12 +37,17 @@ automation's files; never touch a sibling automation's context.
 ## The one rule that keeps things lean
 
 > ⚠️ **TOUCH ONLY WHAT CHANGED.**
-> Always update `<CONTEXT>/HOT.md`. Update an allied file
-> (`todos.md`, `decisions.md`, `architecture.md`) **only if this session
-> actually changed something it covers** — a task completed, a new decision
-> made, a piece of wiring changed. Do **not** open or rewrite an allied file
-> that didn't change. Reading files you don't need to touch just burns context
-> for no reason.
+> Always update `<CONTEXT>/HOT.md` and `<CONTEXT>/Progress.md`. Update an allied file
+> (`decisions.md`, `architecture.md`, `database.md`, `Testing.md`, and so on)
+> **only if this session actually changed something it covers** — a task completed,
+> a new decision made, a piece of wiring changed. Do **not** open or rewrite an
+> allied file that didn't change. Reading files you don't need to touch just burns
+> context for no reason.
+>
+> ⚠️ **NO NEW FILES IN `<CONTEXT>/`.** The folder is closed. Briefs go into
+> `Progress.md` → "Active briefs"; definitions into `Progress.md` → "Definitions".
+> Never create a `BRIEF_*` file, a handoff, or any other new file there without
+> Dhruv's approval.
 
 ## What to do
 
@@ -60,17 +65,34 @@ automation's files; never touch a sibling automation's context.
    one line is what `/session-start` reads back as "what changed since last
    session," and what a future notification hook will message out.
 
-3. **Update any allied file that changed** (per the rule above):
-   - Completed or new tasks → `<CONTEXT>/todos.md`.
+3. **Update `<CONTEXT>/Progress.md`** — it has two parts, split by the
+   `<!-- END OF SUMMARY ... -->` marker:
+   - **Summary (above the marker, under 50 lines in total):**
+     - Rewrite **Start here next session** (the first step, in plain words).
+     - Update the **Development — by slice** table for any slice this session touched.
+     - Refresh **Testing** (the last recorded gate results, with the date).
+     - Refresh **Known Issues**.
+     - Add this session to **Last 3 sessions** and drop the oldest, so only 3 remain.
+   - **Working area (below the marker):**
+     - Move finished briefs from **Active briefs** to **History — closed briefs**
+       as 2–4 line entries (what it was, outcome, date).
+     - Update **Open to-dos and questions** (add new items, close done ones).
+     - Add to **Definitions** or **Rules and lessons carried forward** only if this
+       session made one.
+   - Keep the summary under 50 lines. If it is over, move detail down into the working area.
+
+4. **Update any allied file that changed** (per the rule above):
    - A new decision + its reasoning → `<CONTEXT>/decisions.md`.
    - Changed wiring / structure → `<CONTEXT>/architecture.md`.
+   - Changed database shape → `<CONTEXT>/database.md`.
+   - Changed test approach → `<CONTEXT>/Testing.md`.
 
-4. **Write NO per-session record.** No handoff note, no SESSIONS.md, no lean note.
+5. **Write NO per-session record.** No handoff note, no SESSIONS.md, no lean note.
    The record of "what happened" lives in HOT's `Last session` line, the
-   allied files, and the logs — and will later be messaged out by a notification
-   hook.
+   `Last 3 sessions` list in `Progress.md`, the allied files, and the logs — and
+   will later be messaged out by a notification hook.
 
-5. **Confirm before finishing** — briefly tell the user which files you updated
+6. **Confirm before finishing** — briefly tell the user which files you updated
    (full paths, and in a per-automation project name the automation), and what the
    next session's first step is, so they can review (they review after; you edit).
 

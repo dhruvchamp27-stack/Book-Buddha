@@ -26,7 +26,7 @@ Status values: `NOT RUN` · `PASS` · `FAIL` · `BLOCKED`. One row per concrete 
       **confirm per-line (DD) vs prototype invoice-level**)*
 - [ ] **Rounding — LOCK THE RULE FIRST** (whole-rupee: show amount-before-rounding +
       round-off line + final total, receipts keep paise — DD §7.4; vs exact-paise — DEC/
-      ANTI). **Conflict, see `todos.md`** *(seed: DD §7.4)*
+      ANTI). **Conflict, see `Progress.md` → Open to-dos and questions** *(seed: DD §7.4)*
 - [ ] FIFO cost & COGS correct across layers; restoration on cancel/credit *(seed: DD §6.3)*
 - [ ] Cash vs accrual recognition; partial payments never over-recognise; cash from actual
       allocations *(seed: DD §4.5)*
@@ -158,7 +158,7 @@ Credit notes):
       §5.10, FEAT §10, all ~12 Nov) list **17** reports (9 fixed + 8 accepted additions);
       DEC Q4 (9 Nov) still says **8 fixed + a simple builder**. The 17-list is the later
       accepted position unless the owner says otherwise — **confirm** *(conflict, see
-      `todos.md`)*
+      `Progress.md` → Open to-dos and questions)*
 - [ ] `TODO`: tie each confirmed report back to the journals
 
 ## B4. Data in/out (from your seat)
@@ -187,7 +187,7 @@ Credit notes):
 - [ ] All Part A rows PASS
 - [ ] All Part B flows PASS and personally signed off
 - [ ] All acceptance sheets VERIFIED COMPLETE (only the owner sets this) *(seed: ANTI §6)*
-- [ ] Open conflicts in `todos.md` resolved for shipped features (rounding, tax placement,
+- [ ] Open conflicts in `Progress.md` → Open to-dos and questions resolved for shipped features (rounding, tax placement,
       report count, archive, challan↔invoice link)
 - [ ] `TODO`: anything else you require before real data goes in
 
