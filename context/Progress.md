@@ -6,7 +6,7 @@
 - **Waiting on Dhruv:** odd-paise ruling (blocks bill discount); attachment audit log; purchase-return back-dating warning; the other Claude session in this folder; delete AGENT_BRIEF_R9_ROUTES.md?
 - **Branch and gates (measured 19 Nov):** `autonomous/book-buddha-finish`, never `main`. tsc exit 0 · 714 tests in 56 files · vite built in 1.18s · migration v22.
 - **Push rule:** only after the tests pass, in the background, and only after asking Dhruv each time. Count unpushed commits fresh with `git log --oneline @{u}..HEAD`.
-- **After R10:** bill discount (blocked) → R12 banking (amend FD §D6 first) → run all tests together and check the backend end to end (standing order S12-3).
+- **After R10:** bill discount (blocked) → R12 banking (amend FD §D6 first) → run all tests together and check the backend end to end (standing order S12-3) → then R13 cash flow (S14-2).
 
 ## Development — by slice
 | Slice | What it does | Built | Tests | Accepted by Dhruv |
@@ -20,6 +20,7 @@
 | R10 | CSV and JSON import/export (S10) | ⬜ design first | — | — |
 | R11 | Offline backup, restore, integrity check (S11) | ✅ | 16 + 7 | parked |
 | R12 | Bank accounts, transfers, reconciliation (S12) | ⬜ | — | — |
+| R13 | Cash Flow Statement (S13) | ⬜ after the all-together test run (S14-2) | — | — |
 | R14 | Archive: active, inactive, archived (S14) | deferred (S12-4) | — | — |
 | §13 reports 1–6 | Customer, stock and profit reports | ✅ | in gate | parked |
 | S10-4 | Stock write-down and reversal (v22) | ✅ | 15 | parked |

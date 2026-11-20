@@ -5,7 +5,7 @@
 work and build everything till R12. Then till R12 will run all the tests for pending ones and the
 newly build and check the backend end to end." So: **acceptance is PARKED**, build to **R12**, then
 run everything together. **R14 deferred (S12-4).** Remaining order: **R10 import/export → bill
-discount (blocked) → R12 banking → the all-together test run.** R11 was built before R10 (S13-4).
+discount (blocked) → R12 banking → the all-together test run → R13 cash flow (S14-2).** R11 was built before R10 (S13-4).
 
 ## Last session
 Session 13 (19 Nov) — six commits, all pushed: reports 1–3 + 6 built and routed, R9 attachment

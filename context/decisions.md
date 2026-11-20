@@ -7,6 +7,18 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S14-2 (2026-11-20) — HIS RULING: R13 CASH FLOW STATEMENT COMES AFTER THE ALL-TOGETHER TEST
+  RUN.** He spotted that R13 was missing from Progress.md's slice table. It is not built (only the
+  account-class groundwork exists, `chart-accounts-schema.ts`). The S12-3 standing order stops at
+  R12, so asked whether R13 joins the build before testing: **no**. Order stays R10 → bill
+  discount → R12 → test everything together → **then R13**.
+
+- **S14-1 (2026-11-20) — HIS SETUP: ORCHESTRATOR AND WORKERS, CLOSED CONTEXT FOLDER.** Main
+  session plans, briefs and checks; Sonnet/Haiku workers; context folder closed to ten files;
+  `Progress.md` (≤50-line summary + working area) auto-loaded with HOT; CBM first for all agents.
+  Nine leftover context files merged into Progress.md and removed. Autocompact left at 300K by
+  his choice. Commit `b81cdcf`.
+
 - **S13-5 (2026-11-19) — PAUSED BY HIM, NOTHING HALF-BUILT, EVERYTHING PUSHED.** Session 13 built
   and pushed six slices: reports 1–3 (`9cd1838`), report 6 (`cf84fe9`), routes for all four +
   `getReceivables` fair filter (`9cd503c`), R9 attachment routes 2–5 (`fa4ab42`), S10-4 stock-entry
