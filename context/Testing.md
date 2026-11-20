@@ -64,8 +64,8 @@ Status values: `NOT RUN` · `PASS` · `FAIL` · `BLOCKED`. One row per concrete 
       invoice line *(seed: DD §9.2, §9.4)*
 - [ ] Customer delete allowed only with no linked records; Phase-1 delete is Admin-only
       *(seed: DD §5.9, §2.4)*
-- [ ] Import: a failed row is skipped and collected; the import does not abort
-      *(seed: DD §14.1)*
+- [x] Import: a failed row is skipped and collected; the import does not abort
+      *(seed: DD §14.1)* — automated in `src/import-export/import-engine.test.ts` (R10, session 14)
 - [ ] `TODO`: endpoint contract/error-envelope tests — **envelope & status codes not
       specified in docs**, define at build time
 
@@ -164,7 +164,7 @@ Credit notes):
 ## B4. Data in/out (from your seat)
 - [ ] .xlsx / CSV import: two-phase preview (auto delimiter/encoding) → column map; failed
       rows skipped & listed; multi-row invoices grouped by document number; duplicate
-      products update *(seed: DD §14.1)*
+      products update *(seed: DD §14.1)* — CSV built and tested (R10); .xlsx needs an install; owner check pending
 - [ ] Export to Excel / CSV / PDF across lists and reports; customer & settlement
       statements PDF/Excel *(seed: DD §14.2, §5.7, §11.6)*
 - [ ] Challan print layout substitutes shipping address and suppresses cost/line-totals/tax

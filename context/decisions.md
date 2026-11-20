@@ -7,6 +7,25 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S14-4 (2026-11-20) — R10 IMPORT/EXPORT BUILT, NOT PUSHED.** Four commits: `9037872` codec,
+  `098ce15` exports, `d2fa92b` import engine + masters + documents + routes, `aecc96a` end-to-end
+  checks. Gates on the final tree: tsc 0 · 856 tests / 64 files · vite 1.23s; migration still v22.
+  Orchestrator choices awaiting his confirmation: equal payments in one file import once; payments
+  also refused on/before the opening date; imported credit notes auto-confirm back-dating. Not
+  built: .xlsx/PDF (install), expenses import.
+
+- **S14-3 (2026-11-20) — HIS RULINGS FOR R10 IMPORT.** (1) Imported past invoices and bills are
+  **posted** (finalized on their own dates), not left as drafts. (2) A document dated **on or
+  before** the opening-balance date is **refused** and listed — it would count twice against the
+  opening receivables/payables. (3) An imported invoice line naming an item **reduces stock** by
+  FIFO like a normal invoice (short stock → that invoice refused). (4) A customer/supplier whose
+  name or GSTIN already exists is **skipped and listed**. He asked about creating sub-customers
+  instead; that would change the finished customer slice (schema), so the recommended option
+  stands. Also set by the orchestrator, not him: a failed document is skipped and collected
+  (spec §14.1 wins over the finishing plan's "atomic"); the unit of atomicity is one document;
+  dates use the format chosen in the column map, never guessed; CSV + JSON only (xlsx/PDF =
+  install, ask). Full design: Progress.md → Definitions → R10.
+
 - **S14-2 (2026-11-20) — HIS RULING: R13 CASH FLOW STATEMENT COMES AFTER THE ALL-TOGETHER TEST
   RUN.** He spotted that R13 was missing from Progress.md's slice table. It is not built (only the
   account-class groundwork exists, `chart-accounts-schema.ts`). The S12-3 standing order stops at

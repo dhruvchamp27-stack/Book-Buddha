@@ -120,6 +120,29 @@ wiring is deliberately thin — **no new table and no migration** (v17 is still 
   the backfill (check-only first). Reports load on mount, so the tie-out is never read
   off an empty trial balance. Still no UI tests, and `web/` is still ungated (S6-4).
 
+### Import / export — VERIFIED as built, session 14 (R10)
+New folder `src/import-export/`; **no migration** (still v22). Every write goes through public
+`AccountingRepository` methods, so posting, validation and the audit log are the normal ones.
+- **`codec.ts`** — pure file reading: encoding (BOM → UTF-8 → Windows-1252), delimiter
+  detection, RFC 4180 CSV, flat JSON; rupees → paise by string arithmetic; dates in the format
+  the user picks in the column map (never guessed).
+- **`import-engine.ts`** — stateless two-phase: `inspect` → `preview` → `commit`. One outer
+  transaction per run; each record or document (rows grouped by Number) is a nested savepoint,
+  so a failure is skipped and listed while the rest post. PREVIEW runs the same path and always
+  rolls back. The kind registry is `registeredKinds()` (a function, because masters/documents
+  and the engine import each other).
+- **`import-masters.ts`** — customers, suppliers (duplicate name/GSTIN → skipped), items (same
+  name → updated; opening stock on new items), opening balances (general, customer, supplier).
+- **`import-documents.ts`** — invoices, purchase bills, credit notes, customer and supplier
+  payments: posted on their own dates; refused on or before the latest opening-balance date;
+  existing number → skipped (rulings S14-3).
+- **`exports.ts`** — 11 datasets to CSV (BOM, CRLF, formula guard) or JSON; documents one row
+  per line, headers = the importer's labels, so an export re-imports.
+- **Routes** (`src/api/import-routes.ts`, `export-routes.ts`, wired in `buildApi`):
+  `GET /imports/kinds`, `POST /imports/inspect|preview|commit` (20 MB body limit, base64 JSON),
+  `GET /exports/:dataset?format=csv|json`. All behind the fail-closed auth hook.
+- **Not built:** .xlsx and PDF (need a package install), expenses import.
+
 ## Prototype vs spec — known divergences (ARCH §6)
 - One `invoices` table for drafts/quotes/finalised/cancelled (ARCH §6 wants a
   deliberate choice; target uses a common `documents` header).
