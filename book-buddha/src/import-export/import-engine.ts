@@ -13,6 +13,9 @@
  * and then throws a private sentinel at the end of the outer transaction so everything rolls back:
  * the preview is exactly what commit will do. COMMIT keeps it.
  *
+ * FORMULA GUARD. Mapping a cell also undoes the export's `'` guard (see `stripFormulaGuard`), so an
+ * export -> import round trip stores exactly what was exported, in every kind.
+ *
  * REGISTRY. `registeredKinds()` is the single list of kinds. It is a FUNCTION, evaluated at call
  * time, on purpose: `import-masters.ts` imports `ImportRowError` from this file at run time, and
  * this file imports the master kinds from it, so the two files form an import cycle. A top-level
@@ -158,6 +161,16 @@ class PreviewRollback extends Error {
   }
 }
 
+/**
+ * The CSV export prefixes a text cell that begins with = + - @ tab or CR with a `'` so a spreadsheet
+ * never runs it as a formula (`exports.ts`). Reading the file back removes that one guard `'`, so
+ * the stored value is the original ("'+91 98765 43210" -> "+91 98765 43210"). Only a `'` followed
+ * by one of those characters is a guard; any other leading apostrophe is real text and is kept.
+ */
+export function stripFormulaGuard(cell: string): string {
+  return /^'[=+\-@\t\r]/.test(cell) ? cell.slice(1) : cell;
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -178,7 +191,7 @@ export function runImport(input: RunImportInput): ImportResult {
     for (const field of definition.fields) {
       const header = input.columnMap[field.key];
       const index = header === undefined ? undefined : indexOf.get(header);
-      values[field.key] = index === undefined ? "" : (row.cells[index] ?? "").trim();
+      values[field.key] = index === undefined ? "" : stripFormulaGuard((row.cells[index] ?? "").trim());
     }
     return { rowNumber: row.rowNumber, values };
   });

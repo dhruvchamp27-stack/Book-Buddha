@@ -32,6 +32,11 @@
  *    importer posts live documents only, it never resurrects a cancelled one.
  *  - A document whose number already exists is SKIPPED before any other check, so re-running a file
  *    is always safe, whatever has changed since.
+ *  - Speed. "Already exists" and name lookups would otherwise re-read whole lists once per document
+ *    (quadratic). Each run keeps ONE index per list, built on first use and cached against the
+ *    run's context object (the engine hands every unit the same one). A document is added to an
+ *    index only AFTER all its writes have succeeded (the last step of `post`), so a unit that
+ *    throws - and is rolled back by its savepoint - never leaves a ghost entry behind.
  *  - A payment identical in document, amount and date to a non-cancelled one is SKIPPED, which also
  *    means two genuinely equal payments on the same day are imported once. That is the S14-3 rule.
  */
@@ -94,7 +99,10 @@ function latestOpeningDate(repository: AccountingRepository, businessId: string)
 }
 
 function assertAfterOpening(context: ImportContext, businessId: string, date: string, what: string): void {
-  const opening = latestOpeningDate(context.repository, businessId);
+  const cache = cacheOf(context);
+  // Document runs never write opening balances, so the date is read once per run.
+  cache.openingDate ??= { value: latestOpeningDate(context.repository, businessId) };
+  const opening = cache.openingDate.value;
   if (opening !== undefined && date <= opening) {
     throw new ImportRowError(
       `${what}: dated on or before the opening balances of ${opening} — would count twice (the document is dated ${date}).`,
@@ -144,20 +152,82 @@ interface Lookups {
   fair(name: string): { id: string };
 }
 
+// ---------------------------------------------------------------- per-run indexes (speed)
+interface NumberedRef { readonly id: string; readonly number: string }
+interface NamedRef { readonly id: string; readonly name: string }
+interface RunCache {
+  invoices?: Map<string, NumberedRef>;
+  bills?: Map<string, NumberedRef>;
+  creditNotes?: Set<string>;
+  openingDate?: { value: string | undefined };
+  lists?: Partial<Record<"customers" | "suppliers" | "items" | "fairs", Map<string, NamedRef[]>>>;
+}
+const runCaches = new WeakMap<ImportContext, RunCache>();
+function cacheOf(context: ImportContext): RunCache {
+  let cache = runCaches.get(context);
+  if (cache === undefined) {
+    cache = {};
+    runCaches.set(context, cache);
+  }
+  return cache;
+}
+
+function invoiceIndex(context: ImportContext, businessId: string): Map<string, NumberedRef> {
+  const cache = cacheOf(context);
+  if (cache.invoices === undefined) {
+    const map = new Map<string, NumberedRef>();
+    for (const i of context.repository.listInvoices(businessId)) map.set(normaliseName(i.number), { id: i.id, number: i.number });
+    cache.invoices = map;
+  }
+  return cache.invoices;
+}
+
+function billIndex(context: ImportContext, businessId: string): Map<string, NumberedRef> {
+  const cache = cacheOf(context);
+  if (cache.bills === undefined) {
+    const map = new Map<string, NumberedRef>();
+    for (const b of context.repository.listPurchaseBills({ businessId })) map.set(normaliseName(b.number), { id: b.id, number: b.number });
+    cache.bills = map;
+  }
+  return cache.bills;
+}
+
+/** Normalised numbers of the business's credit notes. */
+function creditNoteIndex(context: ImportContext, businessId: string): Set<string> {
+  const cache = cacheOf(context);
+  if (cache.creditNotes === undefined) {
+    const invoiceIds = new Set([...invoiceIndex(context, businessId).values()].map((i) => i.id));
+    cache.creditNotes = new Set(
+      context.repository.listCreditNotes().filter((n) => invoiceIds.has(n.invoiceId)).map((n) => normaliseName(n.number)),
+    );
+  }
+  return cache.creditNotes;
+}
+
 function lookups(context: ImportContext): Lookups {
   const r = context.repository;
-  const one = <T extends { id: string; name: string }>(kindName: string, list: readonly T[], name: string): T => {
-    const wanted = normaliseName(name);
-    const hits = list.filter((x) => normaliseName(x.name) === wanted);
+  const one = (which: "customers" | "suppliers" | "items" | "fairs", kindName: string, load: () => readonly NamedRef[], name: string): NamedRef => {
+    const cache = cacheOf(context);
+    cache.lists ??= {};
+    let byName = cache.lists[which];
+    if (byName === undefined) {
+      byName = new Map();
+      for (const x of load()) {
+        const key = normaliseName(x.name);
+        byName.set(key, [...(byName.get(key) ?? []), x]);
+      }
+      cache.lists[which] = byName;
+    }
+    const hits = byName.get(normaliseName(name)) ?? [];
     if (hits.length === 0) throw new ImportRowError(`${kindName} "${name}" was not found.`);
     if (hits.length > 1) throw new ImportRowError(`More than one ${kindName.toLowerCase()} is named "${name}"; rename one so the file can name it.`);
-    return hits[0] as T;
+    return hits[0] as NamedRef;
   };
   return {
-    customer: (n) => one("Customer", r.listCustomers(context.companyId), n),
-    supplier: (n) => one("Supplier", r.listSuppliers(context.companyId), n),
-    item: (n) => one("Item", r.listItems(context.companyId), n),
-    fair: (n) => one("Fair", r.listFairs(context.companyId), n),
+    customer: (n) => one("customers", "Customer", () => r.listCustomers(context.companyId), n),
+    supplier: (n) => one("suppliers", "Supplier", () => r.listSuppliers(context.companyId), n),
+    item: (n) => one("items", "Item", () => r.listItems(context.companyId), n),
+    fair: (n) => one("fairs", "Fair", () => r.listFairs(context.companyId), n),
   };
 }
 
@@ -223,7 +293,8 @@ const invoicesKind: ImportKindDefinition = {
     const first = rows[0] as MappedRow;
     const number = requireValue(first, "number", "Number");
     const wanted = normaliseName(number);
-    if (repo.listInvoices(businessId).some((i) => normaliseName(i.number) === wanted)) return skipped(number, "already exists");
+    const invoices = invoiceIndex(context, businessId);
+    if (invoices.has(wanted)) return skipped(number, "already exists");
     if (inactiveStatus(val(first, "status"))) return skipped(number, `status is "${val(first, "status")}"; only finalized documents are imported`);
     checkHeader(rows, INVOICE_FIELDS, INVOICE_HEADER_KEYS, number);
 
@@ -259,6 +330,7 @@ const invoicesKind: ImportKindDefinition = {
     };
     repo.saveDraft(invoice);
     repo.finalizeInvoice(id);
+    invoices.set(wanted, { id, number }); // last step, nothing below can throw: a rolled-back unit leaves no entry
     return created(number);
   },
 };
@@ -298,7 +370,8 @@ const purchaseBillsKind: ImportKindDefinition = {
     const first = rows[0] as MappedRow;
     const number = requireValue(first, "number", "Number");
     const wanted = normaliseName(number);
-    if (repo.listPurchaseBills({ businessId }).some((b) => normaliseName(b.number) === wanted)) return skipped(number, "already exists");
+    const bills = billIndex(context, businessId);
+    if (bills.has(wanted)) return skipped(number, "already exists");
     if (inactiveStatus(val(first, "status"))) return skipped(number, `status is "${val(first, "status")}"; only finalized documents are imported`);
     checkHeader(rows, BILL_FIELDS, BILL_HEADER_KEYS, number);
 
@@ -337,6 +410,7 @@ const purchaseBillsKind: ImportKindDefinition = {
       lines,
     });
     repo.finalizePurchaseBill(bill.id);
+    bills.set(wanted, { id: bill.id, number }); // last step: see the header note on indexes
     return created(number);
   },
 };
@@ -365,17 +439,15 @@ const creditNotesKind: ImportKindDefinition = {
     const repo = context.repository;
     const first = rows[0] as MappedRow;
     const number = requireValue(first, "number", "Number");
-    const invoices = repo.listInvoices(businessId);
-    const businessInvoiceIds = new Set(invoices.map((i) => i.id));
+    const invoices = invoiceIndex(context, businessId);
+    const notes = creditNoteIndex(context, businessId);
     const wanted = normaliseName(number);
-    if (repo.listCreditNotes().some((n) => businessInvoiceIds.has(n.invoiceId) && normaliseName(n.number) === wanted)) {
-      return skipped(number, "already exists");
-    }
+    if (notes.has(wanted)) return skipped(number, "already exists");
     if (inactiveStatus(val(first, "status"))) return skipped(number, `status is "${val(first, "status")}"; only finalized documents are imported`);
     checkHeader(rows, CREDIT_NOTE_FIELDS, CREDIT_NOTE_HEADER_KEYS, number);
 
     const invoiceNumber = requireValue(first, "invoiceNumber", "Invoice number");
-    const invoice = invoices.find((i) => normaliseName(i.number) === normaliseName(invoiceNumber));
+    const invoice = invoices.get(normaliseName(invoiceNumber));
     if (invoice === undefined) throw new ImportRowError(`Invoice "${invoiceNumber}" was not found in this business.`);
     const noteDate = parsed(first, "Note date", requireValue(first, "noteDate", "Note date"), (t) => parseDate(t, context.dateFormat));
     assertAfterOpening(context, businessId, noteDate, `Credit note ${number}`);
@@ -394,6 +466,7 @@ const creditNotesKind: ImportKindDefinition = {
     repo.saveCreditNote(note);
     // The preview is the user's confirmation that a date in an earlier month is what they mean.
     repo.finalizeCreditNote(id, { confirmBackdatedMonth: true });
+    notes.add(wanted); // last step: see the header note on indexes
     return created(number);
   },
 };
@@ -420,7 +493,7 @@ const paymentsKind: ImportKindDefinition = {
     const invoiceNumber = requireValue(row, "invoiceNumber", "Invoice number");
     const reference = invoiceNumber;
     if (inactiveStatus(val(row, "status"))) return skipped(reference, `status is "${val(row, "status")}"; cancelled payments are not imported`);
-    const invoice = repo.listInvoices(businessId).find((i) => normaliseName(i.number) === normaliseName(invoiceNumber));
+    const invoice = invoiceIndex(context, businessId).get(normaliseName(invoiceNumber));
     if (invoice === undefined) throw new ImportRowError(`Invoice "${invoiceNumber}" was not found in this business.`);
     const amountPaise = parsed(row, "Amount", requireValue(row, "amount", "Amount"), (t) => parseRupeesToPaise(t));
     const paidOn = parsed(row, "Paid on", requireValue(row, "paidOn", "Paid on"), (t) => parseDate(t, context.dateFormat));
@@ -451,7 +524,7 @@ const supplierPaymentsKind: ImportKindDefinition = {
     const billNumber = requireValue(row, "billNumber", "Bill number");
     const reference = billNumber;
     if (inactiveStatus(val(row, "status"))) return skipped(reference, `status is "${val(row, "status")}"; cancelled payments are not imported`);
-    const bill = repo.listPurchaseBills({ businessId }).find((b) => normaliseName(b.number) === normaliseName(billNumber));
+    const bill = billIndex(context, businessId).get(normaliseName(billNumber));
     if (bill === undefined) throw new ImportRowError(`Bill "${billNumber}" was not found in this business.`);
     const amountPaise = parsed(row, "Amount", requireValue(row, "amount", "Amount"), (t) => parseRupeesToPaise(t));
     const paidOn = parsed(row, "Paid on", requireValue(row, "paidOn", "Paid on"), (t) => parseDate(t, context.dateFormat));

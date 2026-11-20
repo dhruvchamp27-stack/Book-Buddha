@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AccountingRepository, RepositoryValidationError } from "../database/repository.js";
 import type { Invoice } from "../accounting/types.js";
 import { registerExportRoutes } from "./export-routes.js";
+import { buildApi } from "./server.js";
 
 let repository: AccountingRepository;
 let app: FastifyInstance;
@@ -84,6 +85,25 @@ describe("export routes", () => {
     for (const dataset of ["customers", "suppliers", "items", "invoices", "credit-notes", "payments", "purchase-bills", "supplier-payments", "stock-movements", "journal-entries", "trial-balance"]) {
       const res = await app.inject({ method: "GET", url: `/exports/${dataset}` });
       expect(res.statusCode, dataset).toBe(200);
+    }
+  });
+});
+
+describe("export routes through buildApi (R10-E)", () => {
+  it("are behind auth: 401 without a session, 400 for an unknown dataset with one", async () => {
+    const repo = new AccountingRepository();
+    const built = buildApi(repo);
+    try {
+      expect((await built.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } })).statusCode).toBe(201);
+      const token = (await built.inject({ method: "POST", url: "/auth/login", payload: { password: "Secret123" } })).json<{ token: string }>().token;
+      const headers = { authorization: `Bearer ${token}` };
+      expect((await built.inject({ method: "GET", url: "/exports/customers" })).statusCode).toBe(401);
+      expect((await built.inject({ method: "GET", url: "/exports/everything" })).statusCode).toBe(401);
+      expect((await built.inject({ method: "GET", url: "/exports/everything", headers })).statusCode).toBe(400);
+      expect((await built.inject({ method: "GET", url: "/exports/customers", headers })).statusCode).toBe(200);
+    } finally {
+      await built.close();
+      repo.close();
     }
   });
 });
