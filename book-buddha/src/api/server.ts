@@ -5,6 +5,8 @@ import path from "node:path";
 import { z } from "zod";
 import { registerAttachmentRoutes } from "./attachment-routes.js";
 import { registerBackupRoutes } from "./backup-routes.js";
+import { registerExportRoutes } from "./export-routes.js";
+import { registerImportRoutes } from "./import-routes.js";
 import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
@@ -1628,6 +1630,10 @@ export function buildApi(
     backupsRoot: resolveBackupsRoot(repository.db.name, options.backupsRoot),
     attachmentsRoot: resolveAttachmentStorageRoot(repository.db.name, options.attachmentStorageRoot),
   });
+
+  // ---- Import and export (R10). CSV and JSON; inspect -> preview (rolled back) -> commit.
+  registerImportRoutes(app, { repository });
+  registerExportRoutes(app, { repository });
 
   return app;
 }
