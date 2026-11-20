@@ -42,7 +42,7 @@
 - R10: two equal payments (same document, amount, day) in one file import once; no expenses import.
 
 ## Last 3 sessions
-- **Session 14 (20 Nov):** setup (orchestrator/workers, Progress.md, closed context folder); R10 import/export built in 4 commits (S14-3 rulings). Nothing pushed.
+- **Session 14 (20 Nov):** setup (orchestrator/workers, Progress.md, closed context folder); R10 import/export built in 4 commits (S14-3 rulings). All pushed.
 - **Session 13 (19 Nov):** six commits pushed: reports 1–3 and 6, R9 routes 2–5, S10-4 (v22), R11 backup. Paused by Dhruv.
 - **Session 12:** set the standing order (S12-3), deferred R14 (S12-4), wrote the six report definitions before any code.
 

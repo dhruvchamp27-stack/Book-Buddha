@@ -9,7 +9,7 @@ run everything together. **R14 deferred (S12-4).** Remaining order: **R10 ✅ �
 
 ## Last session
 Session 14 (20 Nov) — setup (orchestrator/workers, Progress.md, closed context folder; S14-1) and
-**R10 import/export built**: `9037872` `098ce15` `d2fa92b` `aecc96a` (rulings S14-3). **Not pushed.**
+**R10 import/export built**: `9037872` `098ce15` `d2fa92b` `aecc96a` (rulings S14-3). **All pushed.**
 
 ## State now
 Branch `autonomous/book-buddha-finish`. Gates **all green, measured 20 Nov on the final tree:
