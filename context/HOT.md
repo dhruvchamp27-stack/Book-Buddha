@@ -7,29 +7,30 @@ newly build and check the backend end to end." **DONE in S16:** R12 committed, t
 done (October 2025 end-to-end ACCEPTANCE test, S16-5), and all 16 audit defects fixed. **R14 deferred (S12-4).**
 
 ## Last session
-Session 16 (21 Nov) — R12 committed; Q1–Q26 + S16-1..8 ruled; October e2e acceptance test built on his
-approved figures; 16 audit defects (D1–D16) found, recorded, then ALL FIXED (S16-7 rulings). Pushed to 973684b.
-S16-9: taken invoice numbers refused (conversion/recurring); fair buyers stay under the host.
+Session 16 (21 Nov) — R12 committed; October e2e ACCEPTANCE on his figures; 16 audit defects fixed;
+S16-9 taken invoice numbers refused; S16-10 every parked acceptance slice closed, probe files deleted.
 
 ## State now
 Branch `autonomous/book-buddha-finish`. Gates **all green, measured 21 Nov after the last change:
-tsc 0 · 1,060 tests, 93 files · vite 1.04s.** Migration **v29**. **Count unpushed commits, never quote a
+tsc 0 · 1,060 tests, 93 files · vite 1.05s.** Migration **v29**. **Count unpushed commits, never quote a
 figure from here:** `git log --oneline @{u}..HEAD`. **PUSH in the background and ASK HIM EVERY TIME
 (S11-17).** The October ACCEPTANCE test (`src/e2e/october.e2e.test.ts`) is the end-to-end regression
 check — it must stay green. **ACCEPTANCE (per slice): hand-verified R3, R4c · on trust 7d, 8c ·
-outstanding R1, R2, R4, R4b, R5, R7, R8** (October e2e now covers much of them end to end).
+R1, R2, R4, R4b, R5, R7, R8 CLOSED (S16-10, on the S16 run + October e2e). No acceptance backlog.**
 
 ## NEXT STEP — resume here
-Push any unpushed S16-9 commit (ask first). Then build the **S16 slice** (his rulings,
-Progress.md → "Build work still open"): refund account choice · keep money account on edit · import
-repeated payments + last-import banner · pre-opening items as history · back-dating warning everywhere ·
-attachment + restore audit · zero-cost write-down FY lock · stock adjustment (Q15). Then bill discount
-(Q1/Q2, unblocked) → GST per line (Q24) → R10 leftovers → R13 cash flow.
+**His order for session 17 (S16-11), aim = the FULL BACKEND done, few or no pending tests:**
+1. **First, the "taken invoice number refused" change (S16-9)** — he will "complete" it. It is already
+   committed (1196954) and pushed: ASK him what is left (his check? screens? more cases?).
+2. **Then the tests:** tests written FIRST for the unbuilt work (S16 slice · bill discount Q1/Q2 · GST per
+   line Q24 · R13 cash flow), plus the 2 slow tests (R10 2,000-invoice timing 6.5–7.4 s of 10 s; the
+   engine.test.ts fuzz test that can time out under load).
+3. **Then build those** till the tests pass. S16 slice = refund account choice · keep money account on
+   edit · import repeated payments + last-import banner · pre-opening items as history · back-dating
+   warning everywhere · attachment + restore audit · zero-cost write-down FY lock · stock adjustment (Q15).
 
 ## Waiting on him (ask when a slice touches it, not as a batch)
-1. **Delete `book-buddha/src/probes/` by hand** — the approval hook blocks folder deletes; it is untracked
-   and must stay out of commits; run the suite with `--exclude "src/probes/**"` until it is gone.
-2. **Fair buyers as sub-customers (S16-9(3))** — does he want a sub-customer list/report? Ask when the
+1. **Fair buyers as sub-customers (S16-9(3))** — does he want a sub-customer list/report? Ask when the
    fair/customer screens are planned, not before.
 **Still NO real database (S11-16)** — never touch his file.
 

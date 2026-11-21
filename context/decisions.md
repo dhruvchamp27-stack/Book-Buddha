@@ -7,6 +7,24 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S16-11 (2026-11-21) — HIS ORDER FOR SESSION 17.** Aim: "complete the full backend in next session,
+  with all or little pending tests". Order: (1) first he completes the "taken invoice numbers refused"
+  change (S16-9; already committed 1196954 and pushed — ask him what is left); (2) then the tests for the
+  work not built yet (S16 slice, bill discount, GST per line, cash flow) and the two slow tests to watch;
+  (3) then build those features. R10 leftovers (.xlsx/PDF need an install, expenses import) are not in
+  his list — ask where they fit. R14 archive stays deferred (S12-4).
+- **S16-10 (2026-11-21) — HIS RULING: THE SEVEN PARKED ACCEPTANCE SLICES ARE CLOSED.** His words: "Close
+  those slices for now! As acceptance tests were already done." **R1, R2, R4, R4b, R5, R7, R8 are
+  ACCEPTED** under S12-1 (accounting logic is the bar) on the S16 evidence: the all-together run S12-3
+  asked for (1,060 tests green) and the October 2025 end-to-end ACCEPTANCE test on his approved figures
+  (S16-5), green on both bases. Offered first and declined: a slice-by-slice map to the test proving each.
+  "For now": anything found later is a defect (S12-1), not a re-opened slice. The "figures unconfirmed"
+  labels on the R4/R4b ACCEPTANCE tests are removed; no figure changed. R3, R4c stay hand-verified;
+  7d, 8c stay on trust. **No acceptance backlog remains** ("No backlog probably should now remain"): the
+  slices built after the pause and marked "parked" (R9 documents, R10 import/export, R11 backup, R12
+  banking, §13 reports 1–6, S10-4 write-down) were in the same all-together run and are closed on the
+  same basis — told to him in the same turn, to object if he wants any re-opened. He also asked that no
+  temporary files remain.
 - **S16-9 (2026-11-21) — HIS ANSWERS ON S16-8.** (1) **Supplier payments follow S16-7(3)** — a supplier
   payment cancelled in a later month leaves the earlier month alone: CONFIRMED as built. (2) **A taken
   invoice number is REFUSED, never renumbered** ("Refuse, I'll number it"): quotation conversion now takes

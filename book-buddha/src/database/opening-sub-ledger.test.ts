@@ -39,7 +39,7 @@ const receivableOutstanding = (w: W): number =>
   w.repository.getReceivables().reduce((t, r) => t + r.outstandingPaise, 0);
 
 describe("opening customer balances", () => {
-  it("ACCEPTANCE R4b (figures unconfirmed): no opening sales behind the balance is a balance-sheet movement only", () => {
+  it("ACCEPTANCE R4b (closed under S16-10): no opening sales behind the balance is a balance-sheet movement only", () => {
     const w = world();
     try {
       const r = w.repository;
@@ -80,7 +80,7 @@ describe("opening customer balances", () => {
     }
   });
 
-  it("ACCEPTANCE R4b (figures unconfirmed): opening sales behind the balance recognise income in proportion", () => {
+  it("ACCEPTANCE R4b (closed under S16-10): opening sales behind the balance recognise income in proportion", () => {
     const w = world();
     try {
       const r = w.repository;

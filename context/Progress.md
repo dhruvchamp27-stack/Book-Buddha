@@ -2,35 +2,35 @@
 *Top part ≤ 50 lines: loaded at every session start, rewritten at every session end.*
 
 ## Start here next session
-- **Next step:** push any unpushed S16-9 commit (ask Dhruv first). Then the **S16 slice** (his rulings; list under "Build work still open" below) → bill discount (Q1/Q2, unblocked) → GST per line (Q24) → R10 leftovers → R13 cash flow.
-- **Waiting on Dhruv:** delete `book-buddha/src/probes/` by hand (hook blocks folder deletes; keep it out of commits). S16-8 answered (S16-9). Later: fair buyers as sub-customers — list/report wanted? (ask at fair/customer screens).
-- **Branch and gates (measured 21 Nov, after the last change):** `autonomous/book-buddha-finish`, never `main`. tsc exit 0 · 1,060 tests in 93 files · vite built in 1.04s · migration v29.
+- **Next step (his order S16-11; aim: full backend done, few or no pending tests):** (1) ask what is left on the "taken invoice number refused" change (S16-9, already committed 1196954 + pushed) and complete it; (2) write tests FIRST for the unbuilt work — S16 slice (list under "Build work still open" below), bill discount (Q1/Q2), GST per line (Q24), R13 cash flow — and deal with the 2 slow tests (R10 timing, engine fuzz); (3) build those until green. Ask where R10 leftovers fit.
+- **Waiting on Dhruv:** step (1) above. Throwaway probe files deleted 21 Nov (S16-10). Later: fair buyers as sub-customers — list/report wanted? (ask at fair/customer screens).
+- **Branch and gates (measured 21 Nov, after the last change):** `autonomous/book-buddha-finish`, never `main`. tsc exit 0 · 1,060 tests in 93 files · vite built in 1.05s · migration v29.
 - **Push rule:** only after the tests pass, in the background, and only after asking Dhruv each time. Count unpushed commits fresh with `git log --oneline @{u}..HEAD`.
 - **Standing order S12-3 is DONE:** R12 committed, the all-together run done (October e2e ACCEPTANCE), all 16 audit defects fixed.
 
 ## Development — by slice
 | Slice | What it does | Built | Tests | Accepted by Dhruv |
 |---|---|---|---|---|
-| R1, R2, R4, R4b, R5 | not in plan files | ✅ | in gate | outstanding |
+| R1, R2, R4, R4b, R5 | not in plan files | ✅ | in gate | ✅ closed (S16-10) |
 | R3, R4c | not in plan files | ✅ | in gate | ✅ hand-verified |
 | R6 | not in plan files | not stated in sources | not stated | not stated |
-| R7 | not in plan files | ✅ | in gate | outstanding |
-| R8 | Purchase returns, refunds, bill discount (S8) | ✅ (stock-cost part ⏳ blocked) | in gate | outstanding |
-| R9 | Document storage for invoices and bills (S9) | ✅ routes 2–5 | 8 + 24 engine | parked |
-| R10 | CSV and JSON import/export (S10) | ✅ (.xlsx/PDF not built: install) | 142 | parked |
-| R11 | Offline backup, restore, integrity check (S11) | ✅ | 16 + 7 | parked |
-| R12 | Banking: 12a–12d accounts, money account on documents, Internal Transfers + vouchers, reconciliation · 12e–12g statement import, review queue, rules | ✅ all 12a–12g (3562d71) | 112 new + 2 e2e | parked |
+| R7 | not in plan files | ✅ | in gate | ✅ closed (S16-10) |
+| R8 | Purchase returns, refunds, bill discount (S8) | ✅ (stock-cost part ⏳ blocked) | in gate | ✅ closed (S16-10) |
+| R9 | Document storage for invoices and bills (S9) | ✅ routes 2–5 | 8 + 24 engine | ✅ closed (S16-10) |
+| R10 | CSV and JSON import/export (S10) | ✅ (.xlsx/PDF not built: install) | 142 | ✅ closed (S16-10) |
+| R11 | Offline backup, restore, integrity check (S11) | ✅ | 16 + 7 | ✅ closed (S16-10) |
+| R12 | Banking: 12a–12d accounts, money account on documents, Internal Transfers + vouchers, reconciliation · 12e–12g statement import, review queue, rules | ✅ all 12a–12g (3562d71) | 112 new + 2 e2e | ✅ closed (S16-10) |
 | S16 e2e | October 2025 end to end over HTTP (E2E-WORKINGS.md) | ✅ (7af9fce) | 22 | ✅ figures approved (S16-5) |
 | S16 defects | D1–D16 from the audit read, all fixed (S16-7 rulings) | ✅ (fba7cfb, d2120dc) + S16-9 refuse rule | 16 + 48 new | S16-8 confirmed (S16-9) |
 | R13 | Cash Flow Statement (S13) | ⬜ after the S16 slice and backlog (S14-2) | — | — |
 | R14 | Archive: active, inactive, archived (S14) | deferred (S12-4) | — | — |
-| §13 reports 1–6 | Customer, stock and profit reports | ✅ | in gate | parked |
-| S10-4 | Stock write-down and reversal (v22) | ✅ | 15 | parked |
+| §13 reports 1–6 | Customer, stock and profit reports | ✅ | in gate | ✅ closed (S16-10) |
+| S10-4 | Stock write-down and reversal (v22) | ✅ | 15 | ✅ closed (S16-10) |
 | 7d, 8c | Cash-basis invoice, bill and P&L figures | ✅ | in gate | on trust |
 
 ## Testing
-- **Gates, 21 Nov (after the last change):** tsc exit 0 · vitest 1,060 tests in 93 files · vite built in 1.04s. Run tsc first; vitest does not type-check. Exclude `src/probes/**` until it is deleted.
-- **Acceptance:** October e2e (S16-5) green incl. cash basis · hand-verified R3, R4c · on trust 7d, 8c · outstanding R1, R2, R4, R4b, R5, R7, R8.
+- **Gates, 21 Nov (after the last change):** tsc exit 0 · vitest 1,060 tests in 93 files · vite built in 1.05s. Run tsc first; vitest does not type-check.
+- **Acceptance:** October e2e (S16-5) green incl. cash basis · hand-verified R3, R4c · on trust 7d, 8c · all other slices closed (S16-10). **No acceptance backlog.**
 
 ## Known Issues (each already ruled; built in the S16 slice unless noted)
 - Attachment upload/delete and restore write no audit event (S16-1, Q14).
@@ -39,10 +39,10 @@
 - A bare PURCHASE stock row posts nothing, yet FIFO consumes it (Q15: replace with "stock adjustment").
 - R10: equal payments in one file import once (S16-3: allow within a file + last-import banner); no expenses import (Q17).
 - No real database yet (S11-16); never touch the live file.
-- Watch: R10 2,000-invoice timing test ran 6.98 s (limit 10 s) after the D11 number check; fuzz test in engine.test.ts can time out under load.
+- Watch: R10 2,000-invoice timing test ran 6.5–7.4 s on 21 Nov (limit 10 s) after the D11 number check; fuzz test in engine.test.ts can time out under load.
 
 ## Last 3 sessions
-- **Session 16 (21 Nov):** R12 committed; Q1–Q26 and S16-1..8 ruled; October e2e ACCEPTANCE on approved figures; audit read → 16 defects recorded as known defects → all fixed (G1–G4 builders, mutation-proved). Fixes fba7cfb, d2120dc, context 973684b, all pushed. S16-9: taken numbers refused, not renumbered.
+- **Session 16 (21 Nov):** R12 committed; Q1–Q26 and S16-1..8 ruled; October e2e ACCEPTANCE on approved figures; audit read → 16 defects recorded as known defects → all fixed (G1–G4 builders, mutation-proved). Fixes fba7cfb, d2120dc, context 973684b, all pushed. S16-9: taken numbers refused, not renumbered (1196954, c8e53c8, pushed). S16-10: all parked acceptance closed, probe files deleted. S16-11: his order for session 17.
 - **Session 15 (21 Nov):** R12 planned (QBO research, S15-1..4); set one 12a–12d and set two 12e–12g built, reviewed, wired, mutation-proved, two e2e acceptance tests.
 - **Session 14 (20 Nov):** setup (orchestrator/workers, Progress.md, closed context folder); R10 import/export built in 4 commits (S14-3 rulings). All pushed.
 
@@ -406,7 +406,7 @@ Sources: FD (repo root) §D, approved S11-15 · REMAINING_BUILD_PLAN S12 · QBO 
 - R12 banking: amend FD §D6 to two Uncategorized accounts (S11-8) before starting.
 - Zero-cost write-down is not FY-lock checked; restore writes no audit event.
 - Source-less PURCHASE posts nothing while FIFO consumes it (S7-1(d)). Flagged, not fixed.
-- Acceptance for R1, R2, R4, R4b, R5, R7, R8 is parked until R12, then run all tests together (S12-3).
+- Acceptance for R1, R2, R4, R4b, R5, R7, R8 (and every slice marked parked): CLOSED 21 Nov (S16-10).
 
 **From todos.md (seeded 14 Nov; may be stale)**
 - FD §H, listed as open: archive scope; auto-record payment on a bank match; whether the Uncategorized account is auto-created or named by the owner. The section header says it is closed, so confirm before R12.

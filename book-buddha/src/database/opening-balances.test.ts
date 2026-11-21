@@ -31,7 +31,7 @@ const net = (r: AccountingRepository, businessId: string, account: string): numb
 };
 
 describe("opening balances", () => {
-  it("ACCEPTANCE R4 (figures unconfirmed)", () => {
+  it("ACCEPTANCE R4 (closed under S16-10)", () => {
     const { repository: r, businessId } = world();
     // Debits Rs 2,50,000 (25,000 + 1,75,000 + 50,000); credits Rs 2,00,000 (1,00,000 + 1,00,000).
     // The Rs 50,000 gap must land in OPENING_BALANCE_EQUITY as a CREDIT.
