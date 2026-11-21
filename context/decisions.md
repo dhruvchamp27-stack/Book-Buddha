@@ -7,6 +7,122 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S16-8 (2026-11-21) — MY CALLS IN THE DEFECT FIXES, AWAITING HIS CONFIRMATION.** Built while fixing
+  D1–D16 (all 16 now fixed; 1,059 tests green). (1) **S16-7(3) extended to SUPPLIER payments:** a supplier
+  payment cancelled in a later month also leaves the earlier month alone (cash P&L shows the take-back in
+  the cancel month) — same principle, same code path. (2) **Document cancelled after its payments were
+  cancelled:** the cash view takes back whatever is still recognised on the document's cancellation date
+  (without it, that sequence threw a rounding error). (3) **D11 numbering helpers:** quotation conversion
+  and recurring invoices now pick the next FREE number (`INV-<n>`, then `-2`, `-3`) instead of failing; an
+  imported duplicate is a FAILED row. (4) **D5:** cancelling a credit note takes back the note's OWN
+  restored lot first (like a purchase return from its bill's lot); refused if that lot has gone out again.
+  (5) **D12:** deactivating any CASH/BANK account with a non-zero balance is refused on the generic route
+  too, with the bank route's wording.
+- **S16-7 (2026-11-21) — HIS RULINGS: D9, D11, D16 (answered in one go, all as recommended).**
+  (1) **D9, cash basis, purchase return:** the part set against an open bill lowers what is still owed
+  from the return date (months already reported never move); the part already paid (a supplier credit)
+  is recognised as a negative on the **refund** date — "June, refund month". Mirrors customer credit notes.
+  (2) **D11, invoice numbers:** unique **per business**; a **cancelled invoice keeps its number** (no reuse,
+  GST practice); quotations are a separate series. No DB unique index this pass (scan data first).
+  (3) **D16, cancelled payment on cash basis:** **closed months never change** — January keeps its 100 and
+  the cancellation month shows −100. **This REPLACES S8-1's retroactive vanishing** for the cash P&L.
+  S13-1 (no customer-statement row for a cancelled payment) is a statement rule and is NOT changed.
+- **S16-6 (2026-11-21) — HIS RULING: CASH-BASIS OCTOBER CHECKS STAY AS A KNOWN DEFECT.** His words:
+  "Keep as known defect". The October acceptance test (`src/e2e/october.e2e.test.ts`) matches every
+  approved figure except the cash-basis P&L, which the app refuses for these books (400 "out of
+  tolerance: 1,800,000 moved, 1,650,000 recognised" on PB-001 — a purchase return on a PAID bill
+  breaks the cash view; same root as known defect D9, wider). The two cash cases (net 11,750; R2's 0
+  for 1–7 Oct and 11,800 to 8 Oct) stay `it.fails` with the approved figures unchanged; they go red
+  when the fix lands, then flip to `it`. Recommended as the first defect fix. Still open: whether
+  walk-in buyers at a fair are booked under the host (the app requires it, repository.ts:4858; no
+  figure changes) — the workings' "walk-in customer" wording waits on his yes.
+- **S16-5 (2026-11-21) — HIS RULING: OCTOBER END-TO-END FIGURES APPROVED.** `book-buddha/E2E-WORKINGS.md`
+  sections 2–5 approved as written ("approved your given figures"): TB 123,860 · HDFC 71,966 · Cash
+  8,550 · Receivables 5,000 · Inventory 15,550 · accrual profit 13,850 · cash profit 11,750 · BS
+  102,110. With them, as recommended: customer-returned stock goes to the BACK of the FIFO queue at
+  original cost; stock returned to a supplier leaves from that bill's OWN lot. He then asked that the
+  external audit reports in `Desktop\Book Buddha Accounting Audit\` (all but the screen plan) be read
+  by Haiku workers so the October test can also cover any real gaps they name.
+
+- **S16-4 (2026-11-21) — HIS RULINGS: THE 26-QUESTION ROUND.** (Q-numbers from the session-16 list.)
+  **Bill discount (unblocked):** Q1 spread across units in whole paise, remainder on the LAST unit
+  (7 × Rs 100 less Rs 150 → 6 at 78.57 + 1 at 78.58 = 550.00). Q2 a discount ON THE BILL = trade
+  discount, reduces stock cost; a discount taken AT PAYMENT = settlement, booked as "Discount
+  received" income.
+  **R12 calls, all confirmed as built:** Q3 over-payment match refused (use Add) · Q4 rules never target
+  Uncategorised · Q5 Add/Split/Uncategorise post RV/PV vouchers · Q6 an empty re-import still logs an
+  import row + audit event · Q7 a document match gives the line the document's business · Q8 posted-line
+  matches exact amount only · Q9 rule delete is a hard delete, audited · Q10 a transfer rule can't target
+  its own bank · Q11 matched money is cancelled by undoing the bank line first.
+  **S16 slice details:** Q12 back-dated = dated in an EARLIER CALENDAR MONTH than today (credit-note rule,
+  everywhere) · Q13 history items show in party history and document lists marked "Before opening",
+  excluded from every total and report · Q14 add to S16: restore writes an audit event; zero-cost
+  write-down checks the FY lock · Q15 stock comes in only via a bill, opening stock or a "stock
+  adjustment" posting Dr Inventory / Cr Stock adjustment (closes S7-1(d)).
+  **Imports/exports:** Q16 installs for .xlsx and PDF approved IN PRINCIPLE — name each package and size
+  and ask again before installing · Q17 expenses import IS in V1 · Q18 every report exports (P&L, BS,
+  six §13 reports).
+  **Housekeeping:** Q19 the other session's work (3 commits on 19 Nov, none since: /status skill, IMPLEMENTATION_PROGRESS
+  write-up, report-routes brief) — **KEEP IT** (closes S13-3) ·
+  Q20 keep base64 uploads (S11-19 closed) · Q21 backend-only through R13, then screens · Q22 minimal
+  update of `web/src/App.tsx` for the v22 stock types approved.
+  **Older spec:** Q23 books keep exact paise; invoice total rounded to the rupee with a "Round off" line ·
+  Q24 **GST PER LINE** — mixed rates on one invoice happen (larger change; plan it as its own slice) ·
+  Q25 packaging decided later, Tauri the lean choice · Q26 two people work on this from separate PCs;
+  both repo paths are right — ignore.
+
+- **S16-3 (2026-11-21) — HIS RULING: REPEATED PAYMENTS IN IMPORTS (replaces S16-1(b)).** Equal
+  payments (same document, amount, date) WITHIN ONE FILE all import. An equal payment already in
+  the books from an EARLIER file is skipped as a duplicate (re-import stays safe). Add a small
+  banner showing the last import date so the user sees what was already brought in. The S16 rulings
+  form one backlog slice ("S16 slice"), to be planned before building.
+
+- **S16-2 (2026-11-21) — HIS RULINGS, round two (not yet built).**
+  (a) **On-account documents can't name a bank — KEPT.** The bank goes on each payment.
+  (b) **Editing a document never changes its money account unless the user sends a new one** — "bank
+  changes only if user wills to". Aim: keep the app generic. Fixes Builder B behaviour 3.
+  (c) **Pre-opening-date payments: warn, don't refuse** — he wants the history (documents, payments,
+  details) visible in the app, not only an opening balance. OPEN RISK raised with him: posting them
+  counts them twice against the opening balances. **HIS RULING: "Yes, history only."** Items dated
+  on/before the opening date are kept as HISTORY: visible, linked to party/fair, searchable, marked
+  "before opening date", NEVER posted to the journal. Opening balances stay the books' only figure.
+  Applies to imported documents too (softens S14-3(2) from refuse → keep as history).
+  (d) **Back-dating warning EVERYWHERE**, not only credit notes. Current rule (credit notes,
+  `finalizeCreditNote`): an entry dated in an earlier calendar month than today needs an explicit
+  confirm. Extend the same rule to every dated entry; imports show it per row in the preview.
+  Supersedes S16-1(d), which is now part of this.
+
+- **S16-1 (2026-11-21) — HIS RULINGS ON OPEN ITEMS (not yet built).**
+  (a) **Refund account is the user's choice.** A credit note / purchase return on a document paid at
+  once into a bank may refund through ANY money account the user picks — not forced to the original
+  bank (overrides Builder B's behaviour 1). Proposed: default = the original account, user may change.
+  (b) **Repeated payments must all import** — "that's not necessary" (to collapse them). Re-run safety
+  is kept by the 12e occurrence rule: the k-th equal payment in a file is skipped only when ≥ k already
+  exist (proposed; to confirm).
+  (c) **Attachment upload/delete must write an audit event** (closes S13-2).
+  (d) **Purchase-return back-dating needs a warning**, like credit notes (closes S11-21).
+  (e) `context/AGENT_BRIEF_R9_ROUTES.md` deleted on his instruction (untracked, never committed).
+  Still open, explained to him: Builder B 2 and 3; R10 choices 2 and 3; the R12 set-two calls.
+
+- **S15-6 (2026-11-21) — HIS RULING: ONE COMMIT POINT FOR ALL OF R12.** "No commit, full R12
+  altogether." Set one (12a–12d) stays UNCOMMITTED in the working tree; set two (12e–12g) is built
+  on top; commits are announced once, when 12a–12g are all reviewed and green.
+- **S15-5 (2026-11-21) — R12 SET ONE (12a–12d) BUILT, REVIEWED, WIRED.** Four Sonnet builders in
+  parallel; orchestrator re-ran each, wired migrations v25 bank_accounts / v26 money_movements /
+  v27 bank_reconciliations and the routes, wrote `src/banking/r12-set-one.e2e.test.ts` (HDFC
+  October end to end over HTTP). Gates: tsc 0 · 919 tests / 76 files · vite 1.18s. Open for him:
+  three behaviours Builder B added unasked (see Progress.md → 12b status).
+- **S15-4 (2026-11-21) — HIS RULING: OD/CC.** Borrowing by default; Balance Sheet = current
+  borrowing/liability. Cash flow: an overdraft counts as cash only if repayable on demand AND part
+  of everyday cash management; a cash credit does not qualify merely for being short-term. Built
+  as chart type LIABILITY + role BANK; `bank_accounts.part_of_cash_management` defaults 0 for
+  OD/CC, 1 for current/savings, set by the user, audit-logged.
+- **S15-1..3 (2026-11-21) — HIS RULINGS: R12 SCOPE.** (1) "R12" means the QBO bank categorisation
+  (12e–12g); 12a–12d are its foundation, built first. (2) A payment can go through ANY cash or bank
+  account, with a payment mode (NEFT, RTGS, UPI, …, editable list). (3) Transfers are named
+  **Internal Transfers**. Delivery: two sets, briefs first, builders released together, orchestrator
+  reviews each set; every brief names the tests to pass; builders loop until green.
+
 - **S14-4 (2026-11-20) — R10 IMPORT/EXPORT BUILT, NOT PUSHED.** Four commits: `9037872` codec,
   `098ce15` exports, `d2fa92b` import engine + masters + documents + routes, `aecc96a` end-to-end
   checks. Gates on the final tree: tsc 0 · 856 tests / 64 files · vite 1.23s; migration still v22.
