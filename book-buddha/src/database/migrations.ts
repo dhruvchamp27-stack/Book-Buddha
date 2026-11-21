@@ -18,6 +18,13 @@ import { applyPurchaseReturnsSchema } from "./purchase-returns-schema.js";
 import { applyCreditNoteDateSchema } from "./credit-note-date-schema.js";
 import { applyCashRoundingSchema } from "./cash-rounding-schema.js";
 import { applyStockAdjustmentSchema } from "./stock-adjustment-schema.js";
+import { applyPaymentModesSchema } from "./payment-modes-schema.js";
+import { applyMoneyAccountSchema } from "./money-account-schema.js";
+import { applyBankAccountsSchema } from "../banking/bank-accounts-schema.js";
+import { applyMoneyMovementsSchema } from "../banking/money-movements-schema.js";
+import { applyReconciliationSchema } from "../banking/reconciliation-schema.js";
+import { applyStatementLinesSchema } from "../banking/statement-lines-schema.js";
+import { applyBankRulesSchema } from "../banking/bank-rules-schema.js";
 
 export interface Migration {
   version: number;
@@ -286,6 +293,60 @@ export const migrations: readonly Migration[] = [
     // seed list, nothing backfilled. Default (transactional): nothing references stock_movements,
     // so no foreign key needs switching off.
     up: applyStockAdjustmentSchema,
+  },
+  {
+    version: 23,
+    name: "payment_modes",
+    // Additive: one new table, payment_modes, seeded from the FROZEN V23 list (Cash, NEFT, RTGS,
+    // IMPS, UPI, Cheque, Other; spec §9.1, ruling S15). No table is rebuilt, nothing is backfilled.
+    // R12 shared contract. Default (transactional).
+    up: applyPaymentModesSchema,
+  },
+  {
+    version: 24,
+    name: "money_account",
+    // Additive, no table rebuild: money_account / payment_mode / payment_reference on nine tables,
+    // backfilled ('CASH', or the old CASH/BANK payment_account where that already named it), plus
+    // BEFORE INSERT/UPDATE triggers. The old payment_account columns keep their CHECKs and meaning.
+    // R12b. Default (transactional).
+    up: applyMoneyAccountSchema,
+  },
+  {
+    version: 25,
+    name: "bank_accounts",
+    // Additive: one side table, bank_accounts (kind CURRENT/SAVINGS/OVERDRAFT/CASH_CREDIT, bank name,
+    // last 4 digits, IFSC, part_of_cash_management, sanctioned limit) keyed on a BANK-role chart
+    // account. OD/CC are chart type LIABILITY (ruling S15-4). R12a. Default (transactional).
+    up: applyBankAccountsSchema,
+  },
+  {
+    version: 26,
+    name: "money_movements",
+    // Additive: internal_transfers, vouchers, voucher_lines (Internal Transfers TRF-, Receipt
+    // Vouchers RV-, Payment Vouchers PV-; numbered per company per financial year). R12c.
+    up: applyMoneyMovementsSchema,
+  },
+  {
+    version: 27,
+    name: "bank_reconciliations",
+    // Additive: bank_reconciliations + bank_reconciliation_lines. Posted journal lines are never
+    // touched; reconciliation state lives only in these tables. R12d.
+    up: applyReconciliationSchema,
+  },
+  {
+    version: 28,
+    name: "bank_statement_lines",
+    // Additive: bank_statement_imports, bank_statement_lines (held OUTSIDE the books, "For review"),
+    // bank_statement_line_links (a line → the journal line it became or was matched to; one journal
+    // line belongs to at most one statement line). R12 set two shared contract.
+    up: applyStatementLinesSchema,
+  },
+  {
+    version: 29,
+    name: "bank_rules",
+    // Additive: bank_rules + bank_rule_conditions. Rules only PRE-FILL a suggestion for a statement
+    // line (FD §D5); they never post. R12g.
+    up: applyBankRulesSchema,
   },
 ];
 

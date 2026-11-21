@@ -74,7 +74,9 @@ describe("v15 seeding from a database built to v14", () => {
     expect(added.find((r) => r.code === "INTER_FAIR_CLEARING"))
       .toMatchObject({ name: "Inter-fair Clearing", type: "ASSET", role: null, company_id: null, parent_code: null, active: 1 });
     // chart_accounts was NOT rebuilt: v15 is additive (no role widened).
-    expect(objectsSql("trigger")).toEqual(triggersBefore);
+    // v24 (R12b) adds its own money_account guard triggers on other tables; every trigger that
+    // existed before must still be here, byte-identical, and nothing else may have appeared.
+    expect((objectsSql("trigger") as Array<{ name: string }>).filter((t) => !/^trg_\w+_money_account_(insert|update)$/.test(t.name))).toEqual(triggersBefore);
     expect(db.pragma("foreign_key_check")).toEqual([]);
     expect(versions()).toEqual(migrations.map((m) => m.version));
   });

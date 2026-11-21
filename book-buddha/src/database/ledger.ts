@@ -3,6 +3,7 @@ import type { JournalEntry } from "../accounting/types.js";
 import { isValidIsoDate } from "../accounting/recurrence.js";
 import { AccountingError } from "../accounting/engine.js";
 import { RepositoryValidationError } from "./errors.js";
+import { assertNotOnBankLine, reversedEntryIdOf } from "../banking/statement-lines.js";
 
 /**
  * What the door knows about an account, read from chart_accounts (decision S2-1). The door no
@@ -45,6 +46,28 @@ export function assertPeriodOpen(db: Database.Database, businessId: string, entr
   }
 }
 
+/** Same caching pattern as financial_years: the bank-line links table arrives with migration v28. */
+const bankLinksReady = new WeakSet<Database.Database>();
+
+/**
+ * R12 backstop: a REVERSAL of an entry that a bank statement line is matched to is refused here, at
+ * the one door every cancellation passes through (invoices, bills, expenses, returns, credit notes,
+ * opening balances, payments, vouchers, Internal Transfers). The named cancel doors check first, with
+ * a friendlier name for the document; this catches every door that does not.
+ */
+function assertReversalNotOnBankLine(db: Database.Database, entry: JournalEntry): void {
+  if (!entry.isReversal) return;
+  if (!bankLinksReady.has(db)) {
+    const present = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bank_statement_line_links'")
+      .get() !== undefined;
+    if (!present) return;
+    bankLinksReady.add(db);
+  }
+  const original = reversedEntryIdOf(entry.id);
+  if (original !== null) assertNotOnBankLine(db, original, `"${entry.description}" cancels an entry that`);
+}
+
 /**
  * The ONLY door through which journal entries are written (enforced by single-writer.test.ts).
  * Asserts, before any write, that the entry balances and every line is well-formed, so no
@@ -71,6 +94,7 @@ export function postJournalEntry(
   if (!isValidIsoDate(dims.entryDate)) {
     throw new RepositoryValidationError("Journal entry date must be a real date written as YYYY-MM-DD.");
   }
+  assertReversalNotOnBankLine(db, entry);
 
   // The company this entry belongs to, for scoping accounts that belong to one company.
   const company = db

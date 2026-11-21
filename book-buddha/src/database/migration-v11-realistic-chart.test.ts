@@ -142,7 +142,9 @@ describe("v11 rebuild over a realistic chart", () => {
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
 
     // Triggers: all three present, with their original SQL, and the other tables' triggers too.
-    expect(objectsSql("trigger")).toEqual(triggersBefore);
+    // v24 (R12b) adds its own money_account guard triggers on other tables; every trigger that
+    // existed before must still be here, byte-identical, and nothing else may have appeared.
+    expect(objectsSql("trigger").filter((t) => !/^trg_\w+_money_account_(insert|update)$/.test(t.name))).toEqual(triggersBefore);
     const names = objectsSql("trigger").map((t) => t.name);
     for (const name of CHART_ACCOUNTS_TRIGGER_NAMES) expect(names).toContain(name);
     // Indexes on chart_accounts are back, identically.

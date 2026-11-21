@@ -352,11 +352,16 @@ const BILL_FIELDS: readonly ImportField[] = [
   field("taxType", "Tax type", false, ["GST type"]),
   field("taxRate", "Tax rate", false, ["GST rate", "GST %", "Tax %"]),
   field("paymentAccount", "Payment account", false),
+  // R12b. Only meaningful on a bill paid at once (Payment account CASH): which cash/bank account.
+  field("moneyAccount", "Money account", false, ["Paid from", "Bank account"]),
+  field("paymentMode", "Payment mode", false, ["Mode"]),
+  field("paymentReference", "Reference", false, ["Payment reference", "UTR", "Cheque number"]),
   field("fair", "Fair", false, ["Project"]),
   field("notes", "Notes", false, ["Remarks"]),
 ];
 const BILL_HEADER_KEYS = [
-  "supplier", "billDate", "dueDate", "supplierInvoiceNumber", "discount", "extraCharge", "taxType", "taxRate", "paymentAccount", "fair",
+  "supplier", "billDate", "dueDate", "supplierInvoiceNumber", "discount", "extraCharge", "taxType", "taxRate", "paymentAccount",
+  "moneyAccount", "paymentMode", "paymentReference", "fair",
 ];
 
 const purchaseBillsKind: ImportKindDefinition = {
@@ -391,9 +396,15 @@ const purchaseBillsKind: ImportKindDefinition = {
     const paymentAccount: PurchasePaymentAccount = accountText === "CASH" ? "CASH" : "PAYABLES";
     const supplierInvoiceNumber = val(first, "supplierInvoiceNumber");
     const notes = val(first, "notes");
+    const moneyAccount = val(first, "moneyAccount");
+    const paymentMode = val(first, "paymentMode");
+    const paymentReference = val(first, "paymentReference");
     const lines = readLines(rows, look);
 
     const bill = repo.createPurchaseBill({
+      ...(moneyAccount === "" ? {} : { moneyAccount }),
+      ...(paymentMode === "" ? {} : { paymentMode }),
+      ...(paymentReference === "" ? {} : { paymentReference }),
       businessId,
       supplierId: supplier.id,
       number,

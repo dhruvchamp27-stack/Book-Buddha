@@ -7,6 +7,13 @@ import { registerAttachmentRoutes } from "./attachment-routes.js";
 import { registerBackupRoutes } from "./backup-routes.js";
 import { registerExportRoutes } from "./export-routes.js";
 import { registerImportRoutes } from "./import-routes.js";
+import { registerBankAccountRoutes } from "./bank-account-routes.js";
+import { registerMoneyMovementRoutes } from "./money-movement-routes.js";
+import { registerReconciliationRoutes } from "./reconciliation-routes.js";
+import { registerStatementImportRoutes } from "./statement-import-routes.js";
+import { registerBankRuleRoutes } from "./bank-rules-routes.js";
+import { registerReviewQueueRoutes } from "./review-queue-routes.js";
+import { suggestFor } from "../banking/bank-rules.js";
 import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
@@ -33,6 +40,16 @@ const companyInput = z.object({
 });
 const businessInput = z.object({ companyId: id, name });
 const optionalText = z.string().trim().min(1);
+/**
+ * R12b. WHERE money went (any CASH/BANK-role account, default CASH), HOW (a payment_modes code) and
+ * the reference (UTR / cheque number). All optional; the repository validates them against the
+ * company and answers 400 with a plain message when one is wrong.
+ */
+const moneyFields = {
+  moneyAccount: id.optional(),
+  paymentMode: id.optional(),
+  paymentReference: z.string().trim().max(100).optional(),
+};
 const customerInput = z.object({
   companyId: id,
   name,
@@ -114,8 +131,8 @@ const openingCustomerBalanceInput = z.object({
   incomeAccount: id.optional(),
 });
 const openingSupplierBalanceInput = z.object({ businessId: id, supplierId: id, asAt: isoDate, amountPaise: z.number().int().positive() });
-const openingReceiptInput = z.object({ amountPaise: z.number().int().positive(), receivedOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]) });
-const openingSettlementInput = z.object({ amountPaise: z.number().int().positive(), paidOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]) });
+const openingReceiptInput = z.object({ amountPaise: z.number().int().positive(), receivedOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]).optional(), ...moneyFields });
+const openingSettlementInput = z.object({ amountPaise: z.number().int().positive(), paidOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]).optional(), ...moneyFields });
 const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
@@ -124,6 +141,7 @@ const invoiceInput = z.object({
   businessId: id,
   customerId: id,
   paymentAccount: z.enum(["CASH", "RECEIVABLES"]),
+  ...moneyFields,
   fairId: id.optional(),
   buyerName: name.optional(),
   buyerContact: z.string().trim().min(1).optional(),
@@ -202,6 +220,7 @@ const purchaseBillInput = z.object({
   dueDate: z.string().date().optional(),
   notes: z.string().trim().optional(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
+  ...moneyFields,
   // R8 (v18). The same two header fields the invoice has had since the baseline, defaulted to 0
   // so every existing caller and every existing test keeps sending a valid body.
   discountPaise: z.number().int().nonnegative().default(0),
@@ -232,6 +251,7 @@ const expenseInput = z.object({
   description: name,
   amountPaise: z.number().int().positive(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
+  ...moneyFields,
   ...purchaseTaxFields,
 });
 const paidOn = z.string().date("Use a real date written as YYYY-MM-DD.").optional();
@@ -240,6 +260,7 @@ const supplierPaymentInput = z.object({
   expenseId: id.optional(),
   amountPaise: z.number().int().positive(),
   paidOn,
+  ...moneyFields,
 });
 const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CANCELLED" | undefined => {
   if (value === undefined) return undefined;
@@ -251,6 +272,7 @@ const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CAN
 const paymentInput = z.object({
   amountPaise: z.number().int().positive(),
   paidOn,
+  ...moneyFields,
 });
 const fairInput = z.object({
   companyId: id,
@@ -316,15 +338,19 @@ const purchaseReturnInput = z.object({
 const supplierRefundInput = z.object({
   amountPaise: z.number().int().positive(),
   refundedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
-  // BANK is reachable here, and only here: supplier_payments.payment_account is CHECK IN ('CASH').
-  paymentAccount: z.enum(["CASH", "BANK"]),
+  // The old CASH | BANK choice is still accepted; `moneyAccount` names ANY cash/bank account. If both
+  // are sent they must agree. Neither sent = CASH.
+  paymentAccount: z.enum(["CASH", "BANK"]).optional(),
+  ...moneyFields,
 });
 
 const creditNoteRefundInput = z.object({
   amountPaise: z.number().int().positive(),
   refundedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
-  // BANK is reachable here, and only here: payments.payment_account is still CHECK IN ('CASH').
-  paymentAccount: z.enum(["CASH", "BANK"]),
+  // The old CASH | BANK choice is still accepted; `moneyAccount` names ANY cash/bank account. If both
+  // are sent they must agree. Neither sent = CASH.
+  paymentAccount: z.enum(["CASH", "BANK"]).optional(),
+  ...moneyFields,
 });
 
 const creditNoteApplicationInput = z.object({
@@ -1091,6 +1117,7 @@ export function buildApi(
       ...(input.buyerName === undefined ? {} : { buyerName: input.buyerName }),
       ...(input.buyerContact === undefined ? {} : { buyerContact: input.buyerContact }),
       paymentAccount: input.paymentAccount,
+      ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
       status: input.status,
       lines: input.lines.map((line) => ({
         ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
@@ -1100,7 +1127,8 @@ export function buildApi(
       })),
     };
     repository.saveDraft(invoice);
-    return reply.code(201).send(invoice);
+    const saved = repository.getInvoice(invoice.id);
+    return reply.code(201).send({ ...invoice, moneyAccount: saved.moneyAccount, paymentMode: saved.paymentMode, paymentReference: saved.paymentReference });
   });
 
   app.post("/credit-notes", async (request, reply) => {
@@ -1161,7 +1189,7 @@ export function buildApi(
       creditNoteId: request.params.creditNoteId,
       amountPaise: input.amountPaise,
       refundedOn: input.refundedOn,
-      paymentAccount: input.paymentAccount,
+      ...definedOnly(input),
     });
     return reply.code(201).send({ journalEntry, balance: repository.getCreditNoteBalance(request.params.creditNoteId) });
   });
@@ -1202,6 +1230,7 @@ export function buildApi(
       ...(input.buyerName === undefined ? {} : { buyerName: input.buyerName }),
       ...(input.buyerContact === undefined ? {} : { buyerContact: input.buyerContact }),
       paymentAccount: input.paymentAccount,
+      ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
       status: "QUOTATION",
       lines: input.lines.map((line) => ({
         ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
@@ -1211,7 +1240,8 @@ export function buildApi(
       })),
     };
     repository.saveDraft(quotation);
-    return reply.code(201).send(quotation);
+    const saved = repository.getInvoice(quotation.id);
+    return reply.code(201).send({ ...quotation, moneyAccount: saved.moneyAccount, paymentMode: saved.paymentMode, paymentReference: saved.paymentReference });
   });
 
   app.get<{ Querystring: { businessId?: string } }>(
@@ -1240,6 +1270,7 @@ export function buildApi(
         ...(input.buyerName === undefined ? {} : { buyerName: input.buyerName }),
         ...(input.buyerContact === undefined ? {} : { buyerContact: input.buyerContact }),
         paymentAccount: input.paymentAccount,
+        ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
         status: input.status,
         lines: input.lines.map((line) => ({
           ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
@@ -1273,7 +1304,10 @@ export function buildApi(
     "/invoices/:invoiceId/payments",
     async (request, reply) => {
       const input = parseBody(paymentInput, request.body);
-      return reply.code(201).send(repository.recordPayment(request.params.invoiceId, input.amountPaise, input.paidOn));
+      return reply.code(201).send(repository.recordPayment(
+        request.params.invoiceId, input.amountPaise, input.paidOn,
+        definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
+      ));
     },
   );
 
@@ -1466,7 +1500,7 @@ export function buildApi(
       purchaseReturnId: request.params.returnId,
       amountPaise: input.amountPaise,
       refundedOn: input.refundedOn,
-      paymentAccount: input.paymentAccount,
+      ...definedOnly(input),
     });
     return reply.code(201).send({ journalEntry, balance: repository.getPurchaseReturnBalance(request.params.returnId) });
   });
@@ -1526,6 +1560,7 @@ export function buildApi(
       ...(input.billId === undefined ? {} : { billId: input.billId }),
       ...(input.expenseId === undefined ? {} : { expenseId: input.expenseId }),
       ...(input.paidOn === undefined ? {} : { paidOn: input.paidOn }),
+      ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
     }));
   });
 
@@ -1634,6 +1669,16 @@ export function buildApi(
   // ---- Import and export (R10). CSV and JSON; inspect -> preview (rolled back) -> commit.
   registerImportRoutes(app, { repository });
   registerExportRoutes(app, { repository });
+
+  // ---- Banking (R12 set one). Bank accounts + payment modes + register (12a), Internal Transfers
+  // and Receipt/Payment Vouchers (12c), bank reconciliation (12d). Each lives in its own file.
+  registerBankAccountRoutes(app, { repository });
+  registerMoneyMovementRoutes(app, { repository });
+  registerReconciliationRoutes(app, { repository });
+  // R12 set two: statement import (12e), the "For review" queue (12f) with bank-rule pre-fill (12g).
+  registerStatementImportRoutes(app, { repository });
+  registerBankRuleRoutes(app, { repository });
+  registerReviewQueueRoutes(app, { repository, suggest: (line) => suggestFor(repository.db, line) });
 
   return app;
 }

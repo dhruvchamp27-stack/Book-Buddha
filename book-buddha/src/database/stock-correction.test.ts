@@ -367,7 +367,8 @@ describe("S10-4 migration v22", () => {
   });
 
   it("is registered as v22 and the whole chain reaches it", () => {
-    expect(migrations.at(-1)?.version).toBe(22);
+    // Registered, not necessarily LAST: later migrations (v23+) must not break this assertion.
+    expect(migrations.map((m) => m.version)).toContain(22);
     const db = new Database(":memory:");
     runMigrations(db);
     expect((db.prepare("SELECT sql FROM sqlite_master WHERE name = 'stock_movements'").get() as { sql: string }).sql).toContain("ADJUSTMENT_REVERSAL");

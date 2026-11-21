@@ -49,6 +49,10 @@ import { runMigrations } from "./migrations.js";
 import { RepositoryValidationError } from "./errors.js";
 import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
+import { resolveMoneyFields, legacyAccountFor, DEFAULT_MONEY_ACCOUNT, type MoneyFields, type MoneyFieldsInput } from "./money-account-schema.js";
+import { assertMoneyAccount } from "../banking/money-accounts.js";
+import { assertNotOnBankLine } from "../banking/statement-lines.js";
+export type { MoneyFields, MoneyFieldsInput } from "./money-account-schema.js";
 import { assertReportFairExists, reportConditions } from "./report-filters-sql.js";
 import {
   salesByBusiness, salesByCustomer, salesByFair, salesByItem, salesByTax, creditNoteReport, salesReturnReport,
@@ -216,6 +220,9 @@ interface InvoiceRow {
   business_id: string;
   customer_id: string;
   payment_account: AccountCode;
+  money_account: string;
+  payment_mode: string | null;
+  payment_reference: string | null;
   status: Invoice["status"];
   fair_id: string | null;
   buyer_name: string | null;
@@ -487,7 +494,7 @@ export interface CashRecognitionRow {
   /** A chart_accounts code, extensible at runtime - NOT a fixed union. */
   readonly account: string;
   readonly amountPaise: number;
-  readonly documentType: "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "OPENING_BALANCE";
+  readonly documentType: "INVOICE" | "PURCHASE_BILL" | "EXPENSE" | "OPENING_BALANCE" | "MONEY_VOUCHER";
   readonly documentId: string;
 }
 
@@ -831,6 +838,10 @@ export interface InvoiceSummary {
   readonly businessId: string;
   readonly customerId: string;
   readonly paymentAccount: AccountCode;
+  /** R12b. Which cash/bank account the money went through (meaningful when paid at once). */
+  readonly moneyAccount: string;
+  readonly paymentMode: string | null;
+  readonly paymentReference: string | null;
   readonly status: Invoice["status"];
   readonly fairId?: string;
   readonly taxType: Invoice["taxType"];
@@ -1991,17 +2002,54 @@ export class AccountingRepository {
       taxRateBasisPoints: row.tax_rate_basis_points,
       ...(row.converted_invoice_id === null ? {} : { convertedInvoiceId: row.converted_invoice_id }),
       paymentAccount: row.payment_account,
+      moneyAccount: row.money_account,
+      paymentMode: row.payment_mode,
+      paymentReference: row.payment_reference,
       status: row.status,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
     }));
   }
 
-  public saveDraft(invoice: Invoice): void {
+  /**
+   * R12b. Validates the money fields of a document and returns what to store. ONLY a document paid
+   * at once (payment_account 'CASH') has a money account; one sold or bought on credit has none until
+   * a payment is recorded against it, so naming one there is refused rather than silently dropped.
+   */
+  private resolveDocumentMoney(businessId: string, paymentAccount: string, input: MoneyFieldsInput): MoneyFields {
+    if (paymentAccount !== "CASH") {
+      const named = (input.moneyAccount !== undefined && input.moneyAccount !== DEFAULT_MONEY_ACCOUNT)
+        || (input.paymentMode !== undefined && input.paymentMode !== null)
+        || (input.paymentReference !== undefined && input.paymentReference !== null && input.paymentReference.trim() !== "");
+      if (named) {
+        throw new RepositoryValidationError(
+          "A money account, payment mode or reference belongs to a document paid at once. For a document on credit, name them on each payment instead.",
+        );
+      }
+      return { moneyAccount: DEFAULT_MONEY_ACCOUNT, paymentMode: null, paymentReference: null };
+    }
+    return resolveMoneyFields(this.db, this.requireBusinessCompany(businessId).companyId, input);
+  }
+
+  /** R12b. The account a document paid at once settled through (CASH unless a bank was named). */
+  private invoiceSettlementAccount(invoice: Invoice): string {
+    if (invoice.paymentAccount !== "CASH") return invoice.paymentAccount;
+    const row = this.db.prepare("SELECT money_account FROM invoices WHERE id = ?").get(invoice.id) as { money_account: string } | undefined;
+    return row?.money_account ?? DEFAULT_MONEY_ACCOUNT;
+  }
+
+  private billSettlementAccount(bill: PurchaseBillRecord): string {
+    if (bill.paymentAccount !== "CASH") return bill.paymentAccount;
+    const row = this.db.prepare("SELECT money_account FROM purchase_bills WHERE id = ?").get(bill.id) as { money_account: string } | undefined;
+    return row?.money_account ?? DEFAULT_MONEY_ACCOUNT;
+  }
+
+  public saveDraft(invoice: Invoice & MoneyFieldsInput): void {
     const transaction = this.db.transaction(() => {
       this.validateInvoiceReferences(invoice);
+      const money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, invoice);
       this.db
         .prepare(
-          "INSERT INTO invoices (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, number, invoice_date, due_date, discount_paise, extra_charge_paise, notes, payment_terms, tax_type, tax_rate_basis_points, payment_account, status, converted_invoice_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO invoices (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, number, invoice_date, due_date, discount_paise, extra_charge_paise, notes, payment_terms, tax_type, tax_rate_basis_points, payment_account, status, converted_invoice_id, created_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           invoice.id,
@@ -2028,6 +2076,9 @@ export class AccountingRepository {
           invoice.status,
           invoice.convertedInvoiceId ?? null,
           new Date().toISOString(),
+          money.moneyAccount,
+          money.paymentMode,
+          money.paymentReference,
         );
       const lineStatement = this.db.prepare(
         "INSERT INTO invoice_lines (invoice_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
@@ -2045,7 +2096,7 @@ export class AccountingRepository {
     transaction();
   }
 
-  public updateDraft(invoice: Invoice): void {
+  public updateDraft(invoice: Invoice & MoneyFieldsInput): void {
     if (invoice.status !== "DRAFT" && invoice.status !== "QUOTATION") {
       throw new Error("Only draft invoices and quotations can be edited.");
     }
@@ -2055,9 +2106,10 @@ export class AccountingRepository {
         throw new Error("Only draft invoices and quotations can be edited.");
       }
       this.validateInvoiceReferences(invoice);
+      const money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, invoice);
       this.db
         .prepare(
-          "UPDATE invoices SET business_id = ?, customer_id = ?, fair_id = ?, buyer_name = ?, buyer_contact = ?, number = ?, invoice_date = ?, due_date = ?, discount_paise = ?, extra_charge_paise = ?, notes = ?, payment_terms = ?, tax_type = ?, tax_rate_basis_points = ?, payment_account = ?, status = ? WHERE id = ?",
+          "UPDATE invoices SET business_id = ?, customer_id = ?, fair_id = ?, buyer_name = ?, buyer_contact = ?, number = ?, invoice_date = ?, due_date = ?, discount_paise = ?, extra_charge_paise = ?, notes = ?, payment_terms = ?, tax_type = ?, tax_rate_basis_points = ?, payment_account = ?, status = ?, money_account = ?, payment_mode = ?, payment_reference = ? WHERE id = ?",
         )
         .run(
           invoice.businessId,
@@ -2081,6 +2133,9 @@ export class AccountingRepository {
           invoice.taxRateBasisPoints ?? 0,
           invoice.paymentAccount,
           invoice.status,
+          money.moneyAccount,
+          money.paymentMode,
+          money.paymentReference,
           invoice.id,
         );
       this.db
@@ -2193,7 +2248,7 @@ export class AccountingRepository {
       const offsetPaise = Math.min(noteInclusivePaise, outstandingPaise);
       const refundablePaise = noteInclusivePaise - offsetPaise;
       const settlementLines: Array<JournalEntry["lines"][number]> = [];
-      if (offsetPaise > 0) settlementLines.push({ account: invoice.paymentAccount, debitPaise: 0, creditPaise: offsetPaise });
+      if (offsetPaise > 0) settlementLines.push({ account: this.invoiceSettlementAccount(invoice), debitPaise: 0, creditPaise: offsetPaise });
       if (refundablePaise > 0) settlementLines.push({ account: "CUSTOMER_CREDITS", debitPaise: 0, creditPaise: refundablePaise });
       const entry: JournalEntry = {
         id: `je-credit-note-${note.id}`,
@@ -2308,8 +2363,9 @@ export class AccountingRepository {
     creditNoteId: string;
     amountPaise: number;
     refundedOn: string;
-    paymentAccount: "CASH" | "BANK";
-  }): JournalEntry {
+    /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
+    paymentAccount?: "CASH" | "BANK" | undefined;
+  } & MoneyFieldsInput): JournalEntry {
     return this.db.transaction(() => {
       const note = this.getCreditNote(input.creditNoteId);
       if (note.status !== "FINALIZED") {
@@ -2319,6 +2375,7 @@ export class AccountingRepository {
         throw new RepositoryValidationError("A refund must be a whole number of paise above zero.");
       }
       const invoice = this.getInvoice(note.invoiceId);
+      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(invoice.businessId).companyId, input, input.paymentAccount);
       // Validated as a real date, not merely string-compared: "garbage" sorts after every ISO
       // date, so it would clear the check below and land straight in entryDate.
       this.assertIsoDate("Refund date", input.refundedOn);
@@ -2341,7 +2398,7 @@ export class AccountingRepository {
         isReversal: false,
         lines: [
           { account: "CUSTOMER_CREDITS", debitPaise: input.amountPaise, creditPaise: 0 },
-          { account: input.paymentAccount, debitPaise: 0, creditPaise: input.amountPaise },
+          { account: money.moneyAccount, debitPaise: 0, creditPaise: input.amountPaise },
         ],
       };
       this.insertJournalEntry(entry, {
@@ -2351,9 +2408,12 @@ export class AccountingRepository {
       });
       this.db
         .prepare(
-          "INSERT INTO credit_note_refunds (id, credit_note_id, amount_paise, refunded_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO credit_note_refunds (id, credit_note_id, amount_paise, refunded_on, payment_account, created_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(input.id, note.id, input.amountPaise, input.refundedOn, input.paymentAccount, new Date().toISOString());
+        .run(
+          input.id, note.id, input.amountPaise, input.refundedOn, legacyAccountFor(this.db, money.moneyAccount), new Date().toISOString(),
+          money.moneyAccount, money.paymentMode, money.paymentReference,
+        );
       this.insertAuditEvent({ action: "credit_note.refunded", entityId: input.id, occurredAt: new Date().toISOString() });
       return entry;
     })();
@@ -2669,7 +2729,7 @@ export class AccountingRepository {
     };
   }
 
-  public getInvoice(invoiceId: string): Invoice {
+  public getInvoice(invoiceId: string): Invoice & MoneyFields {
     const row = this.db
       .prepare("SELECT * FROM invoices WHERE id = ?")
       .get(invoiceId) as InvoiceRow | undefined;
@@ -2700,6 +2760,9 @@ export class AccountingRepository {
       ...(row.buyer_name === null ? {} : { buyerName: row.buyer_name }),
       ...(row.buyer_contact === null ? {} : { buyerContact: row.buyer_contact }),
       paymentAccount: row.payment_account,
+      moneyAccount: row.money_account,
+      paymentMode: row.payment_mode,
+      paymentReference: row.payment_reference,
       status: row.status,
       lines: lines.map((line): InvoiceLine => ({
         ...(line.item_id === null ? {} : { itemId: line.item_id }),
@@ -2714,17 +2777,28 @@ export class AccountingRepository {
     const finalized = this.db.transaction(() => {
       const invoice = this.getInvoice(invoiceId);
       const result = finalizeInvoice(invoice);
+      // R12b. A document paid at once debits the cash/bank account it was paid into. The engine
+      // posts the settlement line to `paymentAccount` ('CASH' = paid at once), so that one line is
+      // pointed at the chosen account here. The default (CASH) is the identical entry as before.
+      let journalEntry = result.journalEntry;
+      if (invoice.paymentAccount === "CASH" && invoice.moneyAccount !== DEFAULT_MONEY_ACCOUNT) {
+        assertMoneyAccount(this.db, invoice.moneyAccount, this.requireBusinessCompany(invoice.businessId).companyId);
+        journalEntry = {
+          ...journalEntry,
+          lines: journalEntry.lines.map((line, index) => (index === 0 ? { ...line, account: invoice.moneyAccount } : line)),
+        };
+      }
       const inventoryCostPaise = this.consumeInvoiceStock(invoice);
       this.db
         .prepare("UPDATE invoices SET status = ? WHERE id = ?")
         .run(result.invoice.status, invoiceId);
       const dims = { businessId: invoice.businessId, entryDate: this.invoiceEntryDate(invoiceId), ...fairDim(invoice.fairId) };
-      this.insertJournalEntry(result.journalEntry, dims);
+      this.insertJournalEntry(journalEntry, dims);
       if (inventoryCostPaise > 0) {
         this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, false), dims);
       }
       this.insertAuditEvent(result.auditEvent);
-      return result.journalEntry;
+      return journalEntry;
     })();
     return finalized;
   }
@@ -2799,7 +2873,7 @@ export class AccountingRepository {
     return new Date(`${paidOn}T12:00:00+05:30`).toISOString();
   }
 
-  public recordPayment(invoiceId: string, amountPaise: number, paidOn?: string): Payment {
+  public recordPayment(invoiceId: string, amountPaise: number, paidOn?: string, moneyInput: MoneyFieldsInput = {}): Payment & MoneyFields {
     const payment = this.db.transaction(() => {
       const paidAt = this.paymentInstant(paidOn);
       const invoice = this.getInvoice(invoiceId);
@@ -2812,6 +2886,7 @@ export class AccountingRepository {
       if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
         throw new RepositoryValidationError("Payment amount must be a positive whole number of paise.");
       }
+      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(invoice.businessId).companyId, moneyInput);
       // DEFECT FIXED: this capped against the ORIGINAL invoice total and counted only the
       // `payments` table, so a credit note did not reduce what the customer could still pay.
       // On a credited invoice they could overpay, driving RECEIVABLES NEGATIVE with no error
@@ -2822,7 +2897,7 @@ export class AccountingRepository {
           `Payment cannot exceed the invoice outstanding balance of ${outstandingPaise} paise.`,
         );
       }
-      const result: Payment = {
+      const result: Payment & MoneyFields = {
         id: randomUUID(),
         invoiceId,
         amountPaise,
@@ -2830,12 +2905,13 @@ export class AccountingRepository {
         paidAt,
         cancelledAt: null,
         cancellationReason: null,
+        ...money,
       };
       this.db
-        .prepare("INSERT INTO payments (id, invoice_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?)")
-        .run(result.id, result.invoiceId, result.amountPaise, result.paymentAccount, result.paidAt);
+        .prepare("INSERT INTO payments (id, invoice_id, amount_paise, payment_account, paid_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(result.id, result.invoiceId, result.amountPaise, result.paymentAccount, result.paidAt, money.moneyAccount, money.paymentMode, money.paymentReference);
       const paymentLines = [
-        { account: "CASH" as const, debitPaise: amountPaise, creditPaise: 0 },
+        { account: money.moneyAccount, debitPaise: amountPaise, creditPaise: 0 },
         { account: "RECEIVABLES" as const, debitPaise: 0, creditPaise: amountPaise },
       ];
       this.insertJournalEntry({
@@ -2907,6 +2983,7 @@ export class AccountingRepository {
       if (row.cancelled_at !== null) {
         throw new RepositoryValidationError("This payment has already been cancelled.");
       }
+      assertNotOnBankLine(this.db, `je-payment-${row.id}`, "This payment");
       const invoice = this.getInvoice(row.invoice_id);
       // The cancellation is dated today, so TODAY is the period that has to be open. The
       // original payment's own period stays untouched, which is the point of reversing.
@@ -2944,6 +3021,7 @@ export class AccountingRepository {
       if (row.cancelled_at !== null) {
         throw new RepositoryValidationError("This supplier payment has already been cancelled.");
       }
+      assertNotOnBankLine(this.db, `je-supplier-payment-${row.id}`, "This supplier payment");
       const document = row.bill_id !== null
         ? (() => { const bill = this.getPurchaseBill(row.bill_id as string); return { id: bill.id, businessId: bill.businessId, fairId: bill.fairId, number: bill.number }; })()
         : (() => { const expense = this.getExpense(row.expense_id as string); return { id: expense.id, businessId: expense.businessId, fairId: expense.fairId, number: expense.number }; })();
@@ -2972,10 +3050,10 @@ export class AccountingRepository {
     })();
   }
 
-  public listPayments(invoiceId: string): readonly Payment[] {
+  public listPayments(invoiceId: string): ReadonlyArray<Payment & MoneyFields> {
     const rows = this.db
-      .prepare("SELECT id, invoice_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason FROM payments WHERE invoice_id = ? ORDER BY paid_at, id")
-      .all(invoiceId) as Array<{ id: string; invoice_id: string; amount_paise: number; payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null }>;
+      .prepare("SELECT id, invoice_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason, money_account, payment_mode, payment_reference FROM payments WHERE invoice_id = ? ORDER BY paid_at, id")
+      .all(invoiceId) as Array<{ id: string; invoice_id: string; amount_paise: number; payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null; money_account: string; payment_mode: string | null; payment_reference: string | null }>;
     return rows.map((row) => ({
       id: row.id,
       invoiceId: row.invoice_id,
@@ -2984,6 +3062,9 @@ export class AccountingRepository {
       paidAt: row.paid_at,
       cancelledAt: row.cancelled_at,
       cancellationReason: row.cancellation_reason,
+      moneyAccount: row.money_account,
+      paymentMode: row.payment_mode,
+      paymentReference: row.payment_reference,
     }));
   }
 
@@ -3360,7 +3441,7 @@ export class AccountingRepository {
     // Posted lines of the P&L-side accounts, grouped by document and by entry.
     const lineRows = this.db
       .prepare(
-        `SELECT je.id AS entry_id, je.source_type, je.source_id,
+        `SELECT je.id AS entry_id, je.source_type, je.source_id, je.business_id, je.fair_id,
                 COALESCE(je.entry_date, date(je.created_at, '+330 minutes')) AS entry_date,
                 jl.account, jl.debit_paise, jl.credit_paise
            FROM journal_lines jl
@@ -3370,8 +3451,8 @@ export class AccountingRepository {
           ORDER BY je.rowid, jl.id`,
       )
       .all(...SETTLEMENT_ROLES) as Array<{
-      entry_id: string; source_type: string; source_id: string; entry_date: string;
-      account: string; debit_paise: number; credit_paise: number;
+      entry_id: string; source_type: string; source_id: string; business_id: string | null; fair_id: string | null;
+      entry_date: string; account: string; debit_paise: number; credit_paise: number;
     }>;
     const byDocument = new Map<string, Array<(typeof lineRows)[number]>>();
     for (const row of lineRows) {
@@ -3803,6 +3884,23 @@ export class AccountingRepository {
       }
     }
 
+    // MONEY VOUCHERS (R12b). A Receipt or Payment Voucher moves money against any account (interest,
+    // capital, a loan, bank charges, GST paid), so it is cash on its OWN date: each non-settlement
+    // line (settlement accounts are already excluded from lineRows) is recognised in full on the
+    // entry's date. A reversal is a mirror entry of the same source type, so it recognises the
+    // negative on ITS date, with no special case. INTERNAL_TRANSFER entries touch only settlement
+    // accounts, so they leave lineRows altogether and nothing is recognised for them.
+    for (const row of lineRows) {
+      if (row.source_type !== "MONEY_VOUCHER") continue;
+      if (filter.businessId !== undefined && row.business_id !== filter.businessId) continue;
+      if (filter.fairId !== undefined && row.fair_id !== filter.fairId) continue;
+      if (!inPeriod(row.entry_date)) continue;
+      const amountPaise = natural(row);
+      if (amountPaise !== 0) {
+        recognitions.push({ date: row.entry_date, account: row.account, amountPaise, documentType: "MONEY_VOUCHER", documentId: row.source_id });
+      }
+    }
+
     // Opening CUSTOMER balances (S5-2, R4b). An opening balance of Y carrying income X (0 <= X <= Y)
     // recognises X x collected / Y on the CASH basis, on each RECEIPT'S date (S1-6). X = 0 recognises
     // nothing: the sale predates the books and the collection is a balance-sheet movement only.
@@ -4121,7 +4219,7 @@ export class AccountingRepository {
            FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
           WHERE je.source_id = ? AND je.id LIKE 'je-credit-note-%' AND jl.account = ?`,
       )
-      .get(invoice.id, invoice.paymentAccount) as { credited: number };
+      .get(invoice.id, this.invoiceSettlementAccount(invoice)) as { credited: number };
     return row.credited;
   }
 
@@ -4949,7 +5047,18 @@ export class AccountingRepository {
 
   // ---- purchase bills
 
-  public createPurchaseBill(input: PurchaseBillInput): PurchaseBillRecord {
+  /**
+   * R12b. purchaseEntry credits `paymentAccount` ('CASH' = paid at once) for what was paid. For a
+   * document paid at once into another cash/bank account, that one settlement line is re-pointed at
+   * it. The default (CASH) returns the entry untouched.
+   */
+  private pointSettlementAtMoneyAccount(entry: JournalEntry, paymentAccount: string, moneyAccount: string, businessId: string): JournalEntry {
+    if (paymentAccount !== "CASH" || moneyAccount === DEFAULT_MONEY_ACCOUNT) return entry;
+    assertMoneyAccount(this.db, moneyAccount, this.requireBusinessCompany(businessId).companyId);
+    return { ...entry, lines: entry.lines.map((line) => (line.account === "CASH" ? { ...line, account: moneyAccount } : line)) };
+  }
+
+  public createPurchaseBill(input: PurchaseBillInput & MoneyFieldsInput): PurchaseBillRecord & MoneyFields {
     const id = input.id ?? randomUUID();
     const taxType = input.taxType ?? "NONE";
     const rate = input.taxRateBasisPoints ?? 0;
@@ -5002,17 +5111,18 @@ export class AccountingRepository {
       if (discountPaise > subtotal) {
         throw new RepositoryValidationError("A bill discount cannot exceed the bill subtotal.");
       }
+      const money = this.resolveDocumentMoney(input.businessId, input.paymentAccount, input);
       this.db
         .prepare(
           `INSERT INTO purchase_bills (id, business_id, supplier_id, number, supplier_invoice_number, bill_date, due_date,
              notes, tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id,
-             discount_paise, extra_charge_paise)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?)`,
+             discount_paise, extra_charge_paise, money_account, payment_mode, payment_reference)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId, input.number, input.supplierInvoiceNumber ?? null, input.billDate,
           input.dueDate ?? null, input.notes ?? null, taxType, rate, input.paymentAccount, new Date().toISOString(),
-          input.fairId ?? null, discountPaise, extraChargePaise,
+          input.fairId ?? null, discountPaise, extraChargePaise, money.moneyAccount, money.paymentMode, money.paymentReference,
         );
       const lineStatement = this.db.prepare(
         "INSERT INTO purchase_bill_lines (bill_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
@@ -5025,12 +5135,13 @@ export class AccountingRepository {
     return this.getPurchaseBill(id);
   }
 
-  public getPurchaseBill(billId: string): PurchaseBillRecord {
+  public getPurchaseBill(billId: string): PurchaseBillRecord & MoneyFields {
     const row = this.db.prepare("SELECT * FROM purchase_bills WHERE id = ?").get(billId) as {
       id: string; business_id: string; supplier_id: string; number: string; supplier_invoice_number: string | null;
       bill_date: string; due_date: string | null; notes: string | null; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
       fair_id: string | null; discount_paise: number; extra_charge_paise: number;
+      money_account: string; payment_mode: string | null; payment_reference: string | null;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Purchase bill ${billId} was not found.`);
     const lineRows = this.db
@@ -5061,10 +5172,11 @@ export class AccountingRepository {
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
       subtotalPaise, discountPaise, extraChargePaise, taxablePaise, taxPaise,
       totalPaise: taxablePaise + taxPaise, paidPaise: paid.paid,
+      moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
     };
   }
 
-  public listPurchaseBills(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): readonly PurchaseBillRecord[] {
+  public listPurchaseBills(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): ReadonlyArray<PurchaseBillRecord & MoneyFields> {
     const conditions: string[] = [];
     const params: string[] = [];
     if (filter.businessId !== undefined) { conditions.push("business_id = ?"); params.push(filter.businessId); }
@@ -5111,10 +5223,11 @@ export class AccountingRepository {
         taxRateBasisPoints: bill.taxRateBasisPoints,
         paymentAccount: bill.paymentAccount,
       }));
-      this.insertJournalEntry(result.entry, { businessId: bill.businessId, entryDate: bill.billDate, ...fairDim(bill.fairId) });
+      const billEntry = this.pointSettlementAtMoneyAccount(result.entry, bill.paymentAccount, bill.moneyAccount, bill.businessId);
+      this.insertJournalEntry(billEntry, { businessId: bill.businessId, entryDate: bill.billDate, ...fairDim(bill.fairId) });
       this.db.prepare("UPDATE purchase_bills SET status = 'FINALIZED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.finalized", entityId: bill.id, occurredAt: new Date().toISOString() });
-      return result.entry;
+      return billEntry;
     })();
   }
 
@@ -5280,7 +5393,7 @@ export class AccountingRepository {
       const offsetPaise = Math.min(owedBackPaise, outstandingPaise);
       const creditPaise = owedBackPaise - offsetPaise;
       const settlementLines: JournalEntry["lines"] = [
-        ...(offsetPaise > 0 ? [{ account: bill.paymentAccount, debitPaise: offsetPaise, creditPaise: 0 }] : []),
+        ...(offsetPaise > 0 ? [{ account: this.billSettlementAccount(bill), debitPaise: offsetPaise, creditPaise: 0 }] : []),
         ...(creditPaise > 0 ? [{ account: "SUPPLIER_CREDITS", debitPaise: creditPaise, creditPaise: 0 }] : []),
       ];
 
@@ -5378,8 +5491,9 @@ export class AccountingRepository {
     purchaseReturnId: string;
     amountPaise: number;
     refundedOn: string;
-    paymentAccount: "CASH" | "BANK";
-  }): JournalEntry {
+    /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
+    paymentAccount?: "CASH" | "BANK" | undefined;
+  } & MoneyFieldsInput): JournalEntry {
     return this.db.transaction(() => {
       const ret = this.getPurchaseReturn(input.purchaseReturnId);
       if (ret.status !== "FINALIZED") {
@@ -5402,6 +5516,7 @@ export class AccountingRepository {
       }
       const bill = this.getPurchaseBill(ret.billId);
       if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
+      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(bill.businessId).companyId, input, input.paymentAccount);
       const id = input.id ?? randomUUID();
       const entry: JournalEntry = {
         // Deliberately NOT the `je-purchase-return-` prefix: that belongs to the return's own
@@ -5412,14 +5527,14 @@ export class AccountingRepository {
         description: `Supplier refund against purchase return ${ret.number}`,
         isReversal: false,
         lines: [
-          { account: input.paymentAccount, debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: money.moneyAccount, debitPaise: input.amountPaise, creditPaise: 0 },
           { account: "SUPPLIER_CREDITS", debitPaise: 0, creditPaise: input.amountPaise },
         ],
       };
       this.insertJournalEntry(entry, { businessId: bill.businessId, entryDate: input.refundedOn, ...fairDim(bill.fairId) });
       this.db
-        .prepare("INSERT INTO supplier_refunds (id, purchase_return_id, amount_paise, refunded_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(id, ret.id, input.amountPaise, input.refundedOn, input.paymentAccount, new Date().toISOString());
+        .prepare("INSERT INTO supplier_refunds (id, purchase_return_id, amount_paise, refunded_on, payment_account, created_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(id, ret.id, input.amountPaise, input.refundedOn, legacyAccountFor(this.db, money.moneyAccount), new Date().toISOString(), money.moneyAccount, money.paymentMode, money.paymentReference);
       this.insertAuditEvent({ action: "purchase_return.refunded", entityId: id, occurredAt: new Date().toISOString() });
       return entry;
     })();
@@ -5431,7 +5546,7 @@ export class AccountingRepository {
       `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS returned
          FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
         WHERE je.source_id = ? AND je.id LIKE 'je-purchase-return-%' AND jl.account = ?`,
-    ).get(bill.id, bill.paymentAccount) as { returned: number };
+    ).get(bill.id, this.billSettlementAccount(bill)) as { returned: number };
     return row.returned;
   }
 
@@ -5642,7 +5757,7 @@ export class AccountingRepository {
 
   // ---- expenses
 
-  public createExpense(input: ExpenseInput): ExpenseRecord {
+  public createExpense(input: ExpenseInput & MoneyFieldsInput): ExpenseRecord & MoneyFields {
     const id = input.id ?? randomUUID();
     const taxType = input.taxType ?? "NONE";
     const rate = input.taxRateBasisPoints ?? 0;
@@ -5671,28 +5786,30 @@ export class AccountingRepository {
           throw new RepositoryValidationError("The expense category must belong to the same company as the business.");
         }
       }
+      const money = this.resolveDocumentMoney(input.businessId, input.paymentAccount, input);
       this.db
         .prepare(
           `INSERT INTO expenses (id, business_id, supplier_id, category_id, number, expense_date, description, amount_paise,
-             tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+             tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id,
+             money_account, payment_mode, payment_reference)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId ?? null, input.categoryId ?? null, input.number, input.expenseDate,
           input.description, input.amountPaise, taxType, rate, input.paymentAccount, new Date().toISOString(),
-          input.fairId ?? null,
+          input.fairId ?? null, money.moneyAccount, money.paymentMode, money.paymentReference,
         );
       this.insertAuditEvent({ action: "expense.created", entityId: id, occurredAt: new Date().toISOString() });
     })();
     return this.getExpense(id);
   }
 
-  public getExpense(expenseId: string): ExpenseRecord {
+  public getExpense(expenseId: string): ExpenseRecord & MoneyFields {
     const row = this.db.prepare("SELECT * FROM expenses WHERE id = ?").get(expenseId) as {
       id: string; business_id: string; supplier_id: string | null; category_id: string | null; number: string;
       expense_date: string; description: string; amount_paise: number; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
-      fair_id: string | null;
+      fair_id: string | null; money_account: string; payment_mode: string | null; payment_reference: string | null;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Expense ${expenseId} was not found.`);
     const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(row.amount_paise * row.tax_rate_basis_points / 10000);
@@ -5705,10 +5822,11 @@ export class AccountingRepository {
       taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points, paymentAccount: row.payment_account,
       status: row.status, taxPaise, totalPaise: row.amount_paise + taxPaise, paidPaise: paid.paid,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
+      moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
     };
   }
 
-  public listExpenses(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): readonly ExpenseRecord[] {
+  public listExpenses(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): ReadonlyArray<ExpenseRecord & MoneyFields> {
     const conditions: string[] = [];
     const params: string[] = [];
     if (filter.businessId !== undefined) { conditions.push("business_id = ?"); params.push(filter.businessId); }
@@ -5735,10 +5853,11 @@ export class AccountingRepository {
         taxRateBasisPoints: expense.taxRateBasisPoints,
         paymentAccount: expense.paymentAccount,
       }));
-      this.insertJournalEntry(result.entry, { businessId: expense.businessId, entryDate: expense.expenseDate, ...fairDim(expense.fairId) });
+      const expenseEntry = this.pointSettlementAtMoneyAccount(result.entry, expense.paymentAccount, expense.moneyAccount, expense.businessId);
+      this.insertJournalEntry(expenseEntry, { businessId: expense.businessId, entryDate: expense.expenseDate, ...fairDim(expense.fairId) });
       this.db.prepare("UPDATE expenses SET status = 'FINALIZED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.finalized", entityId: expense.id, occurredAt: new Date().toISOString() });
-      return result.entry;
+      return expenseEntry;
     })();
   }
 
@@ -5760,7 +5879,7 @@ export class AccountingRepository {
 
   // ---- supplier payments
 
-  public recordSupplierPayment(input: SupplierPaymentInput): SupplierPayment {
+  public recordSupplierPayment(input: SupplierPaymentInput & MoneyFieldsInput): SupplierPayment & MoneyFields {
     return this.db.transaction(() => {
       const paidAt = this.paymentInstant(input.paidOn);
       if ((input.billId === undefined) === (input.expenseId === undefined)) {
@@ -5784,8 +5903,9 @@ export class AccountingRepository {
       if (input.amountPaise > doc.totalPaise - doc.paidPaise) {
         throw new RepositoryValidationError("Payment cannot exceed the outstanding balance.");
       }
+      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(doc.businessId).companyId, input);
       const sourceId = (input.billId ?? input.expenseId) as string;
-      const payment: SupplierPayment = {
+      const payment: SupplierPayment & MoneyFields = {
         id: randomUUID(),
         supplierId: doc.supplierId,
         billId: input.billId ?? null,
@@ -5795,24 +5915,32 @@ export class AccountingRepository {
         paidAt,
         cancelledAt: null,
         cancellationReason: null,
+        ...money,
       };
       this.db
-        .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(payment.id, payment.supplierId, payment.billId, payment.expenseId, payment.amountPaise, payment.paymentAccount, payment.paidAt);
+        .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(payment.id, payment.supplierId, payment.billId, payment.expenseId, payment.amountPaise, payment.paymentAccount, payment.paidAt, money.moneyAccount, money.paymentMode, money.paymentReference);
       // Payments only move PAYABLES -> CASH; a finalized document always has its accrual entry.
       this.getSourceJournalEntry(sourceId, input.billId !== undefined ? "PURCHASE_BILL" : "EXPENSE");
-      this.insertJournalEntry(this.guard(() => supplierPaymentEntry({
+      const paymentEntry = this.guard(() => supplierPaymentEntry({
         entryId: `je-supplier-payment-${payment.id}`,
         sourceId,
         description: `Supplier payment for ${doc.number}`,
         amountPaise: payment.amountPaise,
-      })), { businessId: doc.businessId, entryDate: istDateOf(payment.paidAt), ...fairDim(doc.fairId) });
+      }));
+      // R12b. The engine credits CASH; point that one line at the account the money left from.
+      this.insertJournalEntry(
+        money.moneyAccount === DEFAULT_MONEY_ACCOUNT
+          ? paymentEntry
+          : { ...paymentEntry, lines: paymentEntry.lines.map((line) => (line.account === "CASH" ? { ...line, account: money.moneyAccount } : line)) },
+        { businessId: doc.businessId, entryDate: istDateOf(payment.paidAt), ...fairDim(doc.fairId) },
+      );
       this.insertAuditEvent({ action: "supplier.payment_made", entityId: sourceId, occurredAt: new Date().toISOString() });
       return payment;
     })();
   }
 
-  public listSupplierPayments(filter: { billId?: string; expenseId?: string; supplierId?: string } = {}): readonly SupplierPayment[] {
+  public listSupplierPayments(filter: { billId?: string; expenseId?: string; supplierId?: string } = {}): ReadonlyArray<SupplierPayment & MoneyFields> {
     const conditions: string[] = [];
     const params: string[] = [];
     if (filter.billId !== undefined) { conditions.push("bill_id = ?"); params.push(filter.billId); }
@@ -5820,17 +5948,20 @@ export class AccountingRepository {
     if (filter.supplierId !== undefined) { conditions.push("supplier_id = ?"); params.push(filter.supplierId); }
     const rows = this.db
       .prepare(
-        `SELECT id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason FROM supplier_payments
+        `SELECT id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason,
+                money_account, payment_mode, payment_reference FROM supplier_payments
          ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY paid_at, rowid`,
       )
       .all(...params) as Array<{
       id: string; supplier_id: string; bill_id: string | null; expense_id: string | null; amount_paise: number;
       payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null;
+      money_account: string; payment_mode: string | null; payment_reference: string | null;
     }>;
     return rows.map((row) => ({
       id: row.id, supplierId: row.supplier_id, billId: row.bill_id, expenseId: row.expense_id,
       amountPaise: row.amount_paise, paymentAccount: row.payment_account, paidAt: row.paid_at,
       cancelledAt: row.cancelled_at, cancellationReason: row.cancellation_reason,
+      moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
     }));
   }
 
@@ -6634,8 +6765,9 @@ export class AccountingRepository {
     openingCustomerBalanceId: string;
     amountPaise: number;
     receivedOn: string;
-    paymentAccount: "CASH" | "BANK";
-  }): JournalEntry {
+    /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
+    paymentAccount?: "CASH" | "BANK" | undefined;
+  } & MoneyFieldsInput): JournalEntry {
     return this.db.transaction(() => {
       const balance = this.db
         .prepare("SELECT id, business_id, as_at, amount_paise, reversed_at FROM opening_customer_balances WHERE id = ?")
@@ -6645,9 +6777,10 @@ export class AccountingRepository {
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("A receipt must be a whole number of paise above zero.");
       }
-      if (input.paymentAccount !== "CASH" && input.paymentAccount !== "BANK") {
+      if (input.paymentAccount !== undefined && input.paymentAccount !== "CASH" && input.paymentAccount !== "BANK") {
         throw new RepositoryValidationError("A receipt is paid into CASH or BANK.");
       }
+      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(balance.business_id).companyId, input, input.paymentAccount);
       this.assertIsoDate("The receipt date", input.receivedOn);
       if (input.receivedOn < balance.as_at) {
         throw new RepositoryValidationError(`A receipt cannot predate the opening balance (${balance.as_at}).`);
@@ -6671,7 +6804,7 @@ export class AccountingRepository {
         description: `Receipt against opening customer balance ${balance.id}`,
         isReversal: false,
         lines: [
-          { account: input.paymentAccount, debitPaise: input.amountPaise, creditPaise: 0 },
+          { account: money.moneyAccount, debitPaise: input.amountPaise, creditPaise: 0 },
           { account: "RECEIVABLES", debitPaise: 0, creditPaise: input.amountPaise },
         ],
       };
@@ -6679,15 +6812,15 @@ export class AccountingRepository {
       this.insertJournalEntry(entry, { businessId: balance.business_id, entryDate: input.receivedOn });
       this.db
         .prepare(
-          "INSERT INTO opening_balance_receipts (id, opening_customer_balance_id, amount_paise, received_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO opening_balance_receipts (id, opening_customer_balance_id, amount_paise, received_on, payment_account, created_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(input.id, balance.id, input.amountPaise, input.receivedOn, input.paymentAccount, now);
+        .run(input.id, balance.id, input.amountPaise, input.receivedOn, legacyAccountFor(this.db, money.moneyAccount), now, money.moneyAccount, money.paymentMode, money.paymentReference);
       appendAuditEvent(this.db, {
         action: "OPENING_BALANCE_RECEIPT_RECORDED",
         entityId: input.id,
         entityType: "opening_balance_receipts",
         occurredAt: now,
-        afterValues: { openingCustomerBalanceId: balance.id, amountPaise: input.amountPaise, receivedOn: input.receivedOn, paymentAccount: input.paymentAccount },
+        afterValues: { openingCustomerBalanceId: balance.id, amountPaise: input.amountPaise, receivedOn: input.receivedOn, paymentAccount: legacyAccountFor(this.db, money.moneyAccount), moneyAccount: money.moneyAccount, paymentMode: money.paymentMode, paymentReference: money.paymentReference },
       });
       return entry;
     })();
@@ -6807,8 +6940,9 @@ export class AccountingRepository {
     openingSupplierBalanceId: string;
     amountPaise: number;
     paidOn: string;
-    paymentAccount: "CASH" | "BANK";
-  }): JournalEntry {
+    /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
+    paymentAccount?: "CASH" | "BANK" | undefined;
+  } & MoneyFieldsInput): JournalEntry {
     return this.db.transaction(() => {
       const balance = this.db
         .prepare("SELECT id, business_id, as_at, amount_paise, reversed_at FROM opening_supplier_balances WHERE id = ?")
@@ -6818,9 +6952,10 @@ export class AccountingRepository {
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("A settlement must be a whole number of paise above zero.");
       }
-      if (input.paymentAccount !== "CASH" && input.paymentAccount !== "BANK") {
+      if (input.paymentAccount !== undefined && input.paymentAccount !== "CASH" && input.paymentAccount !== "BANK") {
         throw new RepositoryValidationError("A settlement is paid from CASH or BANK.");
       }
+      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(balance.business_id).companyId, input, input.paymentAccount);
       this.assertIsoDate("The payment date", input.paidOn);
       if (input.paidOn < balance.as_at) {
         throw new RepositoryValidationError(`A settlement cannot predate the opening balance (${balance.as_at}).`);
@@ -6845,22 +6980,22 @@ export class AccountingRepository {
         isReversal: false,
         lines: [
           { account: "PAYABLES", debitPaise: input.amountPaise, creditPaise: 0 },
-          { account: input.paymentAccount, debitPaise: 0, creditPaise: input.amountPaise },
+          { account: money.moneyAccount, debitPaise: 0, creditPaise: input.amountPaise },
         ],
       };
       const now = new Date().toISOString();
       this.insertJournalEntry(entry, { businessId: balance.business_id, entryDate: input.paidOn });
       this.db
         .prepare(
-          "INSERT INTO opening_balance_settlements (id, opening_supplier_balance_id, amount_paise, paid_on, payment_account, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO opening_balance_settlements (id, opening_supplier_balance_id, amount_paise, paid_on, payment_account, created_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(input.id, balance.id, input.amountPaise, input.paidOn, input.paymentAccount, now);
+        .run(input.id, balance.id, input.amountPaise, input.paidOn, legacyAccountFor(this.db, money.moneyAccount), now, money.moneyAccount, money.paymentMode, money.paymentReference);
       appendAuditEvent(this.db, {
         action: "OPENING_BALANCE_SETTLEMENT_RECORDED",
         entityId: input.id,
         entityType: "opening_balance_settlements",
         occurredAt: now,
-        afterValues: { openingSupplierBalanceId: balance.id, amountPaise: input.amountPaise, paidOn: input.paidOn, paymentAccount: input.paymentAccount },
+        afterValues: { openingSupplierBalanceId: balance.id, amountPaise: input.amountPaise, paidOn: input.paidOn, paymentAccount: legacyAccountFor(this.db, money.moneyAccount), moneyAccount: money.moneyAccount, paymentMode: money.paymentMode, paymentReference: money.paymentReference },
       });
       return entry;
     })();

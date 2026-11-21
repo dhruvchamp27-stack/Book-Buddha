@@ -72,7 +72,7 @@ The aim is to cut repetitive manual data entry. Bank-statement categorization tu
 ### D6. Helpers (my calls, accepted)
 - **Split** — one bank line across several categories (amounts must sum to the line total).
 - **Transfer** — mark a line as money moved between your **own** accounts (not income/expense).
-- **Uncategorized holding account** — if you can't categorize a line yet, it posts to an *Uncategorized* account so the books still balance; you fix it later. (Rules can't target it.)
+- **Uncategorized holding accounts** — if you can't categorize a line yet, it posts to a holding account so the books still balance; you fix it later. **Two** are auto-created (ruling S11-8, amended 21 Nov 2026): **Uncategorised Expense** for money out and **Uncategorised Income** for money in, renameable but their type never changes. (Rules can't target either.)
 - **Exclude** — remove duplicates / non-book lines; reversible (**Undo**); excluded lines aren't re-imported.
 
 ### D7. The accounting (stays automatic — you never type debits/credits)

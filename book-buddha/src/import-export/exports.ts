@@ -211,7 +211,7 @@ function creditNotesTable(repository: AccountingRepository, scope: ExportScope):
 }
 
 function paymentsTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
-  const columns = ["Payment ID", "Invoice number", "Customer", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason"];
+  const columns = ["Payment ID", "Invoice number", "Customer", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason", "Money account", "Payment mode", "Reference"];
   const l = lookups(repository);
   const businesses = businessIdsInScope(repository, scope);
   const rows: string[][] = [];
@@ -221,6 +221,7 @@ function paymentsTable(repository: AccountingRepository, scope: ExportScope): Ex
       rows.push([
         p.id, summary.number, l.customers.get(summary.customerId) ?? "", isoDay(p.paidAt), money(p.amountPaise),
         p.paymentAccount, p.cancelledAt === null ? "Active" : "Cancelled", isoDay(p.cancelledAt), text(p.cancellationReason),
+        p.moneyAccount, text(p.paymentMode), text(p.paymentReference),
       ]);
     }
   }
@@ -254,7 +255,7 @@ function purchaseBillsTable(repository: AccountingRepository, scope: ExportScope
 }
 
 function supplierPaymentsTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
-  const columns = ["Payment ID", "Supplier", "Bill number", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason"];
+  const columns = ["Payment ID", "Supplier", "Bill number", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason", "Money account", "Payment mode", "Reference"];
   const l = lookups(repository);
   const companySuppliers = scope.companyId === undefined ? undefined : new Set(repository.listSuppliers(scope.companyId).map((s) => s.id));
   const bills = new Map(repository.listPurchaseBills().map((b) => [b.id, b]));
@@ -268,6 +269,7 @@ function supplierPaymentsTable(repository: AccountingRepository, scope: ExportSc
     rows.push([
       p.id, l.suppliers.get(p.supplierId) ?? "", bill?.number ?? "", isoDay(p.paidAt), money(p.amountPaise), p.paymentAccount,
       p.cancelledAt === null ? "Active" : "Cancelled", isoDay(p.cancelledAt), text(p.cancellationReason),
+      p.moneyAccount, text(p.paymentMode), text(p.paymentReference),
     ]);
   }
   return table(columns, rows, ["Paid on", "Amount", "Cancelled on"]);

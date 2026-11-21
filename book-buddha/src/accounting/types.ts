@@ -97,7 +97,15 @@ export type JournalSourceType =
    * when a STOCK_MOVEMENT entry carries its id, so no link table and no new migration is needed.
    * `source_type` has no CHECK constraint in SQLite, so this is a TypeScript widening only.
    */
-  | "STOCK_MOVEMENT";
+  | "STOCK_MOVEMENT"
+  /** R12c. An Internal Transfer between two of the company's own cash/bank accounts. */
+  | "INTERNAL_TRANSFER"
+  /**
+   * R12c. A Receipt Voucher or Payment Voucher: money in or out of a cash/bank account against any
+   * other account (interest received, capital, loans, bank charges, GST paid). Cash moves on the
+   * entry's own date, so the cash view recognises its income/expense lines on that date.
+   */
+  | "MONEY_VOUCHER";
 
 export interface JournalEntry {
   readonly id: string;
