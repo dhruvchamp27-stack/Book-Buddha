@@ -2058,18 +2058,6 @@ export class AccountingRepository {
     }
   }
 
-  /** `base`, or `base-2`, `base-3`... the first invoice number not yet used in the business. */
-  private freeInvoiceNumber(businessId: string, base: string): string {
-    let candidate = base;
-    for (let n = 2; ; n += 1) {
-      const taken = this.db
-        .prepare("SELECT 1 FROM invoices WHERE business_id = ? AND number = ? AND status <> 'QUOTATION' LIMIT 1")
-        .get(businessId, candidate) !== undefined;
-      if (!taken) return candidate;
-      candidate = `${base}-${n}`;
-    }
-  }
-
   public saveDraft(invoice: Invoice & MoneyFieldsInput): void {
     const transaction = this.db.transaction(() => {
       if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number);
@@ -2191,7 +2179,11 @@ export class AccountingRepository {
     transaction();
   }
 
-  public convertQuotation(quotationId: string): Invoice {
+  /**
+   * Owner ruling S16-9: when the invoice number is already taken the conversion is REFUSED (never
+   * renumbered behind his back); he gives the number. Default number: `INV-<quotation number>`.
+   */
+  public convertQuotation(quotationId: string, number?: string): Invoice {
     const quotation = this.getInvoice(quotationId);
     if (quotation.status !== "QUOTATION") {
       throw new RepositoryValidationError("Only quotations can be converted into invoices.");
@@ -2203,7 +2195,7 @@ export class AccountingRepository {
     const invoice: Invoice = {
       ...quotation,
       id: randomUUID(),
-      number: this.freeInvoiceNumber(quotation.businessId, `INV-${quotation.number}`),
+      number: number ?? `INV-${quotation.number}`,
       status: "DRAFT",
     };
     this.saveDraft(invoice);
@@ -4954,7 +4946,8 @@ export class AccountingRepository {
     while (active && runDate <= asOfDate && created.length < MAX_DRAFTS_PER_TEMPLATE_PER_RUN) {
       const invoice: Invoice = {
         id: randomUUID(),
-        number: this.freeInvoiceNumber(template.businessId, `REC-${template.id.slice(0, 8)}-${runDate}`),
+        // S16-9: a taken number is refused by saveDraft (reported as this template's failure), never renumbered.
+        number: `REC-${template.id.slice(0, 8)}-${runDate}`,
         businessId: template.businessId,
         customerId: template.customerId,
         invoiceDate: runDate,

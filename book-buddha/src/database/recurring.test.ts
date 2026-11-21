@@ -71,6 +71,24 @@ describe("recurring invoice templates", () => {
     }
   });
 
+  it("refuses (as this template's failure) when its invoice number is already taken, never renumbering (S16-9)", () => {
+    const { repository, template } = setup();
+    try {
+      const created = repository.createRecurringInvoiceTemplate(template());
+      expect(repository.generateDueInvoices("2026-01-31").invoices).toHaveLength(1);
+      // Wind the template back so the same run date - and so the same number - comes round again.
+      repository.db.prepare("UPDATE recurring_invoice_templates SET next_run_date = '2026-01-31' WHERE id = ?").run(created.id);
+      const again = repository.generateDueInvoices("2026-01-31");
+      expect(again.invoices).toHaveLength(0);
+      expect(again.failures).toHaveLength(1);
+      expect(again.failures[0]?.error).toContain("REC-tmpl-000-2026-01-31 is already used");
+      expect(repository.listInvoices()).toHaveLength(1);
+      expect(repository.getRecurringInvoiceTemplate(created.id).nextRunDate).toBe("2026-01-31");
+    } finally {
+      repository.close();
+    }
+  });
+
   it("generates a draft for a due template and advances nextRunDate", () => {
     const { repository, template } = setup();
     try {

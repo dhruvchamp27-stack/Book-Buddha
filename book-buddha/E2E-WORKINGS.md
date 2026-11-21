@@ -41,7 +41,10 @@ without this a cancellation would land in November 2026 and spoil the October fi
 
 - **Company** Demo Books, accrual basis · **Business** Book Fairs · **Financial year** 1 Apr 2025 – 31 Mar 2026.
 - **Fair** Pune Book Fair, 20–22 Oct 2025, hosted by Sunrise School.
-- **Customers** Raman Books (trade) · Sunrise School (fair host) · walk-in buyers on the cash invoices.
+- **Customers** Raman Books (trade) · Sunrise School (fair host). Fair invoices are always made out to
+  the fair's host (app rule): the walk-in buyers on INV-002/003 are booked under Sunrise School, each with
+  its buyer named on the invoice as a sub-customer (ruling S16-9). No figure changes; Sunrise's statement
+  still shows only INV-004, as the two cash invoices were paid on the spot.
 - **Suppliers** Om Publishers (books) · Print Hub (stationery).
 - **Bank** HDFC Current. **Extra expense accounts** Printing, Bank Charges.
 - **Items** (both stock-tracked) — **Novel A**: books, no GST · **Notebook**: stationery, GST 18%.

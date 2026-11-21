@@ -189,12 +189,19 @@ describe("invoice numbers are unique per business (D11)", () => {
     expect((await req("POST", "/invoices/b/finalize", {})).status).toBeGreaterThanOrEqual(400);
   });
 
-  it("converting a quotation generates a free number when INV-<quotation number> is already taken", async () => {
+  it("converting a quotation REFUSES a taken number and takes the number he gives (S16-9)", async () => {
     const w = await world();
     await must("POST", "/invoices", draft(w, "a", "INV-Q1"));
     await must("POST", "/quotations", draft(w, "q", "Q1", "QUOTATION"));
-    const converted = await must("POST", "/quotations/q/convert", {});
-    expect(converted.number).toBe("INV-Q1-2");
+    const refused = await req("POST", "/quotations/q/convert", {});
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(refused.body)).toContain("INV-Q1 is already used");
+    expect(repository.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE number LIKE 'INV-Q1%'").get()).toEqual({ n: 1 });
+    const converted = await must("POST", "/quotations/q/convert", { number: "INV-7" });
+    expect(converted.number).toBe("INV-7");
+    // With no clash and no number given, the default is still INV-<quotation number>.
+    await must("POST", "/quotations", draft(w, "q2", "Q2", "QUOTATION"));
+    expect((await must("POST", "/quotations/q2/convert", {})).number).toBe("INV-Q2");
   });
 });
 

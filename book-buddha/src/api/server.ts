@@ -1301,9 +1301,12 @@ export function buildApi(
     return repository.getInvoice(request.params.invoiceId);
   });
 
+  // S16-9: an optional `number` for the new invoice; a taken number is refused, never renumbered.
+  const convertQuotationInput = z.object({ number: name.optional() });
   app.post<{ Params: { quotationId: string } }>(
     "/quotations/:quotationId/convert",
-    async (request) => repository.convertQuotation(request.params.quotationId),
+    async (request) =>
+      repository.convertQuotation(request.params.quotationId, parseBody(convertQuotationInput, request.body ?? {}).number),
   );
 
   app.post<{ Params: { invoiceId: string } }>(
