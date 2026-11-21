@@ -8,30 +8,29 @@ done (October 2025 end-to-end ACCEPTANCE test, S16-5), and all 16 audit defects 
 
 ## Last session
 Session 16 (21 Nov) — R12 committed; Q1–Q26 + S16-1..8 ruled; October e2e acceptance test built on his
-approved figures; 16 audit defects (D1–D16) found, recorded, then ALL FIXED (S16-7 rulings). Pushed to 7af9fce.
+approved figures; 16 audit defects (D1–D16) found, recorded, then ALL FIXED (S16-7 rulings). Pushed to 973684b.
+S16-9: taken invoice numbers refused (conversion/recurring); fair buyers stay under the host.
 
 ## State now
 Branch `autonomous/book-buddha-finish`. Gates **all green, measured 21 Nov after the last change:
-tsc 0 · 1,059 tests, 93 files · vite 1.02s.** Migration **v29**. **Count unpushed commits, never quote a
+tsc 0 · 1,060 tests, 93 files · vite 1.04s.** Migration **v29**. **Count unpushed commits, never quote a
 figure from here:** `git log --oneline @{u}..HEAD`. **PUSH in the background and ASK HIM EVERY TIME
 (S11-17).** The October ACCEPTANCE test (`src/e2e/october.e2e.test.ts`) is the end-to-end regression
 check — it must stay green. **ACCEPTANCE (per slice): hand-verified R3, R4c · on trust 7d, 8c ·
 outstanding R1, R2, R4, R4b, R5, R7, R8** (October e2e now covers much of them end to end).
 
 ## NEXT STEP — resume here
-Ask him to push the unpushed commits (defect fixes + context). Then build the **S16 slice** (his rulings,
+Push any unpushed S16-9 commit (ask first). Then build the **S16 slice** (his rulings,
 Progress.md → "Build work still open"): refund account choice · keep money account on edit · import
 repeated payments + last-import banner · pre-opening items as history · back-dating warning everywhere ·
 attachment + restore audit · zero-cost write-down FY lock · stock adjustment (Q15). Then bill discount
 (Q1/Q2, unblocked) → GST per line (Q24) → R10 leftovers → R13 cash flow.
 
 ## Waiting on him (ask when a slice touches it, not as a batch)
-1. **S16-8: my calls in the defect fixes** — supplier-payment cancel follows S16-7(3); doc cancelled after
-   its payments; free-number helper for conversion/recurring; D5 own-lot; D12 wording. Confirm.
-2. **Fair walk-in sales are booked under the host** (app rule, repository.ts:4858): OK? Then fix the
-   "walk-in customer" wording in `book-buddha/E2E-WORKINGS.md`.
-3. **Delete `book-buddha/src/probes/` by hand** — the approval hook blocks folder deletes; it is untracked
+1. **Delete `book-buddha/src/probes/` by hand** — the approval hook blocks folder deletes; it is untracked
    and must stay out of commits; run the suite with `--exclude "src/probes/**"` until it is gone.
+2. **Fair buyers as sub-customers (S16-9(3))** — does he want a sub-customer list/report? Ask when the
+   fair/customer screens are planned, not before.
 **Still NO real database (S11-16)** — never touch his file.
 
 ## Corrections that must not be re-inherited
@@ -39,7 +38,8 @@ attachment + restore audit · zero-cost write-down FY lock · stock adjustment (
 **not** spread header discount/GST. **A `SALE` stock row is NOT always an invoice** (S12-6).
 **A cancelled payment has NO statement row** (S13-1). **There is NO restore route** — by design.
 **S8-1 is REPLACED by S16-7(3):** a payment cancelled in a later month leaves the earlier month alone.
-**Fair invoices must be to the fair's host customer** (repository.ts:4858).
+**Fair invoices must be to the fair's host customer** (repository.ts:4858). **A taken invoice number is
+REFUSED, never renumbered** (S16-9) — conversion takes an optional `number`.
 
 ## Workflow
 Gates from `book-buddha/`: `tsc.cmd` **first** · `vitest.cmd run --root .` · `vite.cmd build` —

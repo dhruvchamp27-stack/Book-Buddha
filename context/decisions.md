@@ -7,6 +7,16 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S16-9 (2026-11-21) — HIS ANSWERS ON S16-8.** (1) **Supplier payments follow S16-7(3)** — a supplier
+  payment cancelled in a later month leaves the earlier month alone: CONFIRMED as built. (2) **A taken
+  invoice number is REFUSED, never renumbered** ("Refuse, I'll number it"): quotation conversion now takes
+  an optional `number` (default `INV-<quotation number>`) and refuses a taken one; a recurring run whose
+  number is taken is refused and reported as that template's failure (its next run date does not move).
+  This REPLACES S16-8(3). (3) **Fair sales stay under the fair's host customer**; his words: "Host
+  customer and book sold to each already enables app to collect data of customers at that time so those
+  will be sub customers" — the buyer recorded on each fair invoice (buyerName/buyerContact) is a
+  sub-customer of the host. Whether that needs its own sub-customer list/report is NOT yet asked — ask
+  when the fair/customer screens are planned. S16-8(2), (4), (5) needed no ruling (no real alternative).
 - **S16-8 (2026-11-21) — MY CALLS IN THE DEFECT FIXES, AWAITING HIS CONFIRMATION.** Built while fixing
   D1–D16 (all 16 now fixed; 1,059 tests green). (1) **S16-7(3) extended to SUPPLIER payments:** a supplier
   payment cancelled in a later month also leaves the earlier month alone (cash P&L shows the take-back in

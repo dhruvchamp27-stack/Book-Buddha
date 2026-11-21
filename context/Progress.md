@@ -2,9 +2,9 @@
 *Top part ≤ 50 lines: loaded at every session start, rewritten at every session end.*
 
 ## Start here next session
-- **Next step:** ask Dhruv to push the unpushed commits (defect fixes + context). Then the **S16 slice** (his rulings; list under "Build work still open" below) → bill discount (Q1/Q2, unblocked) → GST per line (Q24) → R10 leftovers → R13 cash flow.
-- **Waiting on Dhruv:** confirm my calls S16-8 (defect-fix details); fair walk-in sales booked under the host (then fix the wording in `E2E-WORKINGS.md`); delete `book-buddha/src/probes/` by hand (hook blocks folder deletes; keep it out of commits).
-- **Branch and gates (measured 21 Nov, after the last change):** `autonomous/book-buddha-finish`, never `main`. tsc exit 0 · 1,059 tests in 93 files · vite built in 1.02s · migration v29.
+- **Next step:** push any unpushed S16-9 commit (ask Dhruv first). Then the **S16 slice** (his rulings; list under "Build work still open" below) → bill discount (Q1/Q2, unblocked) → GST per line (Q24) → R10 leftovers → R13 cash flow.
+- **Waiting on Dhruv:** delete `book-buddha/src/probes/` by hand (hook blocks folder deletes; keep it out of commits). S16-8 answered (S16-9). Later: fair buyers as sub-customers — list/report wanted? (ask at fair/customer screens).
+- **Branch and gates (measured 21 Nov, after the last change):** `autonomous/book-buddha-finish`, never `main`. tsc exit 0 · 1,060 tests in 93 files · vite built in 1.04s · migration v29.
 - **Push rule:** only after the tests pass, in the background, and only after asking Dhruv each time. Count unpushed commits fresh with `git log --oneline @{u}..HEAD`.
 - **Standing order S12-3 is DONE:** R12 committed, the all-together run done (October e2e ACCEPTANCE), all 16 audit defects fixed.
 
@@ -21,7 +21,7 @@
 | R11 | Offline backup, restore, integrity check (S11) | ✅ | 16 + 7 | parked |
 | R12 | Banking: 12a–12d accounts, money account on documents, Internal Transfers + vouchers, reconciliation · 12e–12g statement import, review queue, rules | ✅ all 12a–12g (3562d71) | 112 new + 2 e2e | parked |
 | S16 e2e | October 2025 end to end over HTTP (E2E-WORKINGS.md) | ✅ (7af9fce) | 22 | ✅ figures approved (S16-5) |
-| S16 defects | D1–D16 from the audit read, all fixed (S16-7 rulings) | ✅ (fba7cfb, d2120dc) | 16 + 47 new | his calls S16-8 to confirm |
+| S16 defects | D1–D16 from the audit read, all fixed (S16-7 rulings) | ✅ (fba7cfb, d2120dc) + S16-9 refuse rule | 16 + 48 new | S16-8 confirmed (S16-9) |
 | R13 | Cash Flow Statement (S13) | ⬜ after the S16 slice and backlog (S14-2) | — | — |
 | R14 | Archive: active, inactive, archived (S14) | deferred (S12-4) | — | — |
 | §13 reports 1–6 | Customer, stock and profit reports | ✅ | in gate | parked |
@@ -29,7 +29,7 @@
 | 7d, 8c | Cash-basis invoice, bill and P&L figures | ✅ | in gate | on trust |
 
 ## Testing
-- **Gates, 21 Nov (after the last change):** tsc exit 0 · vitest 1,059 tests in 93 files · vite built in 1.02s. Run tsc first; vitest does not type-check. Exclude `src/probes/**` until it is deleted.
+- **Gates, 21 Nov (after the last change):** tsc exit 0 · vitest 1,060 tests in 93 files · vite built in 1.04s. Run tsc first; vitest does not type-check. Exclude `src/probes/**` until it is deleted.
 - **Acceptance:** October e2e (S16-5) green incl. cash basis · hand-verified R3, R4c · on trust 7d, 8c · outstanding R1, R2, R4, R4b, R5, R7, R8.
 
 ## Known Issues (each already ruled; built in the S16 slice unless noted)
@@ -42,7 +42,7 @@
 - Watch: R10 2,000-invoice timing test ran 6.98 s (limit 10 s) after the D11 number check; fuzz test in engine.test.ts can time out under load.
 
 ## Last 3 sessions
-- **Session 16 (21 Nov):** R12 committed; Q1–Q26 and S16-1..8 ruled; October e2e ACCEPTANCE on approved figures; audit read → 16 defects recorded as known defects → all fixed (G1–G4 builders, mutation-proved). Pushed to 7af9fce; fixes fba7cfb, d2120dc.
+- **Session 16 (21 Nov):** R12 committed; Q1–Q26 and S16-1..8 ruled; October e2e ACCEPTANCE on approved figures; audit read → 16 defects recorded as known defects → all fixed (G1–G4 builders, mutation-proved). Fixes fba7cfb, d2120dc, context 973684b, all pushed. S16-9: taken numbers refused, not renumbered.
 - **Session 15 (21 Nov):** R12 planned (QBO research, S15-1..4); set one 12a–12d and set two 12e–12g built, reviewed, wired, mutation-proved, two e2e acceptance tests.
 - **Session 14 (20 Nov):** setup (orchestrator/workers, Progress.md, closed context folder); R10 import/export built in 4 commits (S14-3 rulings). All pushed.
 
