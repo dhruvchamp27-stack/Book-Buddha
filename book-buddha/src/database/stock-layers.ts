@@ -118,6 +118,15 @@ export function datedStockLayers(db: Database.Database, itemId: string): DatedSt
     return { receivedOn: istDateOf(row.occurred_at), dateBasis: "ENTRY_INSTANT" };
   };
 
+  // Ids of the credit notes that returned THIS item, read once and only when a negative SALE row needs them.
+  let creditNoteIds: Set<string> | undefined;
+  const isCreditNoteId = (id: string): boolean => {
+    creditNoteIds ??= new Set((db.prepare(
+      "SELECT DISTINCT source_id FROM stock_movements WHERE item_id = ? AND movement_type = 'SALE_REVERSAL' AND source_id IN (SELECT id FROM credit_notes)",
+    ).all(itemId) as Array<{ source_id: string }>).map((r) => r.source_id));
+    return creditNoteIds.has(id);
+  };
+
   const layers: DatedStockLayer[] = [];
   for (const row of rows) {
     if (row.quantity_delta > 0) {
@@ -156,6 +165,22 @@ export function datedStockLayers(db: Database.Database, itemId: string): DatedSt
         if (layers[index]?.quantity === 0) layers.splice(index, 1);
       }
       continue;
+    }
+    if (row.movement_type === "SALE" && row.source_id !== null && isCreditNoteId(row.source_id)) {
+      // D5. cancelCreditNote sends a note's goods out again as a negative SALE carrying the NOTE's
+      // id. It takes the note's OWN returned lot first (same source and cost), exactly like a
+      // purchase return leaves from its bill's lot; only a remainder falls through to oldest-first.
+      // An ordinary sale carries an INVOICE id, which is never a credit note id, so it never lands here.
+      for (const layer of layers) {
+        if (remaining === 0) break;
+        if (layer.sourceId !== row.source_id || layer.unitCostPaise !== row.unit_cost_paise) continue;
+        const removed = Math.min(remaining, layer.quantity);
+        layer.quantity -= removed;
+        remaining -= removed;
+      }
+      for (let index = layers.length - 1; index >= 0; index -= 1) {
+        if (layers[index]?.quantity === 0) layers.splice(index, 1);
+      }
     }
     while (remaining > 0 && layers.length > 0) {
       const layer = layers[0];

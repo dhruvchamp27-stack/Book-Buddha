@@ -171,10 +171,10 @@ export interface PayableRow {
 
 export interface SupplierStatementRow {
   readonly date: string;
-  readonly type: "BILL" | "EXPENSE" | "PAYMENT";
+  readonly type: "BILL" | "EXPENSE" | "PAYMENT" | "RETURN" | "OPENING" | "SETTLEMENT";
   readonly documentId: string;
   readonly reference: string;
-  /** Positive = we owe more (bill/expense); negative = payment made. */
+  /** Positive = we owe more (bill/expense/opening balance); negative = payment, return or opening settlement. */
   readonly amountPaise: number;
   readonly balancePaise: number;
 }

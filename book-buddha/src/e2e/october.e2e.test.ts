@@ -448,13 +448,10 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
     expect(expenses).toEqual({ COGS: RS(18_450), EXPENSE: RS(2_000), PRINTING: RS(1_000), BANK_CHARGES: RS(300) });
   });
 
-  // KNOWN DISAGREEMENT (reported, not hidden): the app cannot produce a CASH-basis P&L for these books.
-  // GET /reports/profit-and-loss?basis=CASH answers 400 "Cash-basis rounding on PURCHASE_BILL <PB-001> is
-  // out of tolerance: 1800000 paise moved but 1650000 paise were recognised ...": the cash view does not
-  // understand PR-001 (event 12), a purchase return against an already PAID bill. The approved figures
-  // below are kept exactly as signed off; `it.fails` makes the suite stay green while the app is wrong and
-  // goes RED the moment the app is fixed, so the marker must then be removed (change it.fails to it).
-  it.fails("Profit & Loss 1-31 Oct, CASH: sales 30,600, COGS 15,550, rent 2,000, printing 1,000, bank charges 300, net 11,750 [APP DISAGREES: 400 error, PR-001]", async () => {
+  // Was a known disagreement (S16-6): the cash view refused these books with a 400 because of PR-001, a
+  // purchase return against an already PAID bill. Fixed under ruling S16-7(1) (a return is treated like a
+  // credit note; the paid part is recognised on the refund date). Figures are the approved ones, unchanged.
+  it("Profit & Loss 1-31 Oct, CASH: sales 30,600, COGS 15,550, rent 2,000, printing 1,000, bank charges 300, net 11,750", async () => {
     const pnl = await call<PnL>("GET", `/reports/profit-and-loss?businessId=${w.businessId}&fromDate=2025-10-01&toDate=2025-10-31&basis=CASH`);
     expect(pnl.basis).toBe("CASH");
     expect(pnl.totalIncomePaise).toBe(RS(30_600));
@@ -485,8 +482,8 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
     expect((await pnlTo("2025-10-08", "ACCRUAL")).netProfitPaise).toBe(RS(11_800));
   });
 
-  // KNOWN DISAGREEMENT: same 400 as above (the CASH view refuses these books), so R2's cash figures cannot be read.
-  it.fails("Payment dates (R2): 1-7 Oct CASH profit is 0 (Raman paid on 8 Oct); to 8 Oct CASH profit is 11,800 [APP DISAGREES: 400 error, PR-001]", async () => {
+  // Was blocked by the same 400 as above; fixed under S16-7(1). Approved R2 cash figures, unchanged.
+  it("Payment dates (R2): 1-7 Oct CASH profit is 0 (Raman paid on 8 Oct); to 8 Oct CASH profit is 11,800", async () => {
     expect((await pnlTo("2025-10-07", "CASH")).netProfitPaise).toBe(0);
     expect((await pnlTo("2025-10-08", "CASH")).netProfitPaise).toBe(RS(11_800));
   });

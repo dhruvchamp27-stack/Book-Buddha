@@ -4,13 +4,14 @@ import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "../database/repository.js";
 
 /**
- * KNOWN DEFECTS (D1-D16). Each case asserts the CORRECT accounting behaviour and is wrapped as
- * `it.fails`: it PASSES while the defect exists and turns RED the moment the defect is fixed -
- * that is the signal to flip the case to a plain `it` (change `knownDefect` below, or the one case).
+ * DEFECTS D1-D16 found by the S16 audit read. Each case asserts the CORRECT accounting behaviour.
+ * All 16 are now FIXED (session 16) and run as plain `it` regression tests. A NEW confirmed defect
+ * goes in as `knownDefect(...)` (= `it.fails`): it passes while the defect exists and turns RED the
+ * moment it is fixed - the signal to flip it to `it("FIXED Dn: ...")`.
  * Arrange steps use `must(...)` so a broken setup throws a "SETUP:" error instead of hiding behind
- * the expected failure; to audit every case's real failure message, temporarily set
- * `const knownDefect = it.fails;` and read the output.
+ * an expected failure.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const knownDefect = it.fails;
 
 let repository: AccountingRepository;
@@ -81,7 +82,7 @@ async function creditNote(w: W, invoiceId: string, number: string, quantity: num
 describe("known defects (each asserts the correct behaviour; passes while the defect exists)", () => {
   // Root cause: the supplier-payment cap is computed from the bill total less payments only and
   // ignores finalized purchase returns, so a payment above the net 6,000 outstanding is accepted.
-  knownDefect("KNOWN DEFECT D1: supplier payment cap ignores a finalized purchase return (P1)", async () => {
+  it("FIXED D1: supplier payment cap ignores a finalized purchase return (P1)", async () => {
     const w = await world();
     const billId = await billAndReturn(w);
     const pay = await req("POST", "/supplier-payments", { billId, amountPaise: 10000, paidOn: "2025-04-20" });
@@ -90,7 +91,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: the payables report / supplier statement compute outstanding from bill totals and
   // payments only, with no deduction for purchase returns (PAYABLES ledger correctly shows 60).
-  knownDefect("KNOWN DEFECT D2: payables report and supplier statement ignore purchase returns (P2)", async () => {
+  it("FIXED D2: payables report and supplier statement ignore purchase returns (P2)", async () => {
     const w = await world();
     const billId = await billAndReturn(w);
     const payables = await must("GET", `/reports/payables?businessId=${w.businessId}`);
@@ -103,7 +104,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: the supplier statement is built from bills/payments only; opening supplier balances
   // and their settlements are never added as rows, so it disagrees with the PAYABLES ledger.
-  knownDefect("KNOWN DEFECT D3: supplier statement omits the opening balance and its settlement rows (P3)", async () => {
+  it("FIXED D3: supplier statement omits the opening balance and its settlement rows (P3)", async () => {
     const w = await world();
     const op = await must("POST", "/opening-supplier-balances", { businessId: w.businessId, supplierId: w.supplierId, asAt: "2025-04-01", amountPaise: 300000 });
     await must("POST", `/opening-supplier-balances/${op.id}/settlements`, { amountPaise: 300000, paidOn: "2025-04-10" });
@@ -115,7 +116,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: the FIFO cost a credit note restores is looked up per invoice in a way that a second
   // part-return re-reads the first layer's cost instead of the remaining sold layer (wrong cost back).
-  knownDefect("KNOWN DEFECT D4: two part-returns on one invoice restore the wrong FIFO cost (P5)", async () => {
+  it("FIXED D4: two part-returns on one invoice restore the wrong FIFO cost (P5)", async () => {
     const w = await world();
     await openingStock(w, 1, 10000);
     await purchase(w, 1, 30000, "PB-5");
@@ -129,7 +130,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: cancelling a credit note reverses the stock return against the wrong (latest/other)
   // layer, so the 100 unit is removed instead of the layer the note restored; valuation drifts from ledger.
-  knownDefect("KNOWN DEFECT D5: cancelling a credit note removes the wrong stock layer (P6)", async () => {
+  it("FIXED D5: cancelling a credit note removes the wrong stock layer (P6)", async () => {
     const w = await world();
     await openingStock(w, 1, 10000);
     await purchase(w, 1, 30000, "PB-6");
@@ -143,7 +144,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: credit-note finalize validates against the invoice's line quantities but does not
   // check the invoice status, so a draft note can be finalized against a CANCELLED invoice.
-  knownDefect("KNOWN DEFECT D6: a draft credit note can be finalized after its invoice is cancelled (P7a)", async () => {
+  it("FIXED D6: a draft credit note can be finalized after its invoice is cancelled (P7a)", async () => {
     const w = await world();
     await must("POST", "/invoices", { id: "inv-7", number: "INV-7", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-7/finalize", {});
@@ -155,7 +156,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: purchase-return finalize does not check the bill status, so a draft return can be
   // finalized after its bill was cancelled (same gap as the credit-note path).
-  knownDefect("KNOWN DEFECT D7: a draft purchase return can be finalized after its bill is cancelled (P7b)", async () => {
+  it("FIXED D7: a draft purchase return can be finalized after its bill is cancelled (P7b)", async () => {
     const w = await world();
     const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-7", billDate: "2025-04-10", paymentAccount: "PAYABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
@@ -167,7 +168,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: the purchase-return line is matched to a bill line by item id only (first match), so
   // with the same tracked item on two lines at different prices the 100 return is checked against the 300 line.
-  knownDefect("KNOWN DEFECT D8: same tracked item on two bill lines, return at the lower price is refused (P12)", async () => {
+  it("FIXED D8: same tracked item on two bill lines, return at the lower price is refused (P12)", async () => {
     const w = await world();
     const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-12", billDate: "2025-04-10", paymentAccount: "PAYABLES", lines: [
       { itemId: w.itemId, description: "Atlas", quantity: 1, unitPricePaise: 10000 },
@@ -187,7 +188,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: the cash-basis P&L allocates a bill's expense by payments/total and does not net
   // purchase returns, so after a May return on a part-paid April bill the figures go wrong or the report throws.
-  knownDefect("KNOWN DEFECT D9: cash-basis P&L fails after a purchase return on a part-paid bill (P14)", async () => {
+  it("FIXED D9: cash-basis P&L fails after a purchase return on a part-paid bill (P14)", async () => {
     const w = await world();
     const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-14", billDate: "2025-04-10", paymentAccount: "PAYABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
@@ -206,7 +207,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: the P&L derives "GST on sales" from the net balance of OUTPUT_* accounts, so a GST
   // payment voucher (Dr OUTPUT_CGST/SGST) is read as a sales reversal and lowers it from 18 to 0.
-  knownDefect("KNOWN DEFECT D10: a GST payment voucher reduces GST on sales on the P&L (P10)", async () => {
+  it("FIXED D10: a GST payment voucher reduces GST on sales on the P&L (P10)", async () => {
     const w = await world();
     await must("POST", "/invoices", { id: "inv-10", number: "INV-10", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-05", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-10/finalize", {});
@@ -218,7 +219,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: invoice numbers are not unique per business (no index/check in create or finalize),
   // so a second invoice with the same number is accepted and finalized.
-  knownDefect("KNOWN DEFECT D11: two invoices with the same number in one business (P8)", async () => {
+  it("FIXED D11: two invoices with the same number in one business (P8)", async () => {
     const w = await world();
     const mk = (id: string): object => ({ id, number: "INV-DUP", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices", mk("dup-a"));
@@ -230,7 +231,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: POST /accounts/:code/active toggles the chart row directly and, unlike
   // /bank-accounts/:code/deactivate, does not check for a non-zero balance on bank/money accounts.
-  knownDefect("KNOWN DEFECT D12: a bank account holding a balance can be deactivated via the generic accounts route (P11)", async () => {
+  it("FIXED D12: a bank account holding a balance can be deactivated via the generic accounts route (P11)", async () => {
     const w = await world();
     const code = (await must("POST", "/bank-accounts", { companyId: w.companyId, name: "HDFC Current", kind: "CURRENT" })).bankAccount.code as string;
     await must("POST", "/opening-balances", { businessId: w.businessId, asAt: "2025-04-01", lines: [{ account: code, debitPaise: 500000, creditPaise: 0 }] });
@@ -242,7 +243,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: audit events are written without the signed-in user (actor_id stays NULL) even
   // when real authentication is on, so the tamper-evident log cannot say who did what.
-  knownDefect("KNOWN DEFECT D13: audit events carry no actor (P13)", async () => {
+  it("FIXED D13: audit events carry no actor (P13)", async () => {
     const authRepo = new AccountingRepository();
     const authApp = buildApi(authRepo);
     try {
@@ -265,7 +266,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: server.ts:148 / :219 / :250 use `.default(new Date().toISOString().slice(0, 10))` in
   // the zod schemas, evaluated ONCE at module load - a long-running server stamps every defaulted date with its start day.
-  knownDefect("KNOWN DEFECT D14: schema date defaults (invoice/bill/expense date) are frozen at module load (P9)", async () => {
+  it("FIXED D14: schema date defaults (invoice/bill/expense date) are frozen at module load (P9)", async () => {
     const w = await world();
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2099-06-15T06:00:00Z"));
@@ -282,7 +283,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: GST is rounded per component (CGST and SGST halves of 0.54 paise) so tax + taxable
   // does not tie to the total / journal balances for a 3-paise sale, and finalize throws (500).
-  knownDefect("KNOWN DEFECT D15: a tiny sale (3 paise at 18% CGST_SGST) fails to finalize (P15)", async () => {
+  it("FIXED D15: a tiny sale (3 paise at 18% CGST_SGST) fails to finalize (P15)", async () => {
     const w = await world();
     await must("POST", "/invoices", { id: "inv-15", number: "INV-15", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Pencil", quantity: 1, unitPricePaise: 3 }] });
     const fin = await req("POST", "/invoices/inv-15/finalize", {});
@@ -291,7 +292,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Policy S8-1 (still OPEN): cancelling a receipt in a later month posts the reversal in that month,
   // but the cash-basis P&L removes the income from the original (January) month instead.
-  knownDefect("KNOWN DEFECT D16 (policy open, S8-1): a receipt cancelled in a later month removes the earlier month's cash income (P16)", async () => {
+  it("FIXED D16 (ruling S16-7 replaces S8-1): a receipt cancelled in a later month removes the earlier month's cash income (P16)", async () => {
     const w = await world();
     await must("POST", "/invoices", { id: "inv-16", number: "INV-16", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-01-10", lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-16/finalize", {});

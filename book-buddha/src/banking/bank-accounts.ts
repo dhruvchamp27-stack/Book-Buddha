@@ -268,6 +268,25 @@ function setActive(db: Database.Database, companyId: string, code: string, befor
   })();
 }
 
+/**
+ * D12. The generic account switch (POST /accounts/:code/active) must refuse a bank or cash account
+ * that still holds money, with the same wording as the bank route. A company-owned account is
+ * measured over that company's businesses; a built-in one (company null) over the whole ledger.
+ */
+export function assertBankOrCashBalanceZero(
+  db: Database.Database,
+  account: { readonly code: string; readonly name: string; readonly companyId: string | null },
+): void {
+  const balance = account.companyId === null
+    ? (db.prepare("SELECT COALESCE(SUM(debit_paise - credit_paise), 0) AS balance FROM journal_lines WHERE account = ?").get(account.code) as { balance: number }).balance
+    : companyBalance(db, account.companyId, account.code);
+  if (balance !== 0) {
+    throw new RepositoryValidationError(
+      `${account.name} (${account.code}) still has a balance of ${formatRupees(balance)}${balance < 0 ? " (owed to the bank)" : ""}. Bring it to zero before deactivating it.`,
+    );
+  }
+}
+
 /** Debit less credit on the account, over the company's own businesses only. */
 function companyBalance(db: Database.Database, companyId: string, code: string): number {
   const row = db

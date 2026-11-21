@@ -300,7 +300,7 @@ describe("R8: cancelling a customer payment", () => {
 });
 
 describe("R8: what a cancellation does to the two bases is NOT symmetric", () => {
-  it("corrects accrual today but rewrites the cash view's ORIGINAL period, pinned deliberately", () => {
+  it("S16-7(3), replacing S8-1: both bases keep May as reported; the cash correction lands in the cancellation's own month", () => {
     const w = setup();
     try {
       w.repository.saveDraft(invoice(w, "INV-1", "2026-05-10", 100000));
@@ -312,19 +312,20 @@ describe("R8: what a cancellation does to the two bases is NOT symmetric", () =>
 
       w.repository.cancelPayment(payment.id);
 
-      // CASH: the collection is GONE FROM MAY. The cash view is derived from the documents
-      // rather than posted, so a cancelled receipt simply stops being recognised, and a period
-      // that was already reported changes retrospectively. The financial-year lock does NOT
-      // protect this, because nothing is posted to be refused.
-      expect(w.repository.getProfitAndLoss(may).netProfitPaise).toBe(0);
+      // CASH (owner ruling S16-7(3), which REPLACES the old S8-1 rule that took the collection
+      // back out of May): May stays at 100,000, a closed month never changes. The take-back is
+      // dated by the reversal journal entry (today), so it shows there as minus 100,000.
+      expect(w.repository.getProfitAndLoss(may).netProfitPaise).toBe(100000);
+      const today = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+      expect(w.repository.getProfitAndLoss({ businessId: w.businessId, basis: "CASH", fromDate: today, toDate: today }).netProfitPaise).toBe(-100000);
+      expect(w.repository.getProfitAndLoss({ businessId: w.businessId, basis: "CASH" }).netProfitPaise).toBe(0);
 
       // ACCRUAL: May is untouched; the reversal is dated today, so the correction lands today.
       const mayAccrual = { businessId: w.businessId, basis: "ACCRUAL", fromDate: "2026-05-01", toDate: "2026-05-31" } as const;
       expect(w.repository.getProfitAndLoss(mayAccrual).netProfitPaise).toBe(100000);
       expect(w.repository.getProfitAndLoss({ businessId: w.businessId, basis: "ACCRUAL" }).netProfitPaise).toBe(100000);
 
-      // This asymmetry is the assistant's choice inside R8 and is OPEN TO REVERSAL -- it is
-      // raised for the owner as decision S8-1. Pinned, not fixed, so it cannot drift silently.
+      // The two bases now agree on the principle: a reported month is never rewritten.
     } finally {
       w.repository.close();
     }
