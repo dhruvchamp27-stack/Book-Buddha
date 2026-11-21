@@ -299,7 +299,7 @@ describe("restore", () => {
     await expect(restoreBackup({ folder, targetDbPath: dbPath, preRestoreBackupsRoot: backupsRoot })).rejects.toThrow(/NOT restored/);
     expect(fs.readFileSync(dbPath)).toEqual(liveBytes);
     expect(listBackups(backupsRoot)).toHaveLength(1);
-  });
+  }, 15_000); // ~2s alone but 4-5s under the full suite's load; 5s default timed out once (S16).
 
   it("refuses to replace an existing database when no pre-restore location is given", async () => {
     const live = track(new AccountingRepository(dbPath));
