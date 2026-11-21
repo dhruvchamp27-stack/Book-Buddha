@@ -17,6 +17,8 @@ import { suggestFor } from "../banking/bank-rules.js";
 import type { Invoice } from "../accounting/types.js";
 import type { CreditNote } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
+import { auditActor } from "../database/audit-log.js";
+import { istDateOf } from "../database/ist-date.js";
 import {
   AccountingRepository,
   AuthenticationError,
@@ -145,7 +147,7 @@ const invoiceInput = z.object({
   fairId: id.optional(),
   buyerName: name.optional(),
   buyerContact: z.string().trim().min(1).optional(),
-  invoiceDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
+  invoiceDate: z.string().date().default(() => istDateOf()),
   dueDate: z.string().date().optional(),
   discountPaise: z.number().int().nonnegative().default(0),
   extraChargePaise: z.number().int().nonnegative().default(0),
@@ -216,7 +218,7 @@ const purchaseBillInput = z.object({
   fairId: id.optional(),
   number: name,
   supplierInvoiceNumber: optionalText.optional(),
-  billDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
+  billDate: z.string().date().default(() => istDateOf()),
   dueDate: z.string().date().optional(),
   notes: z.string().trim().optional(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
@@ -247,7 +249,7 @@ const expenseInput = z.object({
   categoryId: id.optional(),
   fairId: id.optional(),
   number: name,
-  expenseDate: z.string().date().default(new Date().toISOString().slice(0, 10)),
+  expenseDate: z.string().date().default(() => istDateOf()),
   description: name,
   amountPaise: z.number().int().positive(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
@@ -702,6 +704,7 @@ export function buildApi(
   });
 
   if (options.__unsafeDisableAuthForTests !== true) {
+    const requestActors = new WeakMap<object, string>();
     app.addHook("onRequest", async (request) => {
       if (isPublic(request.routeOptions?.config)) return;
 
@@ -713,9 +716,19 @@ export function buildApi(
       }
 
       const token = bearerToken(request.headers.authorization, AUTH_HOOK_MESSAGES.noToken);
-      if (repository.validateSession(token) === null) {
+      const session = repository.validateSession(token);
+      if (session === null) {
         throw new AuthenticationError(AUTH_HOOK_MESSAGES.invalidSession, 401);
       }
+      requestActors.set(request, session.userId);
+    });
+
+    // Runs AFTER body parsing (async context can be lost across the parser), and scopes the
+    // actor to this request's handler only, so a later request or public route never inherits it.
+    app.addHook("preHandler", (request, _reply, done) => {
+      const userId = requestActors.get(request);
+      if (userId === undefined) done();
+      else auditActor.run(userId, done);
     });
   }
 

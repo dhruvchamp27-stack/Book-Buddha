@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type Database from "better-sqlite3";
 import type { AuditEvent } from "../accounting/types.js";
 import { AUDIT_GENESIS_HASH, computeAuditHash, stableStringify } from "./audit-chain.js";
@@ -15,6 +16,13 @@ export interface AuditEventInput extends AuditEvent {
   readonly beforeValues?: unknown;
   readonly afterValues?: unknown;
 }
+
+/**
+ * The signed-in user for the request being handled. The API enters this store (preHandler hook)
+ * so every audit event written during the request carries the actor without each call site
+ * passing it. An explicit `event.actorId` still wins. Outside a request the store is empty (NULL).
+ */
+export const auditActor = new AsyncLocalStorage<string>();
 
 // Once a database is seen to have the chain columns it always will (columns are never dropped),
 // so only the positive answer is cached. A database migrated later is simply re-checked.
@@ -65,7 +73,7 @@ export function appendAuditEvent(db: Database.Database, event: AuditEventInput):
     const id = (seq?.seq ?? 0) + 1;
 
     const companyId = event.companyId ?? null;
-    const actorId = event.actorId ?? null;
+    const actorId = event.actorId ?? auditActor.getStore() ?? null;
     const entityType = event.entityType ?? null;
     const reason = event.reason ?? null;
     const beforeValues = jsonOrNull(event.beforeValues);

@@ -68,7 +68,8 @@ function taxLines(invoice: Invoice, taxablePaise: number): readonly JournalLine[
   }
   const cgst = Math.floor(taxPaise / 2);
   return [
-    { account: "OUTPUT_CGST", debitPaise: 0, creditPaise: cgst },
+    // A zero line is rejected by the ledger (tiny sales: 1 paisa of tax leaves CGST at 0).
+    ...(cgst > 0 ? [{ account: "OUTPUT_CGST" as const, debitPaise: 0, creditPaise: cgst }] : []),
     { account: "OUTPUT_SGST", debitPaise: 0, creditPaise: taxPaise - cgst },
   ];
 }
