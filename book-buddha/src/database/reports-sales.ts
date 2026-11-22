@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { taxGroupsFor, type TaxGroup } from "../accounting/engine.js";
+import { ROUND_OFF_ACCOUNT } from "./chart-accounts-schema.js";
 import { RepositoryValidationError } from "./errors.js";
 import { assertReportFairExists, reportConditions } from "./report-filters-sql.js";
 
@@ -18,6 +20,8 @@ import { assertReportFairExists, reportConditions } from "./report-filters-sql.j
  *   - an entry belongs to a credit note when its id starts `je-credit-note-` (the same test
  *     getReceivables uses). That prefix deliberately includes a cancelled note's reversal, so a
  *     cancelled note nets back to nothing with no special case.
+ *   - the invoice ROUND-OFF account (an INCOME account, I-Q11) is left out of every sales figure BY
+ *     CODE, through `ROUND_OFF_ACCOUNT`, so a rounding is never reported as a sale;
  *   - everything is dated and filtered on journal_entries.entry_date (the transaction date),
  *     never on created_at (the posting timestamp).
  *
@@ -160,6 +164,13 @@ interface AggregateRow {
   group_name: string | null;
   tax_kind?: string;
   tax_rate_bp?: number;
+  // salesByTax reads ONE ROW PER JOURNAL ENTRY so it can split each entry across its rate groups.
+  inv_id?: string | null;
+  note_id?: string | null;
+  inv_tax_type?: string | null;
+  inv_rate?: number | null;
+  inv_discount?: number | null;
+  inv_extra?: number | null;
   invoiced: number;
   credited: number;
   tax_invoiced: number;
@@ -202,7 +213,9 @@ function aggregate(
   const extras: Array<{ sql: string; param?: string }> = [{ sql: "je.source_type = 'INVOICE'" }];
   if (filter.customerId !== undefined) extras.push({ sql: "i.customer_id = ?", param: filter.customerId });
   const { where, params } = withConditions(db, filter, extras);
-  const accountTest = shape.includeTax ? "(ca.type = 'INCOME' OR ca.role = 'OUTPUT_GST')" : "ca.type = 'INCOME'";
+  // I-Q11: the round-off account is INCOME but is a rounding, not a sale - out BY CODE, never a bare string.
+  const notRoundOff = `ca.code <> '${ROUND_OFF_ACCOUNT}'`;
+  const accountTest = shape.includeTax ? `(ca.type = 'INCOME' OR ca.role = 'OUTPUT_GST') AND ${notRoundOff}` : `ca.type = 'INCOME' AND ${notRoundOff}`;
   const sql = `
     SELECT ${shape.select},
            COALESCE(SUM(CASE WHEN ca.type = 'INCOME' AND NOT (${IS_NOTE}) THEN jl.credit_paise - jl.debit_paise ELSE 0 END), 0) AS invoiced,
@@ -262,32 +275,134 @@ export function salesByFair(db: Database.Database, filter: SalesReportFilter = {
   return { rows, totals: sumTotals(rows) };
 }
 
+/** Splits a signed total over weights in whole paise (largest remainder, ties to the earlier), so the parts sum exactly. */
+function allocateByWeight(total: number, weights: readonly number[]): number[] {
+  const parts = weights.map(() => 0);
+  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+  if (total === 0 || parts.length === 0) return parts;
+  if (weightSum <= 0) { parts[0] = total; return parts; }
+  const magnitude = Math.abs(total);
+  const sign = total < 0 ? -1 : 1;
+  const remainders: Array<{ index: number; remainder: bigint }> = [];
+  let assigned = 0;
+  weights.forEach((weight, index) => {
+    const product = BigInt(magnitude) * BigInt(Math.max(weight, 0));
+    const share = Number(product / BigInt(weightSum));
+    parts[index] = share;
+    assigned += share;
+    remainders.push({ index, remainder: product % BigInt(weightSum) });
+  });
+  remainders.sort((a, b) => (a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1));
+  for (let i = 0; i < magnitude - assigned; i += 1) {
+    const target = remainders[i % remainders.length] as { index: number };
+    parts[target.index] = (parts[target.index] as number) + 1;
+  }
+  return parts.map((part) => sign * part);
+}
+
+/** The signed entry total over the groups: exactly each group's own figure when they add up, else by taxable share. */
+function allocateAcross(total: number, exact: readonly number[], weights: readonly number[]): number[] {
+  if (total === 0) return exact.map(() => 0);
+  if (Math.abs(total) === exact.reduce((sum, part) => sum + part, 0)) return exact.map((part) => Math.sign(total) * part);
+  return allocateByWeight(total, weights);
+}
+
 /**
  * Net sales and GST kept, per tax treatment (type and rate). Both come from the journal, so
  * `taxPaise` summed over the rows equals the P&L's GST-on-sales for the same filter.
+ *
+ * I-2 (I-Q1, I-Q9). A document can now hold several rates, and the journal line carries no rate tag,
+ * so each posted ENTRY is split across its document's RATE GROUPS (worked out from the document's
+ * own lines by the same engine that posted it) and the entry's real journal figures are allocated
+ * over them - exactly where they add up, else by taxable share (a clamped credit-note tax). An
+ * exempt 0% line therefore lands in its own `NONE / 0` row. For a single-rate document there is one
+ * group and every figure is the journal's, unchanged.
  */
 export function salesByTax(db: Database.Database, filter: SalesReportFilter = {}): SalesReport<SalesByTaxRow> {
   refuseItemFilter("Sales by tax", filter);
-  const rows = aggregate(db, filter, {
-    select: `CASE WHEN i.id IS NULL THEN 'UNATTRIBUTED'
-                  WHEN i.tax_type = 'NONE' OR i.tax_rate_basis_points = 0 THEN 'NONE'
-                  ELSE i.tax_type END AS tax_kind,
-             CASE WHEN i.id IS NULL OR i.tax_type = 'NONE' OR i.tax_rate_basis_points = 0 THEN 0
-                  ELSE i.tax_rate_basis_points END AS tax_rate_bp,
-             NULL AS group_id, NULL AS group_name`,
+  const entries = aggregate(db, filter, {
+    select: `je.id AS group_id, NULL AS group_name, i.id AS inv_id, cn.id AS note_id,
+             i.tax_type AS inv_tax_type, i.tax_rate_basis_points AS inv_rate,
+             i.discount_paise AS inv_discount, i.extra_charge_paise AS inv_extra`,
     joins: "",
-    groupBy: "tax_kind, tax_rate_bp",
-    orderBy: "tax_kind, tax_rate_bp",
+    groupBy: "je.id",
+    orderBy: "je.entry_date, je.id",
     includeTax: true,
-  }).map((row) => ({
-    taxType: row.tax_kind ?? "NONE",
-    taxRateBasisPoints: row.tax_rate_bp ?? 0,
-    ...totalsOf(row),
-    taxInvoicedPaise: row.tax_invoiced,
-    taxCreditNotesPaise: row.tax_credited,
-    taxPaise: row.tax_invoiced - row.tax_credited,
-  }));
-  return { rows, totals: sumTotals(rows) };
+  });
+  const invoiceLines = db.prepare("SELECT quantity, unit_price_paise AS unitPricePaise, tax_rate_basis_points AS taxRateBasisPoints FROM invoice_lines WHERE invoice_id = ? ORDER BY id");
+  const noteLines = db.prepare("SELECT quantity, unit_price_paise AS unitPricePaise, tax_rate_basis_points AS taxRateBasisPoints FROM credit_note_lines WHERE credit_note_id = ? ORDER BY id");
+  type Bucket = { kind: string; rate: number; invoiced: number; credited: number; taxInvoiced: number; taxCredited: number; invoiceCount: number; noteCount: number };
+  const buckets = new Map<string, Bucket>();
+  const bucketFor = (kind: string, rate: number): Bucket => {
+    const key = `${kind}|${rate}`;
+    let bucket = buckets.get(key);
+    if (bucket === undefined) {
+      bucket = { kind, rate, invoiced: 0, credited: 0, taxInvoiced: 0, taxCredited: 0, invoiceCount: 0, noteCount: 0 };
+      buckets.set(key, bucket);
+    }
+    return bucket;
+  };
+  const kindOf = (taxType: string | null | undefined, rate: number): string => (taxType === undefined || taxType === null || taxType === "NONE" || rate === 0 ? "NONE" : taxType);
+  const totals = { invoiced: 0, credited: 0, invoiceCount: 0, noteCount: 0 };
+  for (const entry of entries) {
+    totals.invoiced += entry.invoiced; totals.credited += entry.credited;
+    totals.invoiceCount += entry.invoice_count; totals.noteCount += entry.note_count;
+    if (entry.inv_id === null || entry.inv_id === undefined) {
+      const bucket = bucketFor("UNATTRIBUTED", 0);
+      bucket.invoiced += entry.invoiced; bucket.credited += entry.credited;
+      bucket.taxInvoiced += entry.tax_invoiced; bucket.taxCredited += entry.tax_credited;
+      bucket.invoiceCount += entry.invoice_count; bucket.noteCount += entry.note_count;
+      continue;
+    }
+    const taxType = entry.inv_tax_type ?? "NONE";
+    const headerRate = entry.inv_rate ?? 0;
+    const isNote = entry.note_id !== null && entry.note_id !== undefined;
+    let groups: readonly TaxGroup[] = [];
+    try {
+      const lines = (isNote ? noteLines.all(entry.note_id) : invoiceLines.all(entry.inv_id)) as Array<{ quantity: number; unitPricePaise: number; taxRateBasisPoints: number }>;
+      if (lines.length > 0) {
+        groups = taxGroupsFor(lines, headerRate, taxType as "NONE" | "CGST_SGST" | "IGST", isNote ? 0 : entry.inv_discount ?? 0, isNote ? 0 : entry.inv_extra ?? 0);
+      }
+    } catch {
+      groups = [];
+    }
+    // Nothing to split by (no lines, or a legacy document the engine would now refuse): the header, as before.
+    if (groups.length === 0) groups = [{ rateBasisPoints: taxType === "NONE" ? 0 : headerRate, taxablePaise: 0, taxPaise: 0 }];
+    const taxable = groups.map((group) => group.taxablePaise);
+    const taxes = groups.map((group) => group.taxPaise);
+    const invoiced = allocateAcross(entry.invoiced, taxable, taxable);
+    const credited = allocateAcross(entry.credited, taxable, taxable);
+    const taxInvoiced = allocateAcross(entry.tax_invoiced, taxes, taxable);
+    const taxCredited = allocateAcross(entry.tax_credited, taxes, taxable);
+    groups.forEach((group, index) => {
+      const bucket = bucketFor(kindOf(taxType, group.rateBasisPoints), taxType === "NONE" ? 0 : group.rateBasisPoints);
+      bucket.invoiced += invoiced[index] as number; bucket.credited += credited[index] as number;
+      bucket.taxInvoiced += taxInvoiced[index] as number; bucket.taxCredited += taxCredited[index] as number;
+      // A document is counted once in EACH rate row it touches; the report's totals count it once.
+      if (groups.length === 1 || group.taxablePaise > 0) { bucket.invoiceCount += entry.invoice_count; bucket.noteCount += entry.note_count; }
+    });
+  }
+  const rows = [...buckets.values()]
+    .sort((left, right) => (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : left.rate - right.rate))
+    .map((bucket): SalesByTaxRow => ({
+      taxType: bucket.kind,
+      taxRateBasisPoints: bucket.rate,
+      invoicedPaise: bucket.invoiced,
+      creditNotesPaise: bucket.credited,
+      netSalesPaise: bucket.invoiced - bucket.credited,
+      invoiceCount: bucket.invoiceCount,
+      creditNoteCount: bucket.noteCount,
+      taxInvoicedPaise: bucket.taxInvoiced,
+      taxCreditNotesPaise: bucket.taxCredited,
+      taxPaise: bucket.taxInvoiced - bucket.taxCredited,
+    }));
+  return {
+    rows,
+    totals: {
+      invoicedPaise: totals.invoiced, creditNotesPaise: totals.credited, netSalesPaise: totals.invoiced - totals.credited,
+      invoiceCount: totals.invoiceCount, creditNoteCount: totals.noteCount,
+    },
+  };
 }
 
 interface NoteRow {
@@ -332,8 +447,12 @@ export function creditNoteReport(db: Database.Database, filter: CreditNoteReport
     `SELECT cn.id, cn.number, cn.status, cn.reason, cn.refundable_paise,
             je.entry_date, je.business_id, je.fair_id,
             i.id AS invoice_id, i.number AS invoice_number, i.customer_id, c.name AS customer_name,
-            (SELECT COALESCE(SUM(jl.debit_paise), 0) FROM journal_lines jl WHERE jl.journal_entry_id = je.id) AS value_paise,
-            ${lineSum("jl.debit_paise - jl.credit_paise", "ca.type = 'INCOME'")} AS taxable_paise,
+            -- Everything the note takes off the books: every debit, less a round-off CREDIT (a rounded-down
+            -- invoice being put back) which lowers what the customer is credited.
+            (SELECT COALESCE(SUM(jl.debit_paise), 0) FROM journal_lines jl WHERE jl.journal_entry_id = je.id)
+              - (SELECT COALESCE(SUM(jl.credit_paise), 0) FROM journal_lines jl WHERE jl.journal_entry_id = je.id AND jl.account = '${ROUND_OFF_ACCOUNT}') AS value_paise,
+            -- I-Q11: the round-off account is INCOME but is not a sale, so it is out of the taxable figure BY CODE.
+            ${lineSum("jl.debit_paise - jl.credit_paise", `ca.type = 'INCOME' AND ca.code <> '${ROUND_OFF_ACCOUNT}'`)} AS taxable_paise,
             ${lineSum("jl.debit_paise - jl.credit_paise", "ca.role = 'OUTPUT_GST'")} AS tax_paise,
             (SELECT COALESCE(SUM(r.amount_paise), 0) FROM credit_note_refunds r WHERE r.credit_note_id = cn.id) AS refunded,
             (SELECT COALESCE(SUM(a.amount_paise), 0) FROM credit_note_applications a WHERE a.credit_note_id = cn.id) AS applied

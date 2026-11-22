@@ -15,10 +15,17 @@ export type AccountingBasis = "CASH" | "ACCRUAL";
 export type InvoiceStatus = "DRAFT" | "QUOTATION" | "FINALIZED" | "CANCELLED";
 
 export interface InvoiceLine {
+  /** The stored row id. Present on what the repository READS; ignored on what it is given. */
+  readonly id?: number;
   readonly itemId?: string;
   readonly description: string;
   readonly quantity: number;
   readonly unitPricePaise: number;
+  /**
+   * I-2 (I-Q1): this line's own GST rate. Absent on input means "the document's rate" (the
+   * fallback an old document keeps); always present on what the repository reads back.
+   */
+  readonly taxRateBasisPoints?: number;
 }
 
 export interface Invoice {
@@ -34,6 +41,9 @@ export interface Invoice {
   readonly paymentTerms?: string;
   readonly taxType?: InvoiceTaxType;
   readonly taxRateBasisPoints?: number;
+  /** I-Q12: the STORED rounded total and its round-off. Present on what the repository reads back. */
+  readonly totalPaise?: number;
+  readonly roundOffPaise?: number;
   readonly fairId?: string;
   readonly buyerName?: string;
   readonly buyerContact?: string;
@@ -66,6 +76,13 @@ export interface CreditNoteLine {
   readonly description: string;
   readonly quantity: number;
   readonly unitPricePaise: number;
+  /**
+   * I-Q14: the invoice line this note line reverses (`invoice_lines.id`). The note line takes THAT
+   * line's rate. Absent on input, the repository links it by item (and price) where it can.
+   */
+  readonly reversesInvoiceLineId?: number;
+  /** Always present on what the repository reads back: the rate the line was posted at. */
+  readonly taxRateBasisPoints?: number;
 }
 
 export interface CreditNote {
@@ -177,10 +194,14 @@ export type PurchaseDocumentStatus = "DRAFT" | "FINALIZED" | "CANCELLED";
 export type PurchasePaymentAccount = "CASH" | "PAYABLES";
 
 export interface PurchaseBillLine {
+  /** The stored row id. Present on what the repository READS; ignored on what it is given. */
+  readonly id?: number;
   readonly itemId?: string;
   readonly description: string;
   readonly quantity: number;
   readonly unitPricePaise: number;
+  /** I-Q1: this line's own GST rate; absent on input means the bill's rate. Always present on a read. */
+  readonly taxRateBasisPoints?: number;
 }
 
 export interface SupplierPayment {

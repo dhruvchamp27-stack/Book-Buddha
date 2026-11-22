@@ -10,6 +10,7 @@ import type {
   JournalSourceType,
   PurchasePaymentAccount,
 } from "./types.js";
+import { ROUND_OFF_ACCOUNT } from "../database/chart-accounts-schema.js";
 
 export class AccountingError extends Error {
   public constructor(message: string) {
@@ -18,12 +19,136 @@ export class AccountingError extends Error {
   }
 }
 
-function totalInvoicePaise(invoice: Invoice): number {
+/** A line that carries a quantity, a price and (optionally) its own GST rate. */
+export interface RatedLine {
+  readonly quantity: number;
+  readonly unitPricePaise: number;
+  readonly taxRateBasisPoints?: number;
+}
+
+/** One rate's slice of a document: what it is charged on, and the GST on that, rounded ONCE (I-Q3). */
+export interface TaxGroup {
+  readonly rateBasisPoints: number;
+  readonly taxablePaise: number;
+  readonly taxPaise: number;
+}
+
+/**
+ * I-Q4 -- UNCONFIRMED GST READING, PENDING A CA (Puneet or Manish). NOT SETTLED.
+ *
+ * On a document that mixes GST rates, the discount and the freight/extra charge have to be assigned
+ * to a rate somehow. This helper spreads the NET adjustment (extra charge less discount) PRO RATA
+ * over the lines by their gross value, in whole paise (largest remainder, ties to the earlier line,
+ * so the shares sum exactly), and each rate is then charged on its own share. The owner approved
+ * this as TEST BEHAVIOUR ONLY (decision S18-4); whether GST law wants it, or wants the highest
+ * rate, or a rate per the main supply, has NOT been confirmed. Do not cite it as settled. It lives
+ * in this one function so it can be changed or removed in one place. A single-rate document never
+ * reaches it, so no existing figure depends on it.
+ *
+ * Returns one signed share per line (negative = discount taken off that line).
+ */
+export function spreadAdjustmentProRata(grossPaise: readonly number[], netAdjustmentPaise: number): number[] {
+  const shares = grossPaise.map(() => 0);
+  if (netAdjustmentPaise === 0 || grossPaise.length === 0) return shares;
+  const magnitude = Math.abs(netAdjustmentPaise);
+  const sign = netAdjustmentPaise < 0 ? -1 : 1;
+  const total = grossPaise.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) {
+    // Nothing to be pro rata to: the whole adjustment sits on the first line.
+    shares[0] = sign * magnitude;
+    return shares;
+  }
+  const remainders: Array<{ index: number; remainder: bigint }> = [];
+  let assigned = 0;
+  grossPaise.forEach((value, index) => {
+    if (value <= 0) return;
+    const product = BigInt(magnitude) * BigInt(value);
+    const share = Number(product / BigInt(total));
+    shares[index] = share;
+    assigned += share;
+    remainders.push({ index, remainder: product % BigInt(total) });
+  });
+  remainders.sort((a, b) => (a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1));
+  for (let i = 0; i < magnitude - assigned; i += 1) {
+    const target = remainders[i % remainders.length] as { index: number };
+    shares[target.index] = (shares[target.index] as number) + 1;
+  }
+  return shares.map((share) => sign * share);
+}
+
+function assertRate(rate: number): void {
+  if (!Number.isInteger(rate) || rate < 0 || rate > 10000) {
+    throw new AccountingError("Tax rate must be a whole number between 0% and 100%.");
+  }
+}
+
+/**
+ * I-Q1 / I-Q3. Splits a document's lines into RATE GROUPS: for each distinct rate, the value it is
+ * charged on and the GST on it, rounded ONCE per group (never per line). A line's rate is its own,
+ * else the document's (`documentRate`, the fallback an old document keeps). Ascending rate order.
+ *
+ * Discount and extra charge are charged to a rate through `spreadAdjustmentProRata` (I-Q4, an
+ * UNCONFIRMED reading) -- but only when the lines carry more than one rate; with one rate they
+ * simply adjust that rate's base, as they always did.
+ */
+export function taxGroupsFor(
+  lines: readonly RatedLine[],
+  documentRate: number,
+  taxType: InvoiceTaxType,
+  discountPaise: number,
+  extraChargePaise: number,
+): readonly TaxGroup[] {
+  const rates = lines.map((line) => line.taxRateBasisPoints ?? documentRate);
+  rates.forEach(assertRate);
+  if (taxType === "NONE" && rates.some((rate) => rate !== 0)) {
+    throw new AccountingError("A tax rate requires a tax type.");
+  }
+  const gross = lines.map((line) => line.quantity * line.unitPricePaise);
+  const distinct = [...new Set(rates)].sort((a, b) => a - b);
+  const adjustment = extraChargePaise - discountPaise;
+  const adjustments = distinct.length <= 1
+    ? gross.map((_, index) => (index === 0 ? adjustment : 0))
+    : spreadAdjustmentProRata(gross, adjustment);
+  return distinct.map((rate): TaxGroup => {
+    let taxablePaise = 0;
+    rates.forEach((lineRate, index) => {
+      if (lineRate === rate) taxablePaise += (gross[index] as number) + (adjustments[index] as number);
+    });
+    const taxPaise = taxType === "NONE" ? 0 : Math.round(taxablePaise * rate / 10000);
+    return { rateBasisPoints: rate, taxablePaise, taxPaise };
+  });
+}
+
+/**
+ * I-Q5: the nearest whole rupee, 50 paise and over rounding UP. `roundOffPaise` is signed.
+ *
+ * ONE call the rulings do not cover: a document worth under 50 paise would round DOWN to Rs 0, and a
+ * zero-value invoice cannot be posted (every journal line must be above zero). So a positive amount
+ * that would round to nothing is left exactly as it is, with no round-off.
+ */
+export function roundToRupee(paise: number): { readonly totalPaise: number; readonly roundOffPaise: number } {
+  const totalPaise = Math.floor((paise + 50) / 100) * 100;
+  if (totalPaise === 0 && paise > 0) return { totalPaise: paise, roundOffPaise: 0 };
+  return { totalPaise, roundOffPaise: totalPaise - paise };
+}
+
+export interface InvoiceFigures {
+  readonly subtotalPaise: number;
+  /** subtotal - discount + extra charge: what the whole document is charged on, before GST. */
+  readonly taxablePaise: number;
+  readonly groups: readonly TaxGroup[];
+  readonly taxPaise: number;
+  /** I-Q12: the rounded total, which is what gets STORED. */
+  readonly totalPaise: number;
+  readonly roundOffPaise: number;
+}
+
+/** Everything an invoice's money depends on, in one place: validation, rate groups, round-off, total. */
+export function invoiceFigures(invoice: Invoice): InvoiceFigures {
   if (invoice.lines.length === 0) {
     throw new AccountingError("An invoice must contain at least one line.");
   }
-
-  const subtotal = invoice.lines.reduce((total, line) => {
+  const subtotalPaise = invoice.lines.reduce((total, line) => {
     if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
       throw new AccountingError("Invoice quantities must be positive whole numbers.");
     }
@@ -34,7 +159,7 @@ function totalInvoicePaise(invoice: Invoice): number {
   }, 0);
   const discountPaise = invoice.discountPaise ?? 0;
   const extraChargePaise = invoice.extraChargePaise ?? 0;
-  const taxRateBasisPoints = invoice.taxRateBasisPoints ?? 0;
+  const documentRate = invoice.taxRateBasisPoints ?? 0;
   const taxType = invoice.taxType ?? "NONE";
   if (!Number.isInteger(discountPaise) || discountPaise < 0) {
     throw new AccountingError("Discount must be a non-negative whole number of paise.");
@@ -42,31 +167,41 @@ function totalInvoicePaise(invoice: Invoice): number {
   if (!Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
     throw new AccountingError("Extra charges must be a non-negative whole number of paise.");
   }
-  if (discountPaise > subtotal) {
+  if (discountPaise > subtotalPaise) {
     throw new AccountingError("Discount cannot exceed the invoice subtotal.");
   }
-  if (!Number.isInteger(taxRateBasisPoints) || taxRateBasisPoints < 0 || taxRateBasisPoints > 10000) {
-    throw new AccountingError("Tax rate must be a whole number between 0% and 100%.");
-  }
-  if (taxType === "NONE" && taxRateBasisPoints !== 0) {
+  assertRate(documentRate);
+  if (taxType === "NONE" && documentRate !== 0) {
     throw new AccountingError("A tax rate requires a tax type.");
   }
-  if (taxType !== "NONE" && taxRateBasisPoints === 0) {
-    throw new AccountingError("A taxable invoice requires a positive tax rate.");
-  }
-  const taxablePaise = subtotal - discountPaise + extraChargePaise;
-  return taxablePaise + Math.round(taxablePaise * taxRateBasisPoints / 10000);
+  const groups = taxGroupsFor(invoice.lines, documentRate, taxType, discountPaise, extraChargePaise);
+  const taxablePaise = subtotalPaise - discountPaise + extraChargePaise;
+  const taxPaise = groups.reduce((total, group) => total + group.taxPaise, 0);
+  const rounded = roundToRupee(taxablePaise + taxPaise);
+  return { subtotalPaise, taxablePaise, groups, taxPaise, totalPaise: rounded.totalPaise, roundOffPaise: rounded.roundOffPaise };
 }
 
-function taxLines(invoice: Invoice, taxablePaise: number): readonly JournalLine[] {
-  const taxType = invoice.taxType ?? "NONE";
-  const rate = invoice.taxRateBasisPoints ?? 0;
-  if (taxType === "NONE" || rate === 0) return [];
-  const taxPaise = Math.round(taxablePaise * rate / 10000);
+/** The signed round-off as a journal line, or nothing: a ZERO line is rejected by the ledger CHECK. */
+export function roundOffLines(roundOffPaise: number): readonly JournalLine[] {
+  if (roundOffPaise === 0) return [];
+  return roundOffPaise > 0
+    ? [{ account: ROUND_OFF_ACCOUNT, debitPaise: 0, creditPaise: roundOffPaise }]
+    : [{ account: ROUND_OFF_ACCOUNT, debitPaise: -roundOffPaise, creditPaise: 0 }];
+}
+
+/**
+ * Output GST journal lines for the rate groups: ONE line per account. CGST/SGST takes
+ * `floor(groupTax / 2)` PER GROUP with SGST the remainder (not cumulative), then each account is
+ * summed across the groups.
+ */
+function taxLines(taxType: InvoiceTaxType, groups: readonly TaxGroup[]): readonly JournalLine[] {
+  if (taxType === "NONE") return [];
+  const taxPaise = groups.reduce((total, group) => total + group.taxPaise, 0);
+  if (taxPaise === 0) return [];
   if (taxType === "IGST") {
     return [{ account: "OUTPUT_IGST", debitPaise: 0, creditPaise: taxPaise }];
   }
-  const cgst = Math.floor(taxPaise / 2);
+  const cgst = groups.reduce((total, group) => total + Math.floor(group.taxPaise / 2), 0);
   return [
     // A zero line is rejected by the ledger (tiny sales: 1 paisa of tax leaves CGST at 0).
     ...(cgst > 0 ? [{ account: "OUTPUT_CGST" as const, debitPaise: 0, creditPaise: cgst }] : []),
@@ -96,21 +231,19 @@ export function finalizeInvoice(invoice: Invoice): FinalizedInvoice {
     throw new AccountingError("Only draft invoices can be finalized.");
   }
 
-  const amountPaise = totalInvoicePaise(invoice);
-  const subtotal = invoice.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
-  const taxablePaise = subtotal - (invoice.discountPaise ?? 0) + (invoice.extraChargePaise ?? 0);
+  const figures = invoiceFigures(invoice);
   const lines: readonly JournalLine[] = [
     {
       account: invoice.paymentAccount,
-      debitPaise: amountPaise,
+      debitPaise: figures.totalPaise,
       creditPaise: 0,
     },
-    {
-      account: "SALES",
-      debitPaise: 0,
-      creditPaise: taxablePaise,
-    },
-    ...taxLines(invoice, taxablePaise),
+    // One SALES line per rate group (a single-rate invoice still gets exactly one).
+    ...figures.groups
+      .filter((group) => group.taxablePaise > 0)
+      .map((group): JournalLine => ({ account: "SALES", debitPaise: 0, creditPaise: group.taxablePaise })),
+    ...taxLines(invoice.taxType ?? "NONE", figures.groups),
+    ...roundOffLines(figures.roundOffPaise),
   ];
 
   const journalEntry: JournalEntry = {
@@ -191,6 +324,19 @@ export function inputTaxLines(taxType: InvoiceTaxType, taxPaise: number): readon
   ];
 }
 
+/** Input GST lines for rate groups: CGST takes floor(groupTax / 2) PER GROUP, SGST the remainder; one line per account. */
+export function inputTaxLinesForGroups(taxType: InvoiceTaxType, groups: readonly TaxGroup[]): readonly JournalLine[] {
+  if (taxType === "NONE") return [];
+  const taxPaise = groups.reduce((total, group) => total + group.taxPaise, 0);
+  if (taxPaise === 0) return [];
+  if (taxType === "IGST") return [{ account: "INPUT_IGST", debitPaise: taxPaise, creditPaise: 0 }];
+  const cgst = groups.reduce((total, group) => total + Math.floor(group.taxPaise / 2), 0);
+  return [
+    ...(cgst > 0 ? [{ account: "INPUT_CGST" as const, debitPaise: cgst, creditPaise: 0 }] : []),
+    { account: "INPUT_SGST", debitPaise: taxPaise - cgst, creditPaise: 0 },
+  ];
+}
+
 export interface PurchaseEntryInput {
   readonly entryId: string;
   readonly sourceId: string;
@@ -219,7 +365,20 @@ export interface PurchaseEntryInput {
   readonly extraChargePaise?: number;
   readonly taxType: InvoiceTaxType;
   readonly taxRateBasisPoints: number;
+  /**
+   * I-Q1. The bill's GST split into RATE GROUPS (`taxGroupsFor`), when its lines carry their own
+   * rates. Given, the input GST is the sum of the groups' own rounded tax and `taxRateBasisPoints`
+   * is not used for the arithmetic. Left out, the whole taxable value is charged at the one rate.
+   */
+  readonly taxGroups?: readonly TaxGroup[];
   readonly paymentAccount: PurchasePaymentAccount;
+  /**
+   * I-Q6. A round-off the owner TYPED so the bill matches the total the supplier printed. Signed
+   * whole paise, under one rupee, default 0. NOT calculated here. Positive = the supplier's total is
+   * higher than the lines compute to: the settlement credit grows by it and `Dr ROUND_OFF` carries
+   * the difference. A zero round-off posts no line.
+   */
+  readonly roundOffPaise?: number;
 }
 
 export interface PurchaseEntryResult {
@@ -269,15 +428,23 @@ export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
     throw new AccountingError("A bill discount cannot exceed the bill subtotal.");
   }
   const taxablePaise = subtotalPaise - discountPaise + extraChargePaise;
-  const taxPaise = inputTaxPaise(input.taxType, input.taxRateBasisPoints, taxablePaise);
+  const taxPaise = input.taxGroups === undefined
+    ? inputTaxPaise(input.taxType, input.taxRateBasisPoints, taxablePaise)
+    : input.taxType === "NONE" ? 0 : input.taxGroups.reduce((total, group) => total + group.taxPaise, 0);
   const totalPaise = taxablePaise + taxPaise;
+  const roundOffPaise = input.roundOffPaise ?? 0;
+  if (!Number.isInteger(roundOffPaise) || roundOffPaise <= -100 || roundOffPaise >= 100) {
+    throw new AccountingError("A round-off must be a whole number of paise, under Rs 1 either way.");
+  }
   const lines: readonly JournalLine[] = [
     ...(input.inventoryPaise > 0 ? [{ account: "INVENTORY" as const, debitPaise: input.inventoryPaise, creditPaise: 0 }] : []),
     ...(input.expensePaise > 0 ? [{ account: "EXPENSE" as const, debitPaise: input.expensePaise, creditPaise: 0 }] : []),
     ...(extraChargePaise > 0 ? [{ account: "PURCHASE_EXTRA_CHARGES" as const, debitPaise: extraChargePaise, creditPaise: 0 }] : []),
     ...(discountPaise - spreadDiscountPaise > 0 ? [{ account: "PURCHASE_DISCOUNT" as const, debitPaise: 0, creditPaise: discountPaise - spreadDiscountPaise }] : []),
-    ...inputTaxLines(input.taxType, taxPaise),
-    { account: input.paymentAccount, debitPaise: 0, creditPaise: totalPaise },
+    ...(input.taxGroups === undefined ? inputTaxLines(input.taxType, taxPaise) : inputTaxLinesForGroups(input.taxType, input.taxGroups)),
+    // Mirror of the invoice: the settlement is a credit here, so a positive round-off is a DEBIT.
+    ...roundOffLines(-roundOffPaise),
+    { account: input.paymentAccount, debitPaise: 0, creditPaise: totalPaise + roundOffPaise },
   ];
   return {
     entry: {

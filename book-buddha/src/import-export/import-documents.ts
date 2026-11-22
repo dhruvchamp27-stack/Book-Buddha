@@ -270,9 +270,15 @@ function lookups(context: ImportContext): Lookups {
   };
 }
 
-interface ParsedLine { itemId?: string; description: string; quantity: number; unitPricePaise: number }
+interface ParsedLine { itemId?: string; description: string; quantity: number; unitPricePaise: number; taxRateBasisPoints?: number }
 
-function readLines(rows: readonly MappedRow[], look: Lookups): ParsedLine[] {
+/**
+ * `firstRowRate`, when given, makes GST a PER-ROW column (I-Q1): a row states its own rate, and a row
+ * that leaves the cell BLANK carries the first row's rate (so a file that only states it once keeps
+ * working). An explicit 0 is an exempt line. Without it (a credit note) no rate is read: the
+ * repository takes it from the invoice line the note reverses.
+ */
+function readLines(rows: readonly MappedRow[], look: Lookups, firstRowRate?: number): ParsedLine[] {
   return rows.map((row) => {
     const itemName = val(row, "item");
     const item = itemName === "" ? undefined : look.item(itemName);
@@ -283,6 +289,7 @@ function readLines(rows: readonly MappedRow[], look: Lookups): ParsedLine[] {
       description,
       quantity: parsed(row, "Quantity", requireValue(row, "quantity", "Quantity"), parseQuantity),
       unitPricePaise: parsed(row, "Unit price", requireValue(row, "unitPrice", "Unit price"), (t) => parseRupeesToPaise(t)),
+      ...(firstRowRate === undefined ? {} : { taxRateBasisPoints: val(row, "taxRate") === "" ? firstRowRate : optionalRate(row) }),
     };
   });
 }
@@ -320,7 +327,8 @@ const INVOICE_FIELDS: readonly ImportField[] = [
   field("notes", "Notes", false, ["Remarks"]),
   BEFORE_OPENING_FIELD,
 ];
-const INVOICE_HEADER_KEYS = ["customer", "invoiceDate", "dueDate", "discount", "extraCharge", "taxType", "taxRate", "fair"];
+// I-Q1: the tax TYPE must agree across rows (place of supply); the RATE is per row, so it is not here.
+const INVOICE_HEADER_KEYS = ["customer", "invoiceDate", "dueDate", "discount", "extraCharge", "taxType", "fair"];
 
 const invoicesKind: ImportKindDefinition = {
   kind: "invoices",
@@ -348,7 +356,8 @@ const invoicesKind: ImportKindDefinition = {
     const fair = fairName === "" ? undefined : look.fair(fairName);
     const taxType = parseTaxType(first, val(first, "taxType"));
     const notes = val(first, "notes");
-    const lines = readLines(rows, look);
+    const firstRate = optionalRate(first);
+    const lines = readLines(rows, look, firstRate);
 
     const id = randomUUID();
     const invoice: Invoice = {
@@ -362,7 +371,7 @@ const invoicesKind: ImportKindDefinition = {
       extraChargePaise: optionalMoney(first, "extraCharge", "Extra charge"),
       ...(notes === "" ? {} : { notes }),
       taxType,
-      taxRateBasisPoints: optionalRate(first),
+      taxRateBasisPoints: firstRate,
       ...(fair === undefined ? {} : { fairId: fair.id }),
       paymentAccount: "RECEIVABLES",
       status: "DRAFT",
@@ -401,7 +410,7 @@ const BILL_FIELDS: readonly ImportField[] = [
   BEFORE_OPENING_FIELD,
 ];
 const BILL_HEADER_KEYS = [
-  "supplier", "billDate", "dueDate", "supplierInvoiceNumber", "discount", "extraCharge", "taxType", "taxRate", "paymentAccount",
+  "supplier", "billDate", "dueDate", "supplierInvoiceNumber", "discount", "extraCharge", "taxType", "paymentAccount",
   "moneyAccount", "paymentMode", "paymentReference", "fair",
 ];
 
@@ -440,7 +449,8 @@ const purchaseBillsKind: ImportKindDefinition = {
     const moneyAccount = val(first, "moneyAccount");
     const paymentMode = val(first, "paymentMode");
     const paymentReference = val(first, "paymentReference");
-    const lines = readLines(rows, look);
+    const firstRate = optionalRate(first);
+    const lines = readLines(rows, look, firstRate);
 
     const bill = repo.createPurchaseBill({
       ...(moneyAccount === "" ? {} : { moneyAccount }),
@@ -454,7 +464,7 @@ const purchaseBillsKind: ImportKindDefinition = {
       ...(dueDate === undefined ? {} : { dueDate }),
       ...(notes === "" ? {} : { notes }),
       taxType,
-      taxRateBasisPoints: optionalRate(first),
+      taxRateBasisPoints: firstRate,
       discountPaise: optionalMoney(first, "discount", "Discount"),
       extraChargePaise: optionalMoney(first, "extraCharge", "Extra charge"),
       paymentAccount,

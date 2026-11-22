@@ -188,7 +188,9 @@ describe("DEFECT 1: a credit note must reduce what the customer can still pay", 
       // was ever charged - leaving RECEIVABLES at -1 and output SGST with a DEBIT balance, i.e. a
       // negative liability. The second note's tax is clamped to the 4 paise of headroom instead.
       const invoice = finalizedInvoice(w, { unitPricePaise: 25, quantity: 2, taxRateBasisPoints: 1800 });
-      const total = 50 + 9;
+      // 50 + 9 = 59 paise, which I-2 rounds UP to the rupee (I-Q5): the invoice is Rs 1.00 with a
+      // +41 paise round-off. The full return below reverses that round-off too (I-Q8).
+      const total = 100;
       expect(receivablesPaise(w.repository, invoice.id)).toBe(total);
 
       w.repository.saveCreditNote(creditNote(w, invoice, "cn1", 25));

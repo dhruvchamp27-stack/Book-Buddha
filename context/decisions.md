@@ -6,6 +6,21 @@ These pre-date this harness, so they keep their original IDs. **Future** decisio
 in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at the top.*
 
 ## Rules and lessons carried forward (moved from Progress.md, S17-11)
+- **Baseline gates on THIS machine (22 Nov, fresh clone of `b6bfea0`, Node 24.16.0, Windows):** tsc
+  exit 0 · vitest **1,261 passed / 1 failed of 1,262, in 98 files** · vite builds in 1.78s. The single
+  failure is `src/import-export/r10-integration.test.ts:238`, a WALL-CLOCK assertion that 2,000
+  single-line invoices commit in under 10 seconds: it measured 14.06s in the full parallel run and
+  passes 10/10 when that file is run on its own, so it is CONTENTION on this machine, not a defect.
+  The October ACCEPTANCE test is green (22 tests). `HOT.md` records the gates as fully green because
+  they were measured on the other machine. Do NOT "fix" this by loosening the threshold without the
+  owner's say; it is the only allowed red in a builder's report.
+- **The CGST odd-paise split is a PLAIN per-document `Math.floor(taxPaise / 2)`** (`engine.ts:69`, and
+  `:187` for input tax). It is NOT cumulative. A cumulative CGST/SGST split does exist in the live code,
+  but only in `cashBasisSupplierPaymentLines` (deferred input tax on cash-basis supplier payments) and in
+  `allocateProportionally()` for the cash view — never in the invoice posting path. The ABANDONED local
+  branch's `IMPLEMENTATION_PROGRESS.md:147` claims the invoice rule is `floor((prior+this)/2) - priorCgst`;
+  that branch is a dead reimplementation that shares only commit `616664f` with this one, and its notes
+  must not be used as a source. This wrong premise reached a worker brief once on 22 Nov.
 - Owner's standing rule: build backend only, no UI (session 8). Screenshots only of things that really work.
 - A slice is accepted when the accounting logic is satisfied (S12-1). The nineteen questions are closed (S11-1 to S11-22); do not re-ask them.
 - Where the data model forces a choice, make it and say so; accounting policy is Dhruv's (S9-1 trade-off; v18 and v19 precedent).
@@ -62,7 +77,7 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
   accepts and ignores a "Before opening" column (history always decided from the date).
 **Build work still open (see Progress.md live briefs for order)**
 - R10 follow-ups: .xlsx import/export and PDF export need a package install (Q16: name each package + size, ask first).
-- Pre-opening HISTORY: BUILT (F, 22 Nov); F2 open (see BUILD_PLAN_S18.md §1). Still to build: back-dating confirm on every dated entry (Q12) · GST per line (Q24) · round-off line (Q23). The full order is in `book-buddha/BUILD_PLAN_S18.md`.
+- Pre-opening HISTORY: BUILT (F, 22 Nov); F2 RULED 22 Nov (S18-3), ready to build. Still to build: back-dating confirm on every dated entry (Q12) · GST per line (Q24) · round-off line (Q23). The full order is in `book-buddha/BUILD_PLAN_S18.md`.
 **From todos.md (seeded 14 Nov; may be stale)**
 - FD §H listed as open: archive scope; auto-record payment on a bank match; whether the Uncategorized account is auto-created or named by the owner (section header says closed — confirm).
 - Subscriptions deferred (S1-5). Outside advisers: CA (principal vs agent on magazine resale, GST timing, "Exempt" scope); lawyer (buyer personal data under DPDP Rules 2025). The old todos.md build order is superseded by HOT.md.
@@ -75,6 +90,96 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 - `testing/testing.md` is a stale draft (says DD §5 unwritten; calls a fair a tag). Phase 2 design open: invoicing-user login and recovery, permission matrix, tablet layout, LAN, connection drop (DD §2.4).
 
 ## Session decisions (harness convention, newest first)
+
+- **S18-6 (2026-11-22) — I-Q6 CONFIRMED: round-off on bills and expenses, migration v35.** His
+  words: optional · default zero · stored in whole paise · bills and expenses only · kept separate
+  from existing document totals · old posted bills and expenses unchanged · no historical document
+  re-rounded. Built as one SIGNED `round_off_paise` column on `purchase_bills` and `expenses`,
+  capped below a rupee by CHECK (`> -100 AND < 100`) so the "under Rs 1" in I-Q6 is enforced by the
+  database rather than trusted to callers. NOTHING is backfilled: existing rows keep 0 from the
+  DEFAULT. Unlike an invoice (I-Q5) nothing is CALCULATED here - a bill carries only what the owner
+  types, to match a supplier's printed total. Bills and expenses store no total (both computed on
+  read), so this needs no equivalent of the invoice's `total_paise`.
+  *Note:* this took v35, so R14 is now **v36** - a migration takes the next free number in the order
+  it is actually built.
+
+- **S18-5 (2026-11-22) — HIS RULINGS ON THE FOUR QUESTIONS I-1 NEVER ASKED (I-Q11..I-Q14).** These came
+  out of reading the LIVE code before writing the I-2 brief: the I-1 mini-spec answered its own questions
+  1-3 and 6 but never recorded 4 (the v34 migration) or 5 (the read-path inventory). Each was put to him
+  with a recommended default and he took the recommendation in all four.
+  - **I-Q11 — the Round off account must NOT inflate sales.** `salesByTax` net sales
+    (`reports-sales.ts:205`), the credit-note report's taxable figure (`:336`) and P&L gross sales
+    (`repository.ts:3664-3670`) all select `ca.type = 'INCOME'`, so a new income account would be counted
+    inside reported sales. RULED: ROUND_OFF stays a signed INCOME account as ruled in I-Q7 and is
+    EXCLUDED from those three aggregates. **Mechanism corrected 22 Nov, same day:** he first approved
+    "its own role", but `V9_ACCOUNT_ROLES` is frozen and the role CHECK is built from it, so a new role
+    would mean REBUILDING `chart_accounts` and replaying every trigger that mentions it, on real data,
+    for a reporting exclusion. He then ruled: exclude it BY CODE, through the single exported
+    `ROUND_OFF_ACCOUNT` constant, exactly as ROUNDING and STOCK_ADJUSTMENT are handled. v34 stays
+    additive. Reported sales stay exactly as they are today; the rounding appears as its own P&L line.
+  - **I-Q12 — the rounded total is STORED, never recomputed.** The invoice total is computed in four
+    places today: `open-items.ts:90-91` (raw SQL; feeds receivables, customer statements and ageing),
+    `repository.ts:4677` (`invoiceTotal`), `repository.ts:217` (`templateTotalPaise`), plus the bill and
+    expense mirrors at `:5730` and `:6573`. The cash view also uses the total as its p/T denominator
+    (`:3932`). RULED: v34 stores `round_off_paise` AND the rounded total on the invoice row, and all four
+    readers use the stored figure. One extra column, and a receivable can never disagree with the ledger.
+  - **I-Q13 — the tax type/rate coupling moves to the LINE.** `api/server.ts:179-184` refuses a tax type
+    paired with a 0% rate, which blocked the exempt 0% lines approved in I-Q9. RULED: the document keeps
+    the tax TYPE (place of supply), each LINE keeps its own rate, a 0% line is ALWAYS allowed, and an
+    invoice that has a tax type but only exempt lines is allowed.
+  - **I-Q14 — a note or return line LINKS to the line it reverses.** `credit_note_lines` and
+    `purchase_return_lines` carry no rate of their own, and bill-return lot matching keys on
+    (item, unit price) (`repository.ts:6279-6286`), which stops being unique once one item is sold at two
+    rates. RULED: each credit-note and purchase-return line links to the invoice or bill line it reverses
+    and takes THAT line's rate; the lot key gains the rate so matching stays unique.
+  *Recorded with it, no decision needed:* `credit_notes.refundable_paise`
+  (`customer-credits-schema.ts:184-185`) is a STORED total fixed at finalize, so the round-off has to be
+  in it at write time or it goes stale.
+
+- **S18-4 (2026-11-22) — I-Q4 IS OPEN, NOT RULED. GST JUDGMENT PENDING.** His answer was "use the
+  recommended pro-rata treatment, pending GST confirmation", followed by: "record I-Q4 as pending CA/GST
+  confirmation. Do not implement the pro-rata GST treatment as if it were legally confirmed. Use the
+  approved test behavior only until confirmed." The pack's own default carries the same caveat
+  ("*GST judgment: please confirm with Puneet / Manish*"). So a discount or freight/extra charge on a
+  mixed-rate document is spread PRO RATA over the lines, each rate charged on its share — built as TEST
+  BEHAVIOUR ONLY: reversible, and marked in the source as resting on an unconfirmed GST reading.
+  **Only Puneet's or Manish's confirmation, recorded here, closes this.** No agent's reading of the GST
+  rules closes it, and I-Q4 must not be cited as settled anywhere.
+
+- **S18-3 (2026-11-22) — HIS ANSWERS TO THE SESSION 18 REVIEW PACK.** His words: "I approve the
+  recommended defaults." All sixteen answers are the pack's own recommended default; nothing was varied.
+  Question text and hand-worked figures stay in `book-buddha/REVIEW_PACK_S18.md`.
+  **B1 — GST per line + rupee round-off (I-1 mini-spec, v34):** I-Q1 rate per LINE on invoice,
+  credit-note, bill, return and recurring-template lines; tax TYPE stays per document (place of supply);
+  an old document's rate is kept only as the fallback for lines that state none · I-Q2 item master gets
+  an optional default GST rate, PRE-FILL ONLY, never changes posted documents · I-Q3 tax rounded PER RATE
+  GROUP, not per line (ties to the GST return) · **I-Q4 OPEN — see S18-4** · I-Q5 round-off on invoices
+  including cash invoices: nearest rupee, 50 paise and over rounds up · I-Q6 round-off on bills and
+  expenses is an OPTIONAL typed amount under Rs 1, DEFAULT 0 · I-Q7 a NEW signed income account
+  "Round off"; the existing "Rounding" account stays cash-view-only and nothing posts to it · I-Q8
+  partial credit notes in EXACT PAISE, and only the note that completes the invoice reverses the
+  round-off · I-Q9 exempt (0%) lines allowed on a taxed invoice, shown separately in the GST summary ·
+  I-Q10 old invoices NEVER re-rounded, posted figures stand, round-off 0.
+  **B2 — installs approved (Q16-1, hard rule 2):** Q16-a YES to SheetJS `xlsx` 0.20.3 from
+  cdn.sheetjs.com and pdfkit 0.21.0, with `@types/pdfkit` dev-only · Q16-b YES, PDF for those 9 reports;
+  the other 10 lists get .xlsx only · Q16-c print "Rs" in headings and plain numbers, NO extra font file
+  (pdfkit's built-in font has no rupee glyph) · Q16-d PDF tests with NO extra package: write test PDFs
+  uncompressed and check the totals appear in the text. **Approved but NOT yet installed.**
+  **B3 — R14 (v35):** "approve the recommended Active / Inactive rule and all defaults" — R14-Q1
+  customers, suppliers, items, fairs AND chart accounts (one rule everywhere) · R14-Q2 stands as ruled in
+  S18-2, two states only · R14-Q3 open drafts/quotations BLOCK · R14-Q4 a draft whose customer went
+  inactive can still be saved but cannot be finalized until the customer is reactivated or changed ·
+  R14-Q5 a fair is "ended" when its end date has passed, and a fair with no end date cannot be made
+  inactive until one is set · R14-Q6 an import row naming an inactive customer is REJECTED with
+  "reactivate first", history rows before the opening date still allowed · R14-Q7 any signed-in user may
+  do it and the audit log records who · R14-Q8 a recurring invoice whose customer went inactive is
+  SKIPPED with a note, the other templates still run. **Read the pack's B3 with S18-2 in force: wherever
+  it says "archive"/"archived", that now means making the master INACTIVE — there is no third state.**
+  **B5 — F2 RULED:** "require confirmation for overlapping opening sets and reversing the last set." Both
+  doors warn with a count and require an explicit confirm; documents already posted are left alone; the
+  history flag stays frozen.
+  *Still not answered, not blocking the build:* Part C's five "calls made without you" (due at REV),
+  reports 7d and 8c accepted on trust with no hand check, and R6 with no recorded status in any source.
 
 - **S18-2 (2026-11-22) — HIS RULING ON "INACTIVE" (R14, replaces R14-Q2 default):** "No Inactive shall
   mean user cannot carry out any work on it! They need to be activated - they are not visible only on the
@@ -92,13 +197,15 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
   rejected. **BUILT 22 Nov:** refused when payable = 0 (lines − discount + extra charge ≤ 0), at create
   and at finalize; there is no draft-edit door for bills. The old test pinning "saves but cannot post" was replaced.
 
-- **S18 (2026-11-22) — ASKED, NOT YET RULED.** The I-1 mini-spec (GST per line + round-off, I-Q1..10),
+- **S18 (2026-11-22) — ASKED; ANSWERED 22 Nov — now ruled, see S18-3 and S18-4 above.** The I-1 mini-spec (GST per line + round-off, I-Q1..10),
   the Q16 installs (SheetJS 0.20.3 from the CDN + pdfkit 0.21.0, Q16-a..d), and the R14-1 mini-spec
   (archive, R14-Q1..8) were put to him with their recommended defaults. The full text and the
   hand-worked figures are in `book-buddha/REVIEW_PACK_S18.md`. Two research findings: customers,
   suppliers and items ALREADY have an `active` flag, though no document door checks it; and the
   `ROUNDING` account is cash-view only, so the plan is a NEW `ROUND_OFF` account. Migrations stay
-  v34 = I and v35 = R14.
+  v34 = I and v35 = R14. **Superseded 22 Nov:** v35 is bill/expense round-off (I-Q6, confirmed and
+  built) and R14 moved to **v36**, because I-Q6 was confirmed first and a migration takes the next
+  free number in the order it is actually built.
 
 - **S17-13 (2026-11-22) — HIS RULINGS FOR THE REMAINING PLAN.** (1) G back-dating tests: the app gets a
   settable "today" (clock); each test pins its own month — the October ACCEPTANCE test may change its
@@ -1433,8 +1540,10 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
   Uncategorized holding account, exclude+undo (D6).
 - **OCR for supplier bills (E):** same engine pre-fills a Bill for review; source file
   attached; never auto-posts.
-- **Archive (F):** third state (Active/Inactive/**Archived**) — hidden, retained,
-  reversible, audit-logged; blocked while live stock or an open balance exists.
+- **Archive (F):** **SUPERSEDED BY S18-2 (22 Nov): TWO STATES ONLY, Active / Inactive — there is no
+  Archived state.** Inactive = hidden from the screens, still in the database, and frozen (no work of
+  any kind until it is activated again); refused while anything is open on it; past figures keep
+  showing in reports. Reversible and audit-logged, as the third-state plan had it.
 - **Rejected (G):** live bank feed, reconciler-only role, auto-posting, one bank
   account per business.
 

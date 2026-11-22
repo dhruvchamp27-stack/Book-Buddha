@@ -146,6 +146,23 @@ describe("values", () => {
     expect(b[col("Description")]).toBe("Delivery, \"special\"");
   });
 
+  it("the Tax rate cell is PER ROW: each line exports its own rate (I-Q1), so a mixed invoice reads back as it was", () => {
+    const customerId = repo.createCustomer({ companyId, name: "Mixed Co" });
+    repo.saveDraft({
+      id: "inv-mixed", number: "INV-M", businessId, customerId, invoiceDate: "2026-04-15", status: "DRAFT", paymentAccount: "RECEIVABLES",
+      taxType: "CGST_SGST", taxRateBasisPoints: 0,
+      lines: [
+        { description: "Notebook", quantity: 4, unitPricePaise: 7500, taxRateBasisPoints: 500 },
+        { description: "Atlas", quantity: 7, unitPricePaise: 9900, taxRateBasisPoints: 1800 },
+        { description: "Exempt", quantity: 1, unitPricePaise: 1000, taxRateBasisPoints: 0 },
+      ],
+    });
+    repo.finalizeInvoice("inv-mixed");
+    const t = buildExport(repo, "invoices");
+    const col = t.columns.indexOf("Tax rate");
+    expect(t.rows.map((row) => row[col])).toEqual(["5", "18", "0"]);
+  });
+
   it("the other documents, stock, journal and trial balance carry the posted figures", () => {
     seedBooks();
     const payments = buildExport(repo, "payments");

@@ -48,7 +48,8 @@ describe("recurring invoice templates", () => {
         active: true, frequency: "MONTHLY", intervalCount: 1,
         startDate: "2026-01-31", nextRunDate: "2026-01-31", taxType: "NONE",
       });
-      expect(created.lines).toEqual([{ itemId, description: "Monthly supply", quantity: 2, unitPricePaise: 12500 }]);
+      // Each line now reads back its own GST rate (I-Q1); a template with no tax has 0%.
+      expect(created.lines).toEqual([{ itemId, description: "Monthly supply", quantity: 2, unitPricePaise: 12500, taxRateBasisPoints: 0 }]);
       expect(repository.listRecurringInvoiceTemplates({ businessId })).toHaveLength(1);
       expect(repository.listRecurringInvoiceTemplates({ active: false })).toHaveLength(0);
       expect(repository.getRecurringInvoiceTemplate(created.id).id).toBe(created.id);
@@ -64,7 +65,8 @@ describe("recurring invoice templates", () => {
       expect(() => repository.createRecurringInvoiceTemplate(template({ businessId: "missing" }))).toThrow("not found");
       expect(() => repository.createRecurringInvoiceTemplate(template({ endDate: "2026-01-01" }))).toThrow("End date");
       expect(() => repository.createRecurringInvoiceTemplate(template({ intervalCount: 0 }))).toThrow("Interval");
-      expect(() => repository.createRecurringInvoiceTemplate(template({ taxType: "IGST" }))).toThrow("Tax rate");
+      // I-Q13: a tax type with 0% is now allowed (an exempt line). What is still refused is a RATE with no tax type.
+      expect(() => repository.createRecurringInvoiceTemplate(template({ taxRateBasisPoints: 500 }))).toThrow("tax rate requires a tax type");
       expect(() => repository.createRecurringInvoiceTemplate(template({ lines: [] }))).toThrow("at least one line");
       expect(repository.listRecurringInvoiceTemplates()).toHaveLength(0);
     } finally {
@@ -102,7 +104,8 @@ describe("recurring invoice templates", () => {
         status: "DRAFT", invoiceDate: "2026-01-31", number: "INV-001/25-26",
         taxType: "CGST_SGST", taxRateBasisPoints: 1200, discountPaise: 1000, paymentAccount: "RECEIVABLES",
       });
-      expect(draft.lines).toEqual(created.lines);
+      // The draft's lines also read back their row id, which a template's lines do not have.
+      expect(draft.lines.map(({ id: _id, ...rest }) => rest)).toEqual(created.lines);
       expect(repository.getRecurringInvoiceTemplate(created.id).nextRunDate).toBe("2026-02-28");
       expect(repository.listInvoices()).toHaveLength(1);
       // Re-running for the same date must not double-generate.

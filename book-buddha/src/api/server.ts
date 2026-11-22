@@ -34,7 +34,26 @@ const invoiceLine = z.object({
   description: name,
   quantity: z.number().int().positive(),
   unitPricePaise: z.number().int().nonnegative(),
+  // I-Q13 (I-2): this line's own GST rate, shared by invoice, bill, credit note, return and recurring
+  // template lines. Left out, the line takes its document's rate. 0 is ALWAYS allowed (an exempt line).
+  taxRateBasisPoints: z.number().int().min(0).max(10000).optional(),
+  // I-Q14: the line a credit note (an invoice line id) or a purchase return (a bill line id) reverses.
+  reversesInvoiceLineId: z.number().int().positive().optional(),
+  reversesBillLineId: z.number().int().positive().optional(),
 });
+type ParsedLine = z.infer<typeof invoiceLine>;
+/** A line as the repository takes it: the optional rate is carried only when the caller gave one. */
+function documentLine(line: ParsedLine): {
+  itemId?: string; description: string; quantity: number; unitPricePaise: number; taxRateBasisPoints?: number;
+} {
+  return {
+    ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+    description: line.description,
+    quantity: line.quantity,
+    unitPricePaise: line.unitPricePaise,
+    ...(line.taxRateBasisPoints === undefined ? {} : { taxRateBasisPoints: line.taxRateBasisPoints }),
+  };
+}
 
 const companyInput = z.object({
   name,
@@ -176,11 +195,12 @@ const invoiceInput = z.object({
       message: "Discount cannot exceed the invoice subtotal.",
     });
   }
-  if (input.taxType === "NONE" && input.taxRateBasisPoints !== 0) {
+  // I-Q13: the document keeps the TYPE (place of supply); each LINE keeps its own rate. A tax type
+  // paired with 0% is allowed (an exempt line, or an invoice of only exempt lines); what is still
+  // refused is a rate on a document that has no tax type.
+  const rates = [input.taxRateBasisPoints, ...input.lines.map((line) => line.taxRateBasisPoints ?? input.taxRateBasisPoints)];
+  if (input.taxType === "NONE" && rates.some((rate) => rate !== 0)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["taxType"], message: "A tax rate requires a tax type." });
-  }
-  if (input.taxType !== "NONE" && input.taxRateBasisPoints === 0) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["taxRateBasisPoints"], message: "Tax rate must be positive for a taxable invoice." });
   }
 });
 const supplierInput = z.object({
@@ -212,6 +232,10 @@ const purchaseTaxFields = {
   taxType: z.enum(["NONE", "CGST_SGST", "IGST"]).default("NONE"),
   taxRateBasisPoints: z.number().int().min(0).max(10000).default(0),
 };
+// I-Q6: a round-off the owner TYPES on a bill or expense to match the supplier's printed total. Whole
+// paise, under Rs 1 either way, default 0. Nothing is calculated from it.
+const ROUND_OFF_MESSAGE = "A round-off must be a whole number of paise, under Rs 1 either way (from -99 to 99).";
+const typedRoundOff = z.number(ROUND_OFF_MESSAGE).int(ROUND_OFF_MESSAGE).min(-99, ROUND_OFF_MESSAGE).max(99, ROUND_OFF_MESSAGE).default(0);
 const purchaseBillInput = z.object({
   id: id.optional(),
   businessId: id,
@@ -228,6 +252,7 @@ const purchaseBillInput = z.object({
   // so every existing caller and every existing test keeps sending a valid body.
   discountPaise: z.number().int().nonnegative().default(0),
   extraChargePaise: z.number().int().nonnegative().default(0),
+  roundOffPaise: typedRoundOff,
   ...purchaseTaxFields,
   lines: z.array(invoiceLine).min(1),
 });
@@ -244,6 +269,7 @@ const expenseInput = z.object({
   expenseDate: z.string().date().optional(),
   description: name,
   amountPaise: z.number().int().positive(),
+  roundOffPaise: typedRoundOff,
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
   ...moneyFields,
   ...purchaseTaxFields,
@@ -1171,12 +1197,7 @@ export function buildApi(
       paymentAccount: input.paymentAccount,
       ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
       status: input.status,
-      lines: input.lines.map((line) => ({
-        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-        description: line.description,
-        quantity: line.quantity,
-        unitPricePaise: line.unitPricePaise,
-      })),
+      lines: input.lines.map(documentLine),
     };
     const number = repository.saveDraft(invoice);
     const saved = repository.getInvoice(invoice.id);
@@ -1192,12 +1213,7 @@ export function buildApi(
       reason: input.reason,
       ...(input.noteDate === undefined ? {} : { noteDate: input.noteDate }),
       status: "DRAFT",
-      lines: input.lines.map((line) => ({
-        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-        description: line.description,
-        quantity: line.quantity,
-        unitPricePaise: line.unitPricePaise,
-      })),
+      lines: input.lines.map((line) => ({ ...documentLine(line), ...(line.reversesInvoiceLineId === undefined ? {} : { reversesInvoiceLineId: line.reversesInvoiceLineId }) })),
     };
     const number = repository.saveCreditNote(note);
     return reply.code(201).send({ ...note, number });
@@ -1285,12 +1301,7 @@ export function buildApi(
       paymentAccount: input.paymentAccount,
       ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
       status: "QUOTATION",
-      lines: input.lines.map((line) => ({
-        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-        description: line.description,
-        quantity: line.quantity,
-        unitPricePaise: line.unitPricePaise,
-      })),
+      lines: input.lines.map(documentLine),
     };
     const number = repository.saveDraft(quotation);
     const saved = repository.getInvoice(quotation.id);
@@ -1325,12 +1336,7 @@ export function buildApi(
         paymentAccount: input.paymentAccount,
         ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
         status: input.status,
-        lines: input.lines.map((line) => ({
-          ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-          description: line.description,
-          quantity: line.quantity,
-          unitPricePaise: line.unitPricePaise,
-        })),
+        lines: input.lines.map(documentLine),
       };
       repository.updateDraft(invoice);
       return repository.getInvoice(invoice.id);
@@ -1419,12 +1425,7 @@ export function buildApi(
       startDate: input.startDate,
       ...(input.nextRunDate === undefined ? {} : { nextRunDate: input.nextRunDate }),
       ...(input.endDate === undefined ? {} : { endDate: input.endDate }),
-      lines: input.lines.map((line) => ({
-        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-        description: line.description,
-        quantity: line.quantity,
-        unitPricePaise: line.unitPricePaise,
-      })),
+      lines: input.lines.map(documentLine),
     });
     return reply.code(201).send(template);
   });
@@ -1504,12 +1505,7 @@ export function buildApi(
       number: input.number,
       billDate: input.billDate,
       paymentAccount: input.paymentAccount,
-      lines: lines.map((line) => ({
-        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-        description: line.description,
-        quantity: line.quantity,
-        unitPricePaise: line.unitPricePaise,
-      })),
+      lines: lines.map(documentLine),
     });
     return reply.code(201).send(bill);
   });
@@ -1523,12 +1519,7 @@ export function buildApi(
       billId: input.billId,
       reason: input.reason,
       ...(input.returnDate === undefined ? {} : { returnDate: input.returnDate }),
-      lines: input.lines.map((line) => ({
-        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
-        description: line.description,
-        quantity: line.quantity,
-        unitPricePaise: line.unitPricePaise,
-      })),
+      lines: input.lines.map((line) => ({ ...documentLine(line), ...(line.reversesBillLineId === undefined ? {} : { reversesBillLineId: line.reversesBillLineId }) })),
     }));
   });
 

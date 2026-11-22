@@ -87,19 +87,18 @@ export function openCustomerItemRows(
               COALESCE(i.invoice_date, je.entry_date, date(i.created_at, '+330 minutes'))
                 AS invoice_date,
               i.tax_rate_basis_points,
-              (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
-                + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
+              -- I-Q12: the STORED rounded total (v34), never recomputed from the lines, so a receivable
+              -- can not disagree with the ledger however many GST rates the invoice holds.
+              i.total_paise AS total_paise,
               COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id AND p.cancelled_at IS NULL AND p.before_opening = 0), 0)
                 + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
          FROM invoices i
-         JOIN invoice_lines il ON il.invoice_id = i.id
          -- Every FINALIZED invoice has this entry; LEFT so a missing one cannot silently
          -- drop the invoice from what the customer owes.
          LEFT JOIN journal_entries je ON je.id = 'je-' || i.id
          -- F: a document kept as HISTORY (dated on or before the opening date) is never owed: the
          -- opening balance is the books' only figure for that period.
          WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES' AND i.before_opening = 0${invoiceWhere.sql}
-         GROUP BY i.id
          ORDER BY i.created_at`,
     )
     .all(...invoiceWhere.params) as Array<{

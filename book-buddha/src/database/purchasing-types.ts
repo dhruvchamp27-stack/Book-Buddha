@@ -80,6 +80,8 @@ export interface PurchaseBillInput {
   readonly discountPaise?: number;
   /** R8. Freight, packing and the like added by the supplier. Debits PURCHASE_EXTRA_CHARGES. */
   readonly extraChargePaise?: number;
+  /** I-Q6. Typed by the owner to match the supplier's printed total. Signed whole paise, under Rs 1. Default 0. */
+  readonly roundOffPaise?: number;
   readonly paymentAccount: PurchasePaymentAccount;
   readonly lines: readonly PurchaseBillLine[];
 }
@@ -107,8 +109,10 @@ export interface PurchaseBillRecord {
   /** subtotal - discount + extra charge. What input GST is charged on. */
   readonly taxablePaise: number;
   readonly taxPaise: number;
-  /** taxable + tax: what the supplier is actually owed. */
+  /** taxable + tax: the COMPUTED total. The typed round-off (I-Q6) is its own figure below, never folded in. */
   readonly totalPaise: number;
+  /** I-Q6. The round-off the owner typed, signed whole paise. 0 when none. */
+  readonly roundOffPaise: number;
   readonly paidPaise: number;
   /** F: kept as history (dated on or before the opening date); never journalled. */
   readonly beforeOpening: boolean;
@@ -128,6 +132,8 @@ export interface ExpenseInput {
   readonly amountPaise: number;
   readonly taxType?: InvoiceTaxType;
   readonly taxRateBasisPoints?: number;
+  /** I-Q6. Typed by the owner to match the supplier's printed total. Signed whole paise, under Rs 1. Default 0. */
+  readonly roundOffPaise?: number;
   readonly paymentAccount: PurchasePaymentAccount;
 }
 
@@ -148,6 +154,8 @@ export interface ExpenseRecord {
   readonly fairId?: string;
   readonly taxPaise: number;
   readonly totalPaise: number;
+  /** I-Q6. The round-off the owner typed, signed whole paise. 0 when none; not folded into `totalPaise`. */
+  readonly roundOffPaise: number;
   readonly paidPaise: number;
   /** F: kept as history (dated on or before the opening date); never journalled. */
   readonly beforeOpening: boolean;
@@ -213,6 +221,13 @@ export interface PurchaseReturnLine {
   readonly quantity: number;
   /** Must be the price the BILL charged for this item: that is what the stock layer holds. */
   readonly unitPricePaise: number;
+  /**
+   * I-Q14: the bill line (`purchase_bill_lines.id`) this return line sends back. The return line
+   * takes THAT line's rate. Absent on input, the repository links it by item and price.
+   */
+  readonly reversesBillLineId?: number;
+  /** Always present on what the repository reads back: the rate the line reverses. */
+  readonly taxRateBasisPoints?: number;
 }
 
 export interface PurchaseReturnInput {

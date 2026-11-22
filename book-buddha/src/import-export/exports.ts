@@ -200,15 +200,16 @@ function invoicesTable(repository: AccountingRepository, scope: ExportScope): Ex
       invoice.number, isoDay(invoice.invoiceDate), isoDay(invoice.dueDate), l.customers.get(invoice.customerId) ?? "",
       invoice.status,
     ];
-    const tail = (): string[] => [
+    // I-Q1: the Tax rate cell is PER ROW - each line's own rate (the document's, for a document with no lines).
+    const tail = (lineRateBp: number | undefined): string[] => [
       money(invoice.discountPaise ?? 0), money(invoice.extraChargePaise ?? 0), invoice.taxType ?? "NONE",
-      formatBasisPoints(invoice.taxRateBasisPoints ?? 0),
+      formatBasisPoints(lineRateBp ?? invoice.taxRateBasisPoints ?? 0),
       invoice.fairId === undefined ? "" : l.fairs.get(invoice.fairId) ?? "", text(invoice.notes),
       beforeOpeningCell(invoice.beforeOpening),
     ];
-    if (invoice.lines.length === 0) rows.push([...head(), "", "", "", "", ...tail()]);
+    if (invoice.lines.length === 0) rows.push([...head(), "", "", "", "", ...tail(undefined)]);
     for (const line of invoice.lines) {
-      rows.push([...head(), itemName(l, line.itemId), line.description, int(line.quantity), money(line.unitPricePaise), ...tail()]);
+      rows.push([...head(), itemName(l, line.itemId), line.description, int(line.quantity), money(line.unitPricePaise), ...tail(line.taxRateBasisPoints)]);
     }
   }
   return table(columns, rows, ["Invoice date", "Due date", "Quantity", "Unit price", "Discount", "Extra charge", "Tax rate"]);
@@ -267,14 +268,14 @@ function purchaseBillsTable(repository: AccountingRepository, scope: ExportScope
       bill.number, text(bill.supplierInvoiceNumber), isoDay(bill.billDate), isoDay(bill.dueDate),
       l.suppliers.get(bill.supplierId) ?? "", bill.status,
     ];
-    const tail = (): string[] => [
-      money(bill.discountPaise), money(bill.extraChargePaise), bill.taxType, formatBasisPoints(bill.taxRateBasisPoints),
+    const tail = (lineRateBp: number | undefined): string[] => [
+      money(bill.discountPaise), money(bill.extraChargePaise), bill.taxType, formatBasisPoints(lineRateBp ?? bill.taxRateBasisPoints),
       text(bill.paymentAccount), bill.fairId === undefined ? "" : l.fairs.get(bill.fairId) ?? "", text(bill.notes),
       beforeOpeningCell(bill.beforeOpening),
     ];
-    if (bill.lines.length === 0) rows.push([...head(), "", "", "", "", ...tail()]);
+    if (bill.lines.length === 0) rows.push([...head(), "", "", "", "", ...tail(undefined)]);
     for (const line of bill.lines) {
-      rows.push([...head(), itemName(l, line.itemId), line.description, int(line.quantity), money(line.unitPricePaise), ...tail()]);
+      rows.push([...head(), itemName(l, line.itemId), line.description, int(line.quantity), money(line.unitPricePaise), ...tail(line.taxRateBasisPoints)]);
     }
   }
   return table(columns, rows, ["Bill date", "Due date", "Quantity", "Unit price", "Discount", "Extra charge", "Tax rate"]);

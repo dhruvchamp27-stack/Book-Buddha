@@ -106,7 +106,8 @@ const THREE_LINES = (number: string, first = 2): MappedRow[] => {
     row(first + 2, { ...head(number, tax), description: "Binding", quantity: "3", unitPrice: "100" }),
   ];
 };
-const THREE_LINE_TOTAL = 330_459; // subtotal 280,050 + 18% (50,409), in paise
+// subtotal 280,050 + 18% (50,409) = 330,459, which I-2 rounds to the nearest rupee (I-Q5): 330,500, a +41 round-off.
+const THREE_LINE_TOTAL = 330_500; // in paise
 
 const invoiceCount = (w: World): number => w.repository.listInvoices(w.businessId).length;
 
@@ -144,10 +145,11 @@ describe("invoices", () => {
     expect(rest).toHaveLength(0);
     expect(only).toMatchObject({ number: "INV-1", status: "FINALIZED", paymentAccount: "RECEIVABLES", taxType: "CGST_SGST", taxRateBasisPoints: 1800 });
     const invoice = w.repository.getInvoice(only?.id ?? "");
-    expect(invoice.lines).toEqual([
-      { itemId: w.atlasId, description: "Atlas", quantity: 2, unitPricePaise: 100_000 },
-      { itemId: w.freightId, description: "Freight", quantity: 1, unitPricePaise: 50_050 },
-      { description: "Binding", quantity: 3, unitPricePaise: 10_000 },
+    // Lines now also read back their row id and their own GST rate (I-Q1); the rate here is the file's 18%.
+    expect(invoice.lines.map(({ id: _id, ...rest }) => rest)).toEqual([
+      { itemId: w.atlasId, description: "Atlas", quantity: 2, unitPricePaise: 100_000, taxRateBasisPoints: 1800 },
+      { itemId: w.freightId, description: "Freight", quantity: 1, unitPricePaise: 50_050, taxRateBasisPoints: 1800 },
+      { description: "Binding", quantity: 3, unitPricePaise: 10_000, taxRateBasisPoints: 1800 },
     ]);
     expect(trialBalanced(w)).toBe(true);
     expect(trial(w, "RECEIVABLES")).toBe(THREE_LINE_TOTAL);
@@ -175,11 +177,31 @@ describe("invoices", () => {
     ]);
     const byNumber = new Map(w.repository.listInvoices(w.businessId).map((i) => [i.number, w.repository.getInvoice(i.id)]));
     expect(byNumber.get("INV-A")?.lines).toHaveLength(3);
-    expect(byNumber.get("INV-B")?.lines).toEqual([
-      { description: "Poster", quantity: 1, unitPricePaise: 20_000 },
-      { description: "Frame", quantity: 2, unitPricePaise: 5_000 },
+    expect(byNumber.get("INV-B")?.lines.map(({ id: _id, ...rest }) => rest)).toEqual([
+      { description: "Poster", quantity: 1, unitPricePaise: 20_000, taxRateBasisPoints: 0 },
+      { description: "Frame", quantity: 2, unitPricePaise: 5_000, taxRateBasisPoints: 0 },
     ]);
     expect(trial(w, "RECEIVABLES")).toBe(THREE_LINE_TOTAL + 30_000);
+  });
+
+  it("GST is a per-row column (I-Q1): rows may state different rates, a blank cell carries the first row's rate, 0 is exempt", () => {
+    const w = world();
+    const rows = [
+      row(2, { ...head("INV-M", { taxType: "CGST_SGST", taxRate: "5%" }), description: "Notebook", quantity: "4", unitPrice: "75" }),
+      row(3, { ...head("INV-M"), description: "Atlas", quantity: "7", unitPrice: "99", taxRate: "18%" }),
+      row(4, { number: "INV-M", description: "Pen", quantity: "1", unitPrice: "86.29", taxRate: "18" }),
+      row(5, { number: "INV-M", description: "Exempt", quantity: "1", unitPrice: "10", taxRate: "0" }),
+      row(6, { number: "INV-M", description: "Blank", quantity: "1", unitPrice: "10" }), // blank: the first row's 5%
+    ];
+    expect(post(w, "invoices", rows)).toEqual({ status: "CREATED", reference: "INV-M" });
+    const [only] = w.repository.listInvoices(w.businessId);
+    const invoice = w.repository.getInvoice(only?.id ?? "");
+    expect(invoice.lines.map((line) => line.taxRateBasisPoints)).toEqual([500, 1800, 1800, 0, 500]);
+    // 5%: 300.00 + 10.00 = 310.00 -> 15.50. 18%: 779.29 -> 140.27. Exempt 10.00. Taxable 1,099.29 + tax 155.77 = 1,255.06 -> 1,255.00.
+    expect(invoice.totalPaise).toBe(125_500);
+    expect(invoice.roundOffPaise).toBe(-6);
+    expect(trial(w, "RECEIVABLES")).toBe(125_500);
+    expect(trialBalanced(w)).toBe(true);
   });
 
   it("a later row that disagrees with the first fails the unit, naming the field", () => {
@@ -192,7 +214,7 @@ describe("invoices", () => {
       ["Discount", { discount: "10" }],
       ["Extra charge", { extraCharge: "10" }],
       ["Tax type", { taxType: "IGST" }],
-      ["Tax rate", { taxRate: "12" }],
+      // The Tax RATE is no longer here: I-Q1 makes it a per-row column, tested below.
       ["Fair", { fair: "Some Fair" }],
     ];
     for (const [label, change] of cases) {

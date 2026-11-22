@@ -6,13 +6,17 @@ import {
   cancelInvoice,
   finalizeInvoice,
   inputTaxPaise,
+  invoiceFigures,
   purchaseEntry,
   reverseEntry,
+  roundOffLines,
+  roundToRupee,
   spreadBillDiscount,
   supplierPaymentEntry,
+  taxGroupsFor,
   validatePurchaseTax,
 } from "../accounting/engine.js";
-import type { DiscountedLot } from "../accounting/engine.js";
+import type { DiscountedLot, TaxGroup } from "../accounting/engine.js";
 import type {
   AccountCode,
   AuditEvent,
@@ -73,7 +77,7 @@ import {
 } from "./reports-transactions.js";
 export type * from "./reports-sales.js";
 export type * from "./reports-transactions.js";
-import { ACCOUNT_TYPES, SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
+import { ACCOUNT_TYPES, ROUND_OFF_ACCOUNT, SETTLEMENT_ROLES, type AccountRole, type AccountType } from "./chart-accounts-schema.js";
 import { OPENING_BALANCE_EQUITY_CODE, OPENING_CONTROL_ROLES } from "./opening-balances-schema.js";
 import type {
   ExpenseCategoryRecord,
@@ -214,10 +218,16 @@ interface RecurringTemplateRow {
   created_at: string;
 }
 
+/**
+ * The total a run of this template WILL post: the same per-rate-group GST and whole-rupee round-off
+ * the invoice it generates gets (I-Q3, I-Q5). A template stores no total of its own; the invoice
+ * made from it does (I-Q12).
+ */
 function templateTotalPaise(template: RecurringInvoiceTemplate): number {
   const subtotal = template.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
   const taxable = subtotal - template.discountPaise + template.extraChargePaise;
-  return taxable + Math.round(taxable * template.taxRateBasisPoints / 10000);
+  const groups = taxGroupsFor(template.lines, template.taxRateBasisPoints, template.taxType, template.discountPaise, template.extraChargePaise);
+  return roundToRupee(taxable + groups.reduce((total, group) => total + group.taxPaise, 0)).totalPaise;
 }
 
 interface InvoiceRow {
@@ -243,15 +253,31 @@ interface InvoiceRow {
   source_quotation_id?: string | null;
   tax_type: Invoice["taxType"] | null;
   tax_rate_basis_points: number;
+  round_off_paise: number;
+  total_paise: number;
   created_at?: string;
   before_opening?: number;
 }
 
 interface InvoiceLineRow {
+  id?: number;
   item_id: string | null;
   description: string;
   quantity: number;
   unit_price_paise: number;
+  tax_rate_basis_points?: number;
+}
+
+/**
+ * I-Q1. A line's effective rate: its own, else the document's (the fallback an old document keeps).
+ * Refused here, in plain words, so a bad rate never reaches the database CHECK as a raw SQLite error.
+ */
+function effectiveLineRate(lineRate: number | undefined, documentRate: number | undefined): number {
+  const rate = lineRate ?? documentRate ?? 0;
+  if (!Number.isInteger(rate) || rate < 0 || rate > 10000) {
+    throw new RepositoryValidationError("Tax rate must be a whole number between 0% and 100%.");
+  }
+  return rate;
 }
 
 interface JournalEntryRow {
@@ -394,9 +420,13 @@ export interface CreditNoteSummary {
   readonly beforeOpening: boolean;
   /** Taxable value of the returned lines, in paise. */
   readonly subtotalPaise: number;
-  /** Tax reversed on the returned lines (invoice tax rate), in paise. */
+  /** Tax reversed on the returned lines, at each line's own rate (I-Q1), in paise. */
   readonly taxPaise: number;
-  /** subtotalPaise + taxPaise: the amount credited back on finalize. */
+  /**
+   * What the note credits back. For a posted note this is the POSTED journal figure (I-Q8): the
+   * taxable value plus the GST actually posted, plus the invoice's round-off when this note is the
+   * one that completes the invoice.
+   */
   readonly totalPaise: number;
 }
 
@@ -964,6 +994,34 @@ export interface OpeningBalanceSet {
   readonly balancingLine: OpeningBalanceLineInput | null;
 }
 
+/**
+ * A fully migrated EMPTY database, serialized once per process, so an in-memory database can be
+ * restored from those bytes instead of replaying the whole migration chain.
+ *
+ * WHY: the chain is ~115 ms and grows with every migration (v34 took it to ~147 ms). An in-memory
+ * database is built per test, so the suite was spending roughly 1,269 x 147 ms = ~186 s replaying
+ * migrations before a single assertion ran, and tests had begun timing out on their 5 s budgets.
+ * Restoring from bytes is ~1 ms.
+ *
+ * This is NOT a behaviour change: the image is the result of running the real chain, in this same
+ * process, through the same `runMigrations`. `runMigrations` is still called on the restored
+ * connection, where it finds every version already recorded and applies nothing - so a file
+ * database, and any image that somehow lagged, still go through the real gate.
+ *
+ * Each restore is its own private database: proven by writing to one and reading the others.
+ */
+let migratedImage: Buffer | undefined;
+
+function emptyMigratedDatabase(): Database.Database {
+  if (migratedImage === undefined) {
+    const seed = new Database(":memory:");
+    runMigrations(seed);
+    migratedImage = seed.serialize();
+    seed.close();
+  }
+  return new Database(migratedImage);
+}
+
 export class AccountingRepository {
   public readonly db: Database.Database;
 
@@ -972,7 +1030,9 @@ export class AccountingRepository {
    * IST date, read per call. EVERY "today" decision in the backend goes through it.
    */
   public constructor(databasePath = ":memory:", options: { readonly today?: () => string } = {}) {
-    this.db = new Database(databasePath);
+    // `:memory:` means "a throwaway database", which is tests. It starts from the migrated image;
+    // a real file still replays the chain, which is what an upgrade must do.
+    this.db = databasePath === ":memory:" ? emptyMigratedDatabase() : new Database(databasePath);
     registerToday(this.db, options.today);
     runMigrations(this.db);
   }
@@ -2143,9 +2203,10 @@ export class AccountingRepository {
       if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number);
       this.validateInvoiceReferences(invoice);
       const money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, invoice);
+      const figures = this.invoiceStoredFigures(invoice);
       this.db
         .prepare(
-          "INSERT INTO invoices (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, number, invoice_date, due_date, discount_paise, extra_charge_paise, notes, payment_terms, tax_type, tax_rate_basis_points, payment_account, status, converted_invoice_id, created_at, money_account, payment_mode, payment_reference, source_quotation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO invoices (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, number, invoice_date, due_date, discount_paise, extra_charge_paise, notes, payment_terms, tax_type, tax_rate_basis_points, payment_account, status, converted_invoice_id, created_at, money_account, payment_mode, payment_reference, source_quotation_id, round_off_paise, total_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           invoice.id,
@@ -2176,9 +2237,11 @@ export class AccountingRepository {
           money.paymentMode,
           money.paymentReference,
           invoice.sourceQuotationId ?? null,
+          figures.roundOffPaise,
+          figures.totalPaise,
         );
       const lineStatement = this.db.prepare(
-        "INSERT INTO invoice_lines (invoice_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO invoice_lines (invoice_id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points) VALUES (?, ?, ?, ?, ?, ?)",
       );
       for (const line of invoice.lines) {
         lineStatement.run(
@@ -2187,6 +2250,7 @@ export class AccountingRepository {
           line.description,
           line.quantity,
           line.unitPricePaise,
+          effectiveLineRate(line.taxRateBasisPoints, invoice.taxRateBasisPoints),
         );
       }
     });
@@ -2216,6 +2280,7 @@ export class AccountingRepository {
       }
       const invoice = { ...input, number: current.number };
       this.validateInvoiceReferences(invoice);
+      const figures = this.invoiceStoredFigures(invoice);
       // Owner ruling S17: an edit never changes the money account / mode / reference unless the
       // user sends a new one (CASH included, which is then a new choice). Anything left out keeps
       // the stored value. A document edited into a credit one gets what saveDraft stores for it.
@@ -2240,7 +2305,7 @@ export class AccountingRepository {
       }
       this.db
         .prepare(
-          "UPDATE invoices SET business_id = ?, customer_id = ?, fair_id = ?, buyer_name = ?, buyer_contact = ?, number = ?, invoice_date = ?, due_date = ?, discount_paise = ?, extra_charge_paise = ?, notes = ?, payment_terms = ?, tax_type = ?, tax_rate_basis_points = ?, payment_account = ?, status = ?, money_account = ?, payment_mode = ?, payment_reference = ? WHERE id = ?",
+          "UPDATE invoices SET business_id = ?, customer_id = ?, fair_id = ?, buyer_name = ?, buyer_contact = ?, number = ?, invoice_date = ?, due_date = ?, discount_paise = ?, extra_charge_paise = ?, notes = ?, payment_terms = ?, tax_type = ?, tax_rate_basis_points = ?, payment_account = ?, status = ?, money_account = ?, payment_mode = ?, payment_reference = ?, round_off_paise = ?, total_paise = ? WHERE id = ?",
         )
         .run(
           invoice.businessId,
@@ -2267,13 +2332,15 @@ export class AccountingRepository {
           money.moneyAccount,
           money.paymentMode,
           money.paymentReference,
+          figures.roundOffPaise,
+          figures.totalPaise,
           invoice.id,
         );
       this.db
         .prepare("DELETE FROM invoice_lines WHERE invoice_id = ?")
         .run(invoice.id);
       const lineStatement = this.db.prepare(
-        "INSERT INTO invoice_lines (invoice_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO invoice_lines (invoice_id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points) VALUES (?, ?, ?, ?, ?, ?)",
       );
       for (const line of invoice.lines) {
         lineStatement.run(
@@ -2282,6 +2349,7 @@ export class AccountingRepository {
           line.description,
           line.quantity,
           line.unitPricePaise,
+          effectiveLineRate(line.taxRateBasisPoints, invoice.taxRateBasisPoints),
         );
       }
       this.insertAuditEvent({
@@ -2335,6 +2403,7 @@ export class AccountingRepository {
     this.assertInvoiceTakesCreditNote(invoice);
     if (note.status !== "DRAFT" || note.lines.length === 0) throw new RepositoryValidationError("Credit notes must start as non-empty drafts.");
     this.validateCreditNoteLines(invoice, note.lines);
+    const resolvedLines = this.resolveCreditNoteLines(invoice, note.lines);
     // S11-20: NULL when no date is given. The date is SPECIFIED, never guessed from "today at save".
     const noteDate = note.noteDate ?? null;
     if (noteDate !== null) this.assertIsoDate("Credit note date", noteDate);
@@ -2342,8 +2411,10 @@ export class AccountingRepository {
       const number = note.number ?? this.nextBusinessNumber("CN", invoice.businessId, noteDate ?? this.today());
       this.db.prepare("INSERT INTO credit_notes (id, invoice_id, number, reason, note_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(note.id, note.invoiceId, number, note.reason, noteDate, note.status, new Date().toISOString());
-      const statement = this.db.prepare("INSERT INTO credit_note_lines (credit_note_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)");
-      for (const line of note.lines) statement.run(note.id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
+      const statement = this.db.prepare("INSERT INTO credit_note_lines (credit_note_id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points, reverses_invoice_line_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      for (const { line, rate, reversesId } of resolvedLines) {
+        statement.run(note.id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise, rate, reversesId);
+      }
       this.insertAuditEvent({ action: "credit_note.created", entityId: note.id, occurredAt: new Date().toISOString() });
       return number;
     });
@@ -2384,13 +2455,21 @@ export class AccountingRepository {
       }
       this.validateCreditNoteLines(invoice, note.lines);
       const taxablePaise = note.lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
+      // I-Q1 / I-Q3: each note line carries the rate of the invoice line it reverses; the note's GST is
+      // summed per rate group and rounded once per group, in EXACT PAISE (I-Q8) - never to the rupee.
+      const groups = taxGroupsFor(note.lines, invoice.taxRateBasisPoints ?? 0, invoice.taxType ?? "NONE", 0, 0);
+      const completesBase = this.creditedTaxablePaise(invoice.id) + taxablePaise >= this.invoiceTaxableBase(invoice);
       // One place decides the GST lines, capped per account and absorbing the remainder on a
       // full return (see creditNoteTaxLines).
-      const taxLines: JournalEntry["lines"] = this.creditNoteTaxLines(invoice, taxablePaise);
+      const taxLines: JournalEntry["lines"] = this.creditNoteTaxLines(invoice, groups, completesBase);
       // The settlement credit follows the tax ACTUALLY posted, or the caps would unbalance the
       // entry and the door would reject it.
       const postedTaxPaise = taxLines.reduce((sum, line) => sum + line.debitPaise, 0);
-      const noteInclusivePaise = taxablePaise + postedTaxPaise;
+      // I-Q8: ONLY the note that completes the invoice reverses the round-off, so the invoice clears
+      // to exactly zero. Read off the journal (what is still standing), not recomputed. A positive
+      // standing round-off (credited on the invoice) is DEBITED back; a negative one is credited back.
+      const roundOffReversalPaise = completesBase ? this.roundOffStandingPaise(invoice.id) : 0;
+      const noteInclusivePaise = taxablePaise + postedTaxPaise + roundOffReversalPaise;
       // S4-1: the settlement credit SPLITS. Up to what the invoice still owes, the note reduces
       // the customer's bill. Anything beyond that is money owed BACK to them, which is a
       // LIABILITY, not a negative asset - so receivables land on zero instead of going negative
@@ -2407,6 +2486,9 @@ export class AccountingRepository {
       const refundablePaise = noteInclusivePaise - offsetPaise;
       const settlementLines: Array<JournalEntry["lines"][number]> = [];
       if (offsetPaise > 0) settlementLines.push({ account: this.invoiceSettlementAccount(invoice), debitPaise: 0, creditPaise: offsetPaise });
+      // Only when earlier exact-paise notes took MORE than a rounded-down invoice was ever worth: this
+      // final note then puts the paisa back, as a debit to the settlement account (I-Q8).
+      else if (offsetPaise < 0) settlementLines.push({ account: this.invoiceSettlementAccount(invoice), debitPaise: -offsetPaise, creditPaise: 0 });
       if (refundablePaise > 0) settlementLines.push({ account: "CUSTOMER_CREDITS", debitPaise: 0, creditPaise: refundablePaise });
       const entry: JournalEntry = {
         id: `je-credit-note-${note.id}`,
@@ -2414,8 +2496,12 @@ export class AccountingRepository {
         description: `Credit note ${note.number} for invoice ${invoice.number}`,
         isReversal: false,
         lines: [
-          { account: "SALES", debitPaise: taxablePaise, creditPaise: 0 },
+          // One SALES line per rate group (a single-rate note still gets exactly one).
+          ...groups
+            .filter((group) => group.taxablePaise > 0)
+            .map((group) => ({ account: "SALES", debitPaise: group.taxablePaise, creditPaise: 0 })),
           ...taxLines,
+          ...roundOffLines(-roundOffReversalPaise),
           ...settlementLines,
         ],
       };
@@ -2881,18 +2967,38 @@ export class AccountingRepository {
     const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
     const rows = this.db.prepare(
       `SELECT cn.id, cn.invoice_id, i.number AS invoice_number, cn.number, cn.reason, cn.status, cn.created_at,
-              cn.before_opening, i.tax_rate_basis_points,
+              cn.before_opening, i.tax_rate_basis_points, i.tax_type,
               COALESCE((SELECT SUM(cnl.quantity * cnl.unit_price_paise) FROM credit_note_lines cnl WHERE cnl.credit_note_id = cn.id), 0) AS subtotal_paise
          FROM credit_notes cn JOIN invoices i ON i.id = cn.invoice_id
          ${where}
          ORDER BY cn.created_at DESC, cn.id DESC`,
     ).all(...params) as Array<{
       id: string; invoice_id: string; invoice_number: string; number: string; reason: string;
-      status: CreditNote["status"]; created_at: string; tax_rate_basis_points: number | null; subtotal_paise: number;
-      before_opening: number;
+      status: CreditNote["status"]; created_at: string; tax_rate_basis_points: number | null; tax_type: Invoice["taxType"] | null;
+      subtotal_paise: number; before_opening: number;
     }>;
     return rows.map((row) => {
-      const taxPaise = Math.round(row.subtotal_paise * (row.tax_rate_basis_points ?? 0) / 10000);
+      // I-Q8: a note that has been POSTED reads its figures off the posted journal entry, never
+      // recomputed from the header (which cannot know a clamped tax, a per-rate-group split or the
+      // round-off). A draft, or a note kept as history, has no entry, so it is worked out from its lines.
+      const posted = row.status === "DRAFT" || row.before_opening === 1
+        ? []
+        : this.db.prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ?")
+          .all(`je-credit-note-${row.id}`) as Array<{ account: string; debit_paise: number; credit_paise: number }>;
+      if (posted.length > 0) {
+        const sum = (test: (account: string) => boolean, sign: 1 | -1): number =>
+          posted.filter((line) => test(line.account)).reduce((total, line) => total + sign * (line.debit_paise - line.credit_paise), 0);
+        const subtotalPaise = sum((account) => account === "SALES", 1);
+        const taxPaise = sum((account) => account.startsWith("OUTPUT_"), 1);
+        const roundOffPaise = sum((account) => account === ROUND_OFF_ACCOUNT, 1);
+        return {
+          id: row.id, invoiceId: row.invoice_id, invoiceNumber: row.invoice_number, number: row.number, reason: row.reason,
+          status: row.status, createdAt: row.created_at, beforeOpening: row.before_opening === 1,
+          subtotalPaise, taxPaise, totalPaise: subtotalPaise + taxPaise + roundOffPaise,
+        };
+      }
+      const groups = taxGroupsFor(this.getCreditNote(row.id).lines, row.tax_rate_basis_points ?? 0, row.tax_type ?? "NONE", 0, 0);
+      const taxPaise = groups.reduce((total, group) => total + group.taxPaise, 0);
       return {
         id: row.id,
         invoiceId: row.invoice_id,
@@ -2913,13 +3019,18 @@ export class AccountingRepository {
     const row = this.db.prepare("SELECT id, invoice_id, number, reason, status, note_date, before_opening FROM credit_notes WHERE id = ?")
       .get(creditNoteId) as { id: string; invoice_id: string; number: string; reason: string; status: CreditNote["status"]; note_date: string | null; before_opening: number } | undefined;
     if (row === undefined) throw new Error(`Credit note ${creditNoteId} was not found.`);
-    const lines = this.db.prepare("SELECT item_id, description, quantity, unit_price_paise FROM credit_note_lines WHERE credit_note_id = ? ORDER BY id")
-      .all(creditNoteId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number }>;
+    const lines = this.db.prepare("SELECT item_id, description, quantity, unit_price_paise, tax_rate_basis_points, reverses_invoice_line_id FROM credit_note_lines WHERE credit_note_id = ? ORDER BY id")
+      .all(creditNoteId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number; tax_rate_basis_points: number; reverses_invoice_line_id: number | null }>;
     return {
       id: row.id, invoiceId: row.invoice_id, number: row.number, reason: row.reason,
       ...(row.note_date === null ? {} : { noteDate: row.note_date }), status: row.status,
       beforeOpening: row.before_opening === 1,
-      lines: lines.map((line) => ({ ...(line.item_id === null ? {} : { itemId: line.item_id }), description: line.description, quantity: line.quantity, unitPricePaise: line.unit_price_paise })),
+      lines: lines.map((line) => ({
+        ...(line.item_id === null ? {} : { itemId: line.item_id }),
+        description: line.description, quantity: line.quantity, unitPricePaise: line.unit_price_paise,
+        taxRateBasisPoints: line.tax_rate_basis_points,
+        ...(line.reverses_invoice_line_id === null ? {} : { reversesInvoiceLineId: line.reverses_invoice_line_id }),
+      })),
     };
   }
 
@@ -2940,7 +3051,7 @@ export class AccountingRepository {
 
     const lines = this.db
       .prepare(
-        "SELECT item_id, description, quantity, unit_price_paise FROM invoice_lines WHERE invoice_id = ? ORDER BY id",
+        "SELECT id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points FROM invoice_lines WHERE invoice_id = ? ORDER BY id",
       )
       .all(invoiceId) as InvoiceLineRow[];
     return {
@@ -2956,6 +3067,8 @@ export class AccountingRepository {
       ...(row.payment_terms === null ? {} : { paymentTerms: row.payment_terms }),
       taxType: row.tax_type ?? "NONE",
       taxRateBasisPoints: row.tax_rate_basis_points,
+      roundOffPaise: row.round_off_paise,
+      totalPaise: row.total_paise,
       ...(row.converted_invoice_id === null ? {} : { convertedInvoiceId: row.converted_invoice_id }),
       sourceQuotationId: row.source_quotation_id ?? null,
       ...(row.status === "QUOTATION" ? { convertedInvoiceIds: this.convertedInvoiceIdsOf(row.id) } : {}),
@@ -2969,10 +3082,12 @@ export class AccountingRepository {
       status: row.status,
       beforeOpening: row.before_opening === 1,
       lines: lines.map((line): InvoiceLine => ({
+        ...(line.id === undefined ? {} : { id: line.id }),
         ...(line.item_id === null ? {} : { itemId: line.item_id }),
         description: line.description,
         quantity: line.quantity,
         unitPricePaise: line.unit_price_paise,
+        taxRateBasisPoints: line.tax_rate_basis_points ?? row.tax_rate_basis_points,
       })),
     };
   }
@@ -3042,6 +3157,11 @@ export class AccountingRepository {
       const invoice = this.getInvoice(invoiceId);
       if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number, invoice.id); // safety net (D11)
       const result = finalizeInvoice(invoice);
+      // I-Q12: the rounded total is STORED, never recomputed. A draft's stored figures were provisional
+      // (and a pre-v34 draft's were un-rounded), so they are set here from the same engine that posts.
+      // A FINALIZED invoice is never passed through here again, so an old invoice is never re-rounded (I-Q10).
+      const figures = invoiceFigures(invoice);
+      this.db.prepare("UPDATE invoices SET round_off_paise = ?, total_paise = ? WHERE id = ?").run(figures.roundOffPaise, figures.totalPaise, invoiceId);
       // F: dated on or before the opening date, the invoice is kept as history - no entry, no stock.
       if (this.assertHistoryConfirmed(invoice.businessId, this.invoiceEntryDate(invoiceId), options.confirmBeforeOpening)) {
         this.db.prepare("UPDATE invoices SET status = ?, before_opening = 1 WHERE id = ?").run(result.invoice.status, invoiceId);
@@ -3666,9 +3786,15 @@ export class AccountingRepository {
       : derivation.recognitions
         .filter((row) => row.documentType !== "MONEY_VOUCHER" && classesForGst.get(row.account)?.role === "OUTPUT_GST")
         .reduce((total, row) => total + row.amountPaise, 0);
-    const grossSalesPaise = derivation === undefined
+    // I-Q11: the invoice round-off is an INCOME account, so it sits inside `totalIncomePaise` (and, on
+    // the cash basis, inside the cash collected). It is a rounding, not a sale, so it is taken OUT of
+    // gross sales BY CODE; it still counts toward net profit and shows as its own income line.
+    const roundOffPaise = income
+      .filter((row) => row.account === ROUND_OFF_ACCOUNT)
+      .reduce((total, row) => total + row.creditPaise - row.debitPaise, 0);
+    const grossSalesPaise = (derivation === undefined
       ? totalIncomePaise + gstOnSalesPaise
-      : derivation.invoiceCollections.reduce((total, row) => total + row.amountPaise, 0);
+      : derivation.invoiceCollections.reduce((total, row) => total + row.amountPaise, 0)) - roundOffPaise;
     return {
       income,
       expenses,
@@ -4674,9 +4800,31 @@ export class AccountingRepository {
       + (invoice.extraChargePaise ?? 0);
   }
 
+  /**
+   * I-Q12: the invoice's total is READ from the row, never recomputed. v34 stores it (rounded to the
+   * rupee, per-rate-group GST), so a receivable, a statement, an ageing line and the cash view can
+   * never disagree with the ledger.
+   */
   private invoiceTotal(invoice: Invoice): number {
-    const taxablePaise = this.invoiceTaxableBase(invoice);
-    return taxablePaise + Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
+    const row = this.db.prepare("SELECT total_paise FROM invoices WHERE id = ?").get(invoice.id) as { total_paise: number } | undefined;
+    if (row === undefined) throw new Error(`Invoice ${invoice.id} was not found.`);
+    return row.total_paise;
+  }
+
+  /**
+   * What to STORE as an invoice's total and round-off at save time. A draft the engine would refuse at
+   * finalize (a discount above the subtotal, say) must still be saveable, as it always was, so it is
+   * stored provisionally, un-rounded; finalize recomputes and overwrites it from the engine.
+   */
+  private invoiceStoredFigures(invoice: Invoice): { totalPaise: number; roundOffPaise: number } {
+    try {
+      const figures = invoiceFigures(invoice);
+      return { totalPaise: figures.totalPaise, roundOffPaise: figures.roundOffPaise };
+    } catch (error) {
+      if (!(error instanceof AccountingError)) throw error;
+      const subtotal = invoice.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
+      return { totalPaise: Math.max(0, subtotal - (invoice.discountPaise ?? 0) + (invoice.extraChargePaise ?? 0)), roundOffPaise: 0 };
+    }
   }
 
   /**
@@ -4719,19 +4867,6 @@ export class AccountingRepository {
     return row.credited;
   }
 
-  /**
-   * The GST a credit note of `taxablePaise` should carry, CLAMPED so this invoice's notes can
-   * never give back more tax than it charged.
-   *
-   * Without the clamp, per-note rounding over-credits: a 2 x 25 paise invoice at 18% charges 9
-   * paise of GST (round(9.0)), but two notes of 25 each round to 5 (round(4.5) goes up), handing
-   * back 10. That one paisa drove RECEIVABLES to -1 and left output SGST with a debit balance -
-   * a negative liability - with no error at all.
-   */
-  private creditNoteTaxPaise(invoice: Invoice, taxablePaise: number): number {
-    return this.creditNoteTaxLines(invoice, taxablePaise).reduce((sum, line) => sum + line.debitPaise, 0);
-  }
-
   /** Taxable value of this invoice's FINALIZED credit notes (the note being posted is still a draft). */
   private creditedTaxablePaise(invoiceId: string): number {
     const row = this.db
@@ -4756,9 +4891,10 @@ export class AccountingRepository {
    * paisa or two: a 2 x 17 invoice at 18% charges 6, but two notes of 17 round to 3 each and the
    * per-account caps then allow only 5 of it, leaving the invoice 1 paisa short of settled.
    */
-  private creditNoteTaxLines(invoice: Invoice, taxablePaise: number): Array<{ account: string; debitPaise: number; creditPaise: number }> {
-    const wanted = Math.round(taxablePaise * (invoice.taxRateBasisPoints ?? 0) / 10000);
-    const completesBase = this.creditedTaxablePaise(invoice.id) + taxablePaise >= this.invoiceTaxableBase(invoice);
+  private creditNoteTaxLines(invoice: Invoice, groups: readonly TaxGroup[], completesBase: boolean): Array<{ account: string; debitPaise: number; creditPaise: number }> {
+    // Per rate group, exactly as the invoice split it: CGST = floor(groupTax / 2) per group, SGST the rest.
+    const wanted = groups.reduce((total, group) => total + group.taxPaise, 0);
+    const wantedCgst = groups.reduce((total, group) => total + Math.floor(group.taxPaise / 2), 0);
     const capped = (account: string, want: number): number => {
       const room = this.outputTaxHeadroomPaise(invoice.id, account);
       return Math.max(0, Math.min(completesBase ? room : want, room));
@@ -4767,11 +4903,68 @@ export class AccountingRepository {
       ? [{ account: "OUTPUT_IGST", debitPaise: capped("OUTPUT_IGST", wanted), creditPaise: 0 }]
       : invoice.taxType === "CGST_SGST"
         ? [
-          { account: "OUTPUT_CGST", debitPaise: capped("OUTPUT_CGST", Math.floor(wanted / 2)), creditPaise: 0 },
-          { account: "OUTPUT_SGST", debitPaise: capped("OUTPUT_SGST", wanted - Math.floor(wanted / 2)), creditPaise: 0 },
+          { account: "OUTPUT_CGST", debitPaise: capped("OUTPUT_CGST", wantedCgst), creditPaise: 0 },
+          { account: "OUTPUT_SGST", debitPaise: capped("OUTPUT_SGST", wanted - wantedCgst), creditPaise: 0 },
         ]
         : [];
     return lines.filter((line) => line.debitPaise > 0); // the door rejects a zero-amount line
+  }
+
+  /**
+   * I-Q8: the invoice's round-off still STANDING on the books (credits less debits on ROUND_OFF, from
+   * the invoice's own entry and any note already posted). Positive = a round-up not yet given back.
+   */
+  private roundOffStandingPaise(invoiceId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(jl.credit_paise), 0) - COALESCE(SUM(jl.debit_paise), 0) AS standing
+           FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.source_id = ? AND jl.account = ?`,
+      )
+      .get(invoiceId, ROUND_OFF_ACCOUNT) as { standing: number };
+    return row.standing;
+  }
+
+  /**
+   * I-Q14: links each credit-note line to the invoice line it reverses and fixes its rate - THAT
+   * line's rate. A line may name the invoice line (`reversesInvoiceLineId`); otherwise it is matched
+   * by item (and price). With no match, the invoice's rate is used when it has only one; if the
+   * invoice holds several rates the note must say which line it reverses.
+   */
+  private resolveCreditNoteLines(
+    invoice: Invoice,
+    lines: readonly CreditNoteLine[],
+  ): Array<{ line: CreditNoteLine; rate: number; reversesId: number | null }> {
+    const invoiceLines = invoice.lines.filter((line): line is InvoiceLine & { id: number } => line.id !== undefined);
+    const rateOf = (line: InvoiceLine): number => line.taxRateBasisPoints ?? invoice.taxRateBasisPoints ?? 0;
+    const distinctRates = [...new Set(invoice.lines.map(rateOf))];
+    return lines.map((line) => {
+      let linked: (InvoiceLine & { id: number }) | undefined;
+      if (line.reversesInvoiceLineId !== undefined) {
+        linked = invoiceLines.find((candidate) => candidate.id === line.reversesInvoiceLineId);
+        if (linked === undefined) {
+          throw new RepositoryValidationError(`Credit note line "${line.description}" points at an invoice line that is not on invoice ${invoice.number}.`);
+        }
+      } else if (line.itemId !== undefined) {
+        const sameItem = invoiceLines.filter((candidate) => candidate.itemId === line.itemId);
+        linked = sameItem.find((candidate) => candidate.unitPricePaise === line.unitPricePaise) ?? sameItem[0];
+      }
+      if (linked !== undefined) {
+        const rate = rateOf(linked);
+        if (line.taxRateBasisPoints !== undefined && line.taxRateBasisPoints !== rate) {
+          throw new RepositoryValidationError(
+            `Credit note line "${line.description}" reverses an invoice line charged at ${rate / 100}%, so it takes that rate; ${line.taxRateBasisPoints / 100}% was given.`,
+          );
+        }
+        return { line, rate: effectiveLineRate(rate, undefined), reversesId: linked.id };
+      }
+      if (line.taxRateBasisPoints === undefined && distinctRates.length > 1) {
+        throw new RepositoryValidationError(
+          `Invoice ${invoice.number} has more than one GST rate, so credit note line "${line.description}" must say which invoice line it reverses.`,
+        );
+      }
+      return { line, rate: effectiveLineRate(line.taxRateBasisPoints ?? distinctRates[0], invoice.taxRateBasisPoints), reversesId: null };
+    });
   }
 
   /** What the customer still owes: the bill, less credit notes, less cash already received. */
@@ -5161,12 +5354,12 @@ export class AccountingRepository {
     if (!Number.isInteger(taxRateBasisPoints) || taxRateBasisPoints < 0 || taxRateBasisPoints > 10000) {
       throw new RepositoryValidationError("Tax rate must be a whole number between 0% and 100%.");
     }
-    if (taxType === "NONE" && taxRateBasisPoints !== 0) {
+    // I-Q13: the template keeps the tax TYPE; each line keeps its own rate, and 0% is always allowed.
+    // What is refused is a rate on a template that has no tax type.
+    if (taxType === "NONE" && [taxRateBasisPoints, ...input.lines.map((line) => line.taxRateBasisPoints ?? taxRateBasisPoints)].some((rate) => rate !== 0)) {
       throw new RepositoryValidationError("A tax rate requires a tax type.");
     }
-    if (taxType !== "NONE" && taxRateBasisPoints === 0) {
-      throw new RepositoryValidationError("Tax rate must be positive for a taxable invoice.");
-    }
+    const lineRates = input.lines.map((line) => effectiveLineRate(line.taxRateBasisPoints, taxRateBasisPoints));
 
     const createdAt = new Date().toISOString();
     this.db.transaction(() => {
@@ -5190,11 +5383,11 @@ export class AccountingRepository {
         input.frequency, intervalCount, input.startDate, nextRunDate, input.endDate ?? null, createdAt,
       );
       const lineStatement = this.db.prepare(
-        "INSERT INTO recurring_invoice_template_lines (template_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO recurring_invoice_template_lines (template_id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points) VALUES (?, ?, ?, ?, ?, ?)",
       );
-      for (const line of input.lines) {
-        lineStatement.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
-      }
+      input.lines.forEach((line, index) => {
+        lineStatement.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise, lineRates[index]);
+      });
       this.insertAuditEvent({ action: "recurring_template.created", entityId: id, occurredAt: createdAt });
     })();
     return this.getRecurringInvoiceTemplate(id);
@@ -5349,7 +5542,7 @@ export class AccountingRepository {
 
   private mapRecurringTemplate(row: RecurringTemplateRow): RecurringInvoiceTemplate {
     const lines = this.db
-      .prepare("SELECT item_id, description, quantity, unit_price_paise FROM recurring_invoice_template_lines WHERE template_id = ? ORDER BY id")
+      .prepare("SELECT item_id, description, quantity, unit_price_paise, tax_rate_basis_points FROM recurring_invoice_template_lines WHERE template_id = ? ORDER BY id")
       .all(row.id) as InvoiceLineRow[];
     return {
       id: row.id,
@@ -5377,6 +5570,7 @@ export class AccountingRepository {
         description: line.description,
         quantity: line.quantity,
         unitPricePaise: line.unit_price_paise,
+        taxRateBasisPoints: line.tax_rate_basis_points ?? row.tax_rate_basis_points,
       })),
     };
   }
@@ -5641,7 +5835,17 @@ export class AccountingRepository {
         if (input.dueDate < input.billDate) throw new RepositoryValidationError("Due date cannot be before the bill date.");
       }
       this.assertDocumentFair(input.fairId, business.companyId, "Bill");
-      this.guard(() => validatePurchaseTax(taxType, rate));
+      // I-Q1: a bill line may carry its own rate, and 0% is always allowed. The "a taxable purchase needs
+      // a positive rate" rule therefore only applies to a bill whose lines state no rate of their own.
+      const lineRatesStated = input.lines.some((line) => line.taxRateBasisPoints !== undefined);
+      this.guard(() => {
+        if (lineRatesStated && taxType !== "NONE") {
+          if (!Number.isInteger(rate) || rate < 0 || rate > 10000) throw new AccountingError("Tax rate must be a whole number between 0% and 100%.");
+        } else {
+          validatePurchaseTax(taxType, rate);
+        }
+        taxGroupsFor(input.lines, rate, taxType, 0, 0); // every line's rate, and the type/rate coupling
+      });
       if (input.lines.length === 0) throw new RepositoryValidationError("A purchase bill must contain at least one line.");
       let subtotal = 0;
       for (const line of input.lines) {
@@ -5678,24 +5882,26 @@ export class AccountingRepository {
       if (discountPaise > subtotal) {
         throw new RepositoryValidationError("A bill discount cannot exceed the bill subtotal.");
       }
+      const roundOffPaise = this.assertTypedRoundOff(input.roundOffPaise);
       const money = this.resolveDocumentMoney(input.businessId, input.paymentAccount, input);
       this.db
         .prepare(
           `INSERT INTO purchase_bills (id, business_id, supplier_id, number, supplier_invoice_number, bill_date, due_date,
              notes, tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id,
-             discount_paise, extra_charge_paise, money_account, payment_mode, payment_reference)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?)`,
+             discount_paise, extra_charge_paise, money_account, payment_mode, payment_reference, round_off_paise)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId, input.number, input.supplierInvoiceNumber ?? null, input.billDate,
           input.dueDate ?? null, input.notes ?? null, taxType, rate, input.paymentAccount, new Date().toISOString(),
           input.fairId ?? null, discountPaise, extraChargePaise, money.moneyAccount, money.paymentMode, money.paymentReference,
+          roundOffPaise,
         );
       const lineStatement = this.db.prepare(
-        "INSERT INTO purchase_bill_lines (bill_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO purchase_bill_lines (bill_id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points) VALUES (?, ?, ?, ?, ?, ?)",
       );
       for (const line of input.lines) {
-        lineStatement.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
+        lineStatement.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise, effectiveLineRate(line.taxRateBasisPoints, rate));
       }
       this.insertAuditEvent({ action: "purchase_bill.created", entityId: id, occurredAt: new Date().toISOString() });
     })();
@@ -5709,16 +5915,19 @@ export class AccountingRepository {
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
       fair_id: string | null; discount_paise: number; extra_charge_paise: number;
       money_account: string; payment_mode: string | null; payment_reference: string | null; before_opening: number;
+      round_off_paise: number;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Purchase bill ${billId} was not found.`);
     const lineRows = this.db
-      .prepare("SELECT item_id, description, quantity, unit_price_paise FROM purchase_bill_lines WHERE bill_id = ? ORDER BY id")
+      .prepare("SELECT id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points FROM purchase_bill_lines WHERE bill_id = ? ORDER BY id")
       .all(billId) as InvoiceLineRow[];
     const lines = lineRows.map((line): PurchaseBillLine => ({
+      ...(line.id === undefined ? {} : { id: line.id }),
       ...(line.item_id === null ? {} : { itemId: line.item_id }),
       description: line.description,
       quantity: line.quantity,
       unitPricePaise: line.unit_price_paise,
+      taxRateBasisPoints: line.tax_rate_basis_points ?? row.tax_rate_basis_points,
     }));
     const subtotalPaise = lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
     // R8 (v18). GST follows the discounted value, exactly as on a sale. Kept in step with
@@ -5727,7 +5936,9 @@ export class AccountingRepository {
     const discountPaise = row.discount_paise;
     const extraChargePaise = row.extra_charge_paise;
     const taxablePaise = subtotalPaise - discountPaise + extraChargePaise;
-    const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(taxablePaise * row.tax_rate_basis_points / 10000);
+    // I-Q1 / I-Q3: GST per RATE GROUP of the lines, rounded once per group. One rate: exactly as before.
+    const taxPaise = taxGroupsFor(lines, row.tax_rate_basis_points, row.tax_type, discountPaise, extraChargePaise)
+      .reduce((total, group) => total + group.taxPaise, 0);
     const paid = this.db
       .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE bill_id = ? AND cancelled_at IS NULL")
       .get(billId) as { paid: number };
@@ -5740,10 +5951,23 @@ export class AccountingRepository {
       paymentAccount: row.payment_account, status: row.status, lines,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
       subtotalPaise, discountPaise, extraChargePaise, taxablePaise, taxPaise,
-      totalPaise: taxablePaise + taxPaise, paidPaise: paid.paid,
+      totalPaise: taxablePaise + taxPaise, roundOffPaise: row.round_off_paise, paidPaise: paid.paid,
       moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
       beforeOpening: row.before_opening === 1,
     };
+  }
+
+  /**
+   * I-Q6. A typed round-off on a bill or expense: optional, whole paise, under Rs 1 either way. Returns 0
+   * when absent. Nothing is calculated: the owner types it to match the supplier's printed total. The
+   * database CHECK (v35) enforces the same cap; this gives the plain-English message first.
+   */
+  private assertTypedRoundOff(value: number | undefined): number {
+    if (value === undefined) return 0;
+    if (!Number.isInteger(value) || value <= -100 || value >= 100) {
+      throw new RepositoryValidationError("A round-off must be a whole number of paise, under Rs 1 either way.");
+    }
+    return value;
   }
 
   public listPurchaseBills(filter: { businessId?: string; supplierId?: string; status?: PurchaseDocumentStatus } = {}): ReadonlyArray<PurchaseBillRecord & MoneyFields> {
@@ -5808,7 +6032,9 @@ export class AccountingRepository {
         extraChargePaise: bill.extraChargePaise,
         taxType: bill.taxType,
         taxRateBasisPoints: bill.taxRateBasisPoints,
+        taxGroups: taxGroupsFor(bill.lines, bill.taxRateBasisPoints, bill.taxType, bill.discountPaise, bill.extraChargePaise),
         paymentAccount: bill.paymentAccount,
+        roundOffPaise: bill.roundOffPaise,
       }));
       const billEntry = this.pointSettlementAtMoneyAccount(result.entry, bill.paymentAccount, bill.moneyAccount, bill.businessId);
       this.insertJournalEntry(billEntry, { businessId: bill.businessId, entryDate: bill.billDate, ...fairDim(bill.fairId) });
@@ -5902,7 +6128,11 @@ export class AccountingRepository {
       if (returnDate < bill.billDate) {
         throw new RepositoryValidationError(`A return cannot predate the bill (${bill.billDate}).`);
       }
-      this.validatePurchaseReturnLines(bill, input.lines);
+      // I-Q14: each return line is linked to the bill line it sends back and takes THAT line's rate.
+      const resolved = this.resolvePurchaseReturnLines(bill, input.lines);
+      this.validatePurchaseReturnLines(bill, resolved.map(({ line, rate, reversesId }) => ({
+        ...line, taxRateBasisPoints: rate, ...(reversesId === null ? {} : { reversesBillLineId: reversesId }),
+      })));
 
       const id = input.id ?? randomUUID();
       const number = input.number ?? this.nextBusinessNumber("PR", bill.businessId, returnDate);
@@ -5912,10 +6142,10 @@ export class AccountingRepository {
         )
         .run(id, bill.id, number, input.reason, returnDate, new Date().toISOString());
       const insertLine = this.db.prepare(
-        "INSERT INTO purchase_return_lines (purchase_return_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO purchase_return_lines (purchase_return_id, item_id, description, quantity, unit_price_paise, tax_rate_basis_points, reverses_bill_line_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
       );
-      for (const line of input.lines) {
-        insertLine.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
+      for (const { line, rate, reversesId } of resolved) {
+        insertLine.run(id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise, rate, reversesId);
       }
       this.insertAuditEvent({ action: "purchase_return.created", entityId: id, occurredAt: new Date().toISOString() });
       return this.getPurchaseReturn(id);
@@ -5929,11 +6159,13 @@ export class AccountingRepository {
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`No purchase return ${returnId}.`);
     const lines = (this.db
-      .prepare("SELECT item_id, description, quantity, unit_price_paise FROM purchase_return_lines WHERE purchase_return_id = ? ORDER BY id")
-      .all(returnId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number }>)
+      .prepare("SELECT item_id, description, quantity, unit_price_paise, tax_rate_basis_points, reverses_bill_line_id FROM purchase_return_lines WHERE purchase_return_id = ? ORDER BY id")
+      .all(returnId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number; tax_rate_basis_points: number; reverses_bill_line_id: number | null }>)
       .map((line): PurchaseReturnLine => ({
         ...(line.item_id === null ? {} : { itemId: line.item_id }),
         description: line.description, quantity: line.quantity, unitPricePaise: line.unit_price_paise,
+        taxRateBasisPoints: line.tax_rate_basis_points,
+        ...(line.reverses_bill_line_id === null ? {} : { reversesBillLineId: line.reverses_bill_line_id }),
       }));
     return {
       id: row.id, billId: row.bill_id, number: row.number, reason: row.reason,
@@ -6001,7 +6233,10 @@ export class AccountingRepository {
       // incurred and is not refunded because the goods later went back. OWNER DECISION if he
       // disagrees - recorded in context, not silently reversed here.
       const netValuePaise = inventoryPaise + expensePaise - discountPaise;
-      const taxLines = this.purchaseReturnTaxLines(bill, netValuePaise);
+      // The tax base is the net value (what the goods cost, less the discount given back), split over the
+      // return's own rate groups. With one rate this is exactly round(netValue x rate), as before.
+      const returnGroups = taxGroupsFor(ret.lines, bill.taxRateBasisPoints, bill.taxType, ret.valuePaise - netValuePaise, 0);
+      const taxLines = this.purchaseReturnTaxLines(bill, returnGroups);
       const postedTaxPaise = taxLines.reduce((sum, line) => sum + line.creditPaise, 0);
       const owedBackPaise = netValuePaise + postedTaxPaise;
 
@@ -6262,7 +6497,7 @@ export class AccountingRepository {
     const byKey = new Map<string, DiscountedLot[]>();
     bill.lines.forEach((line, index) => {
       if (line.itemId === undefined || !lines[index]?.stock) return;
-      const key = `${line.itemId}|${line.unitPricePaise}`;
+      const key = `${line.itemId}|${line.unitPricePaise}|${line.taxRateBasisPoints ?? bill.taxRateBasisPoints}`;
       byKey.set(key, [...(byKey.get(key) ?? []), ...(spread.lots[index] as readonly DiscountedLot[])]);
     });
     return byKey;
@@ -6276,18 +6511,18 @@ export class AccountingRepository {
   private planReturnLots(ret: PurchaseReturnRecord, bill: PurchaseBillRecord, priorOnly: boolean): Array<{ line: PurchaseReturnLine; chunks: DiscountedLot[] }> {
     const lotsByKey = this.billLotsByKey(bill);
     const rows = this.db.prepare(
-      `SELECT prl.item_id, prl.unit_price_paise, SUM(prl.quantity) AS quantity
+      `SELECT prl.item_id, prl.unit_price_paise, prl.tax_rate_basis_points, SUM(prl.quantity) AS quantity
          FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
         WHERE pr.bill_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0 AND pr.id <> ?
               ${priorOnly ? "AND pr.rowid < (SELECT rowid FROM purchase_returns WHERE id = ?)" : ""}
-        GROUP BY prl.item_id, prl.unit_price_paise`,
-    ).all(...(priorOnly ? [bill.id, ret.id, ret.id] : [bill.id, ret.id])) as Array<{ item_id: string | null; unit_price_paise: number; quantity: number }>;
+        GROUP BY prl.item_id, prl.unit_price_paise, prl.tax_rate_basis_points`,
+    ).all(...(priorOnly ? [bill.id, ret.id, ret.id] : [bill.id, ret.id])) as Array<{ item_id: string | null; unit_price_paise: number; tax_rate_basis_points: number; quantity: number }>;
     const taken = new Map<string, number>();
-    for (const row of rows) if (row.item_id !== null) taken.set(`${row.item_id}|${row.unit_price_paise}`, row.quantity);
+    for (const row of rows) if (row.item_id !== null) taken.set(`${row.item_id}|${row.unit_price_paise}|${row.tax_rate_basis_points}`, row.quantity);
     const plan: Array<{ line: PurchaseReturnLine; chunks: DiscountedLot[] }> = [];
     for (const line of ret.lines) {
       if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
-      const key = `${line.itemId}|${line.unitPricePaise}`;
+      const key = `${line.itemId}|${line.unitPricePaise}|${line.taxRateBasisPoints ?? bill.taxRateBasisPoints}`;
       let skip = taken.get(key) ?? 0;
       let need = line.quantity;
       taken.set(key, skip + need);
@@ -6314,9 +6549,10 @@ export class AccountingRepository {
    * Each account is capped by what the bill still HOLDS as input credit, which stops the
    * per-return rounding leaving one GST account with a credit balance it never had.
    */
-  private purchaseReturnTaxLines(bill: PurchaseBillRecord, taxablePaise: number): JournalEntry["lines"] {
-    if (bill.taxType === "NONE" || taxablePaise <= 0) return [];
-    const wanted = Math.round(taxablePaise * bill.taxRateBasisPoints / 10000);
+  private purchaseReturnTaxLines(bill: PurchaseBillRecord, groups: readonly TaxGroup[]): JournalEntry["lines"] {
+    const wanted = groups.reduce((total, group) => total + group.taxPaise, 0);
+    const wantedCgst = groups.reduce((total, group) => total + Math.floor(group.taxPaise / 2), 0);
+    if (bill.taxType === "NONE" || wanted <= 0) return [];
     const capped = (account: string, want: number): number => {
       const room = this.inputTaxHeadroomPaise(bill.id, account);
       return Math.max(0, Math.min(want, room));
@@ -6324,10 +6560,61 @@ export class AccountingRepository {
     const lines = bill.taxType === "IGST"
       ? [{ account: "INPUT_IGST", debitPaise: 0, creditPaise: capped("INPUT_IGST", wanted) }]
       : [
-        { account: "INPUT_CGST", debitPaise: 0, creditPaise: capped("INPUT_CGST", Math.floor(wanted / 2)) },
-        { account: "INPUT_SGST", debitPaise: 0, creditPaise: capped("INPUT_SGST", wanted - Math.floor(wanted / 2)) },
+        { account: "INPUT_CGST", debitPaise: 0, creditPaise: capped("INPUT_CGST", wantedCgst) },
+        { account: "INPUT_SGST", debitPaise: 0, creditPaise: capped("INPUT_SGST", wanted - wantedCgst) },
       ];
     return lines.filter((line) => line.creditPaise > 0); // the door rejects a zero-amount line
+  }
+
+  /**
+   * I-Q14: links each return line to the bill line it sends back, and fixes its rate - THAT line's
+   * rate. A line may name the bill line (`reversesBillLineId`); otherwise it is matched by item and
+   * price, taking the first matching bill line that still has the units. With no match the bill's rate
+   * is used when it has only one; a bill holding several rates needs the line named.
+   */
+  private resolvePurchaseReturnLines(
+    bill: PurchaseBillRecord,
+    lines: readonly PurchaseReturnLine[],
+  ): Array<{ line: PurchaseReturnLine; rate: number; reversesId: number | null }> {
+    const billLines = bill.lines.filter((line): line is PurchaseBillLine & { id: number } => line.id !== undefined);
+    const rateOf = (line: PurchaseBillLine): number => line.taxRateBasisPoints ?? bill.taxRateBasisPoints;
+    const distinctRates = [...new Set(bill.lines.map(rateOf))];
+    // Units already spoken for per bill line: finalized returns, plus the earlier lines of this one.
+    const used = new Map<number, number>();
+    for (const row of this.db.prepare(
+      `SELECT prl.reverses_bill_line_id AS line_id, SUM(prl.quantity) AS quantity
+         FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
+        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0 AND prl.reverses_bill_line_id IS NOT NULL
+        GROUP BY prl.reverses_bill_line_id`,
+    ).all(bill.id) as Array<{ line_id: number; quantity: number }>) used.set(row.line_id, row.quantity);
+    return lines.map((line) => {
+      let linked: (PurchaseBillLine & { id: number }) | undefined;
+      if (line.reversesBillLineId !== undefined) {
+        linked = billLines.find((candidate) => candidate.id === line.reversesBillLineId);
+        if (linked === undefined) {
+          throw new RepositoryValidationError(`Return line "${line.description}" points at a bill line that is not on bill ${bill.number}.`);
+        }
+      } else if (line.itemId !== undefined) {
+        const samePrice = billLines.filter((candidate) => candidate.itemId === line.itemId && candidate.unitPricePaise === line.unitPricePaise);
+        linked = samePrice.find((candidate) => candidate.quantity - (used.get(candidate.id) ?? 0) >= line.quantity) ?? samePrice[0];
+      }
+      if (linked !== undefined) {
+        used.set(linked.id, (used.get(linked.id) ?? 0) + line.quantity);
+        const rate = rateOf(linked);
+        if (line.taxRateBasisPoints !== undefined && line.taxRateBasisPoints !== rate) {
+          throw new RepositoryValidationError(
+            `Return line "${line.description}" sends back a bill line charged at ${rate / 100}%, so it takes that rate; ${line.taxRateBasisPoints / 100}% was given.`,
+          );
+        }
+        return { line, rate: effectiveLineRate(rate, undefined), reversesId: linked.id };
+      }
+      if (line.taxRateBasisPoints === undefined && distinctRates.length > 1) {
+        throw new RepositoryValidationError(
+          `Bill ${bill.number} has more than one GST rate, so return line "${line.description}" must say which bill line it sends back.`,
+        );
+      }
+      return { line, rate: effectiveLineRate(line.taxRateBasisPoints ?? distinctRates[0], bill.taxRateBasisPoints), reversesId: null };
+    });
   }
 
   /** Input credit this bill is still carrying on one GST account: what it took, less what returns gave back. */
@@ -6363,26 +6650,28 @@ export class AccountingRepository {
   ): void {
     // D8: a bill may carry one item on two lines at different prices. Each (item, price) is its
     // own lot (removeReturnedStock takes goods from the lot at that cost), so key by both.
-    const lotKey = (itemId: string, unitPricePaise: number): string => `${itemId}|${unitPricePaise}`;
+    // I-Q14: the key also carries the RATE, so one item bought at two rates stays two lots.
+    const lotKey = (itemId: string, unitPricePaise: number, rate: number): string => `${itemId}|${unitPricePaise}|${rate}`;
+    const billRate = (line: { readonly taxRateBasisPoints?: number }): number => line.taxRateBasisPoints ?? bill.taxRateBasisPoints;
     const billed = new Map<string, number>();
     const billedPrices = new Map<string, number[]>();
     for (const line of bill.lines) {
       if (line.itemId === undefined) continue;
-      const key = lotKey(line.itemId, line.unitPricePaise);
+      const key = lotKey(line.itemId, line.unitPricePaise, billRate(line));
       billed.set(key, (billed.get(key) ?? 0) + line.quantity);
       const prices = billedPrices.get(line.itemId) ?? [];
       if (!prices.includes(line.unitPricePaise)) prices.push(line.unitPricePaise);
       billedPrices.set(line.itemId, prices);
     }
     const returnedRows = this.db.prepare(
-      `SELECT prl.item_id, prl.unit_price_paise, SUM(prl.quantity) AS quantity
+      `SELECT prl.item_id, prl.unit_price_paise, prl.tax_rate_basis_points, SUM(prl.quantity) AS quantity
          FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
         WHERE pr.bill_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0
               ${excludeReturnId === undefined ? "" : "AND pr.id <> ?"}
-        GROUP BY prl.item_id, prl.unit_price_paise`,
-    ).all(...(excludeReturnId === undefined ? [bill.id] : [bill.id, excludeReturnId])) as Array<{ item_id: string | null; unit_price_paise: number; quantity: number }>;
+        GROUP BY prl.item_id, prl.unit_price_paise, prl.tax_rate_basis_points`,
+    ).all(...(excludeReturnId === undefined ? [bill.id] : [bill.id, excludeReturnId])) as Array<{ item_id: string | null; unit_price_paise: number; tax_rate_basis_points: number; quantity: number }>;
     const alreadyReturned = new Map(
-      returnedRows.filter((row) => row.item_id !== null).map((row) => [lotKey(row.item_id as string, row.unit_price_paise), row.quantity] as const),
+      returnedRows.filter((row) => row.item_id !== null).map((row) => [lotKey(row.item_id as string, row.unit_price_paise, row.tax_rate_basis_points), row.quantity] as const),
     );
     for (const line of lines) {
       if (!Number.isInteger(line.quantity) || line.quantity <= 0
@@ -6394,7 +6683,7 @@ export class AccountingRepository {
       if (prices === undefined) {
         throw new RepositoryValidationError(`Item ${line.itemId} is not on bill ${bill.number}, so it cannot be returned against it.`);
       }
-      const key = lotKey(line.itemId, line.unitPricePaise);
+      const key = lotKey(line.itemId, line.unitPricePaise, billRate(line));
       const onBill = billed.get(key);
       if (onBill === undefined) {
         throw new RepositoryValidationError(
@@ -6527,6 +6816,7 @@ export class AccountingRepository {
         throw new RepositoryValidationError("Expense amount must be a positive whole number of paise.");
       }
       this.assertDocumentFair(input.fairId, business.companyId, "Expense");
+      const roundOffPaise = this.assertTypedRoundOff(input.roundOffPaise);
       this.guard(() => validatePurchaseTax(taxType, rate));
       if (input.supplierId !== undefined) {
         if (this.requireSupplier(input.supplierId).companyId !== business.companyId) {
@@ -6548,13 +6838,13 @@ export class AccountingRepository {
         .prepare(
           `INSERT INTO expenses (id, business_id, supplier_id, category_id, number, expense_date, description, amount_paise,
              tax_type, tax_rate_basis_points, payment_account, status, created_at, fair_id,
-             money_account, payment_mode, payment_reference)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?)`,
+             money_account, payment_mode, payment_reference, round_off_paise)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id, input.businessId, input.supplierId ?? null, input.categoryId ?? null, input.number, input.expenseDate,
           input.description, input.amountPaise, taxType, rate, input.paymentAccount, new Date().toISOString(),
-          input.fairId ?? null, money.moneyAccount, money.paymentMode, money.paymentReference,
+          input.fairId ?? null, money.moneyAccount, money.paymentMode, money.paymentReference, roundOffPaise,
         );
       this.insertAuditEvent({ action: "expense.created", entityId: id, occurredAt: new Date().toISOString() });
     })();
@@ -6567,7 +6857,7 @@ export class AccountingRepository {
       expense_date: string; description: string; amount_paise: number; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
       fair_id: string | null; money_account: string; payment_mode: string | null; payment_reference: string | null;
-      before_opening: number;
+      before_opening: number; round_off_paise: number;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Expense ${expenseId} was not found.`);
     const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(row.amount_paise * row.tax_rate_basis_points / 10000);
@@ -6579,7 +6869,7 @@ export class AccountingRepository {
       id: row.id, businessId: row.business_id, supplierId: row.supplier_id, categoryId: row.category_id,
       number: row.number, expenseDate: row.expense_date, description: row.description, amountPaise: row.amount_paise,
       taxType: row.tax_type, taxRateBasisPoints: row.tax_rate_basis_points, paymentAccount: row.payment_account,
-      status: row.status, taxPaise, totalPaise: row.amount_paise + taxPaise, paidPaise: paid.paid,
+      status: row.status, taxPaise, totalPaise: row.amount_paise + taxPaise, roundOffPaise: row.round_off_paise, paidPaise: paid.paid,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
       moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
       beforeOpening: row.before_opening === 1,
@@ -6619,6 +6909,7 @@ export class AccountingRepository {
         taxType: expense.taxType,
         taxRateBasisPoints: expense.taxRateBasisPoints,
         paymentAccount: expense.paymentAccount,
+        roundOffPaise: expense.roundOffPaise,
       }));
       const expenseEntry = this.pointSettlementAtMoneyAccount(result.entry, expense.paymentAccount, expense.moneyAccount, expense.businessId);
       this.insertJournalEntry(expenseEntry, { businessId: expense.businessId, entryDate: expense.expenseDate, ...fairDim(expense.fairId) });
@@ -6690,11 +6981,14 @@ export class AccountingRepository {
       const doc = input.billId !== undefined
         ? (() => {
             const bill = this.getPurchaseBill(input.billId);
-            return { beforeOpening: bill.beforeOpening, businessId: bill.businessId, fairId: bill.fairId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, returnedPaise: this.billReturnedPaise(bill), subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
+            // I-Q6: `totalPaise` here is what the supplier is OWED, so it carries the typed round-off.
+            // The payment cap below is measured against it, or paying the ledger figure would be refused.
+            return { beforeOpening: bill.beforeOpening, businessId: bill.businessId, fairId: bill.fairId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise + bill.roundOffPaise, paidPaise: bill.paidPaise, returnedPaise: this.billReturnedPaise(bill), subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
           })()
         : (() => {
             const expense = this.getExpense(input.expenseId as string);
-            return { beforeOpening: expense.beforeOpening, businessId: expense.businessId, fairId: expense.fairId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, returnedPaise: 0, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
+            // I-Q6, same as the bill above: the cap is measured on what is owed, round-off included.
+            return { beforeOpening: expense.beforeOpening, businessId: expense.businessId, fairId: expense.fairId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise + expense.roundOffPaise, paidPaise: expense.paidPaise, returnedPaise: 0, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
           })();
       if (doc.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized documents can receive supplier payments.");
       if (doc.paymentAccount !== "PAYABLES") throw new RepositoryValidationError("Only documents payable later can receive supplier payments.");
@@ -6826,11 +7120,13 @@ export class AccountingRepository {
     // opening balance is the books' only figure for that period.
     for (const bill of this.listPurchaseBills({ supplierId, status: "FINALIZED" })) {
       if (bill.paymentAccount !== "PAYABLES" || bill.beforeOpening) continue;
-      items.push({ date: bill.billDate, type: "BILL", documentId: bill.id, reference: bill.number, amountPaise: bill.totalPaise, order: 0 });
+      // I-Q6: the statement states what the supplier is owed, so the typed round-off is in the figure;
+      // otherwise the closing balance would disagree with getPayables and with the ledger.
+      items.push({ date: bill.billDate, type: "BILL", documentId: bill.id, reference: bill.number, amountPaise: bill.totalPaise + bill.roundOffPaise, order: 0 });
     }
     for (const expense of this.listExpenses({ supplierId, status: "FINALIZED" })) {
       if (expense.paymentAccount !== "PAYABLES" || expense.beforeOpening) continue;
-      items.push({ date: expense.expenseDate, type: "EXPENSE", documentId: expense.id, reference: expense.number, amountPaise: expense.totalPaise, order: 0 });
+      items.push({ date: expense.expenseDate, type: "EXPENSE", documentId: expense.id, reference: expense.number, amountPaise: expense.totalPaise + expense.roundOffPaise, order: 0 }); // I-Q6, as the bill above
     }
     for (const payment of this.listSupplierPayments({ supplierId })) {
       // R8: a CANCELLED payment never settled anything. listSupplierPayments returns it (the row
@@ -7927,16 +8223,23 @@ export class AccountingRepository {
     for (const bill of this.listPurchaseBills({ status: "FINALIZED" })) {
       if (bill.paymentAccount !== "PAYABLES" || bill.beforeOpening) continue; // F: history is never owed
       const returnedPaise = this.billReturnedPaise(bill); // D2: purchase returns lower what is still owed
+      // I-Q6: the LEDGER credits PAYABLES with the computed total PLUS the typed round-off, so what the
+      // supplier is actually owed is the rounded figure. The bill RECORD still keeps the two apart
+      // (`totalPaise` stays computed, `roundOffPaise` is its own field, as the owner asked); it is only
+      // here, where the question is "what does the supplier still get", that they are added. Without
+      // this the payables subledger does not tie to its own control account.
+      const owedPaise = bill.totalPaise + bill.roundOffPaise;
       items.push({
-        documentId: bill.id, kind: "BILL", date: bill.billDate, totalPaise: bill.totalPaise, settledPaise: bill.paidPaise + returnedPaise,
-        outstandingPaise: bill.totalPaise - returnedPaise - bill.paidPaise, supplierId: bill.supplierId, businessId: bill.businessId, number: bill.number,
+        documentId: bill.id, kind: "BILL", date: bill.billDate, totalPaise: owedPaise, settledPaise: bill.paidPaise + returnedPaise,
+        outstandingPaise: owedPaise - returnedPaise - bill.paidPaise, supplierId: bill.supplierId, businessId: bill.businessId, number: bill.number,
       });
     }
     for (const expense of this.listExpenses({ status: "FINALIZED" })) {
       if (expense.paymentAccount !== "PAYABLES" || expense.supplierId === null || expense.beforeOpening) continue; // F
+      const owedPaise = expense.totalPaise + expense.roundOffPaise; // I-Q6, same reason as the bill above
       items.push({
-        documentId: expense.id, kind: "EXPENSE", date: expense.expenseDate, totalPaise: expense.totalPaise, settledPaise: expense.paidPaise,
-        outstandingPaise: expense.totalPaise - expense.paidPaise, supplierId: expense.supplierId, businessId: expense.businessId, number: expense.number,
+        documentId: expense.id, kind: "EXPENSE", date: expense.expenseDate, totalPaise: owedPaise, settledPaise: expense.paidPaise,
+        outstandingPaise: owedPaise - expense.paidPaise, supplierId: expense.supplierId, businessId: expense.businessId, number: expense.number,
       });
     }
     for (

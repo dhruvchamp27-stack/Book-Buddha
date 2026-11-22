@@ -19,7 +19,9 @@ the counts:
 3. `.\node_modules\.bin\vite.cmd build` → builds (about 1.2 s)
 
 Migration in place is **v33** (`before_opening`). Reserved: **v34 = I (GST per line + round-off)**,
-**v35 = R14 (archive)**. Builders write the `*-schema.ts` body; **only the orchestrator registers a
+**v35 = bill/expense round-off (I-Q6, BUILT 22 Nov)** and **v36 = R14 (archive)** — R14 moved up a
+number because I-Q6 was confirmed and built first. Builders write the `*-schema.ts` body; **only the
+orchestrator registers a
 version in `migrations.ts`.**
 
 ## §1 Order and lanes
@@ -36,7 +38,7 @@ parallel with anything.
 | 3 | Owner approvals: I mini-spec · Q16 install (name, size) · R14 mini-spec | Dhruv | — | — |
 | 4 | **I-2** GST per line + round-off build (v34) | builder | **yes** | Q16-2 |
 | 5 | **Q16-2** .xlsx import/export + PDF export (after install approval) | builder | no | I-2 |
-| 6 | **R14-2** archive build (v35) | builder | **yes** | — |
+| 6 | **R14-2** archive build (v36) | builder | **yes** | — |
 | 7 | **REV** whole-build review (3 read-only reviewers) → **FIX** builder | review | fix: yes | — |
 | 8 | **TST** tests: gap map, new tests, hand-check workings for Dhruv | builder | no | — |
 | 9 | Session end: context files, commit (announce), push (ask) | orchestrator | — | — |
@@ -228,9 +230,184 @@ existing tests changed + why, your own calls.
 ```
 
 ### I-2 — GST per line + round-off: build (v34)
-Fill the skeleton from the approved I-1 mini-spec. The schema file is `src/database/line-tax-schema.ts`
-(the orchestrator registers it as v34). The brief covers the engine, the repository, the reports,
-import/export, the API, and the tests from I-1 §6.
+**Ruled by Dhruv 22 Nov: S18-3 (I-Q1..I-Q10; I-Q4 is OPEN) and S18-5 (I-Q11..I-Q14).** Read both entries
+in `context/decisions.md` before starting. ONE builder, SERIAL on `repository.ts`.
+
+**Schema is DONE by the orchestrator — do not change it.** `src/database/line-tax-schema.ts`, registered
+as v34 in `migrations.ts`:
+- `tax_rate_basis_points INTEGER NOT NULL DEFAULT 0 CHECK(0..10000)` on `invoice_lines`,
+  `credit_note_lines`, `purchase_bill_lines`, `purchase_return_lines` and
+  `recurring_invoice_template_lines`, each backfilled from its document — notes and returns join through
+  to the parent invoice or bill, which is where their rate lives today.
+- `items.default_tax_rate_basis_points INTEGER NULL` — pre-fill only, never changes a posted document (I-Q2).
+- `invoices.round_off_paise INTEGER NOT NULL DEFAULT 0` and `invoices.total_paise` — the STORED rounded
+  total (I-Q12).
+- `credit_note_lines.reverses_invoice_line_id` and `purchase_return_lines.reverses_bill_line_id` (I-Q14).
+- New seed account `ROUND_OFF`, name "Round off", type INCOME, **ROLELESS** (I-Q11) — the role CHECK
+  is frozen at v9, so a role would force a `chart_accounts` rebuild. It is excluded from the income
+  aggregates BY CODE, via the exported `ROUND_OFF_ACCOUNT` constant.
+
+#### Behaviour to build, in this order
+1. **Engine — `src/accounting/engine.ts`.** `totalInvoicePaise` (:21) and `taxLines` (:61) take the rate
+   from each LINE. Tax is summed PER RATE GROUP and rounded ONCE per group (I-Q3), never per line. The
+   document keeps `taxType` only. His hand figure: 4 x 75.00 at 5%, 7 x 99.00 and 1 x 86.29 at 18% gives
+   5% taxable 300.00 (CGST 7.50 + SGST 7.50) and 18% taxable 779.29, tax 140.27 (CGST 70.13 + SGST 70.14);
+   total before round-off 1,234.56 becomes invoice **1,235.00**, round off **+0.44**. Journal:
+   Dr Receivables 1,235.00 . Cr Sales 5% 300.00 . Cr Sales 18% 779.29 . Cr Output CGST 77.63 .
+   Cr Output SGST 77.64 . Cr Round off 0.44.
+   - The CGST half stays `Math.floor(groupTaxPaise / 2)` PER GROUP; SGST takes the remainder (:69). That
+     rule is NOT cumulative — see the lesson in `decisions.md`.
+   - A ZERO round-off line MUST BE OMITTED: the `journal_lines` CHECK rejects it
+     (`chart-accounts-schema.ts:346`).
+   - Nearest rupee, 50 paise and over rounds up (I-Q5).
+2. **Round-off on invoices only** (I-Q5), cash invoices included. Bills and expenses get an OPTIONAL typed
+   amount under Rs 1, default 0 (I-Q6) — a field and its posting, NOT an automatic calculation.
+3. **The stored total (I-Q12).** `invoiceTotal` (`repository.ts:4677`), `templateTotalPaise` (:217) and the
+   raw SQL at `open-items.ts:90-91` must all READ `invoices.total_paise` instead of recomputing. Grep for
+   every other recompute before you finish; `:5730` and `:6573` are the bill and expense mirrors, and the
+   cash view uses the total as its p/T denominator (`:3932`).
+4. **Credit notes (I-Q8, I-Q14).** Partial notes in EXACT PAISE with no rounding; only the note that
+   COMPLETES the invoice reverses the round-off, so the invoice clears to exactly zero. Each note line
+   links to the invoice line it reverses and takes THAT line's rate. `creditNoteTaxLines` (:4759) becomes
+   per-group. `listCreditNotes` (:2884-2895) must read the POSTED journal figure instead of recomputing
+   from the header. The round-off goes into `refundable_paise` at write time (:2458).
+5. **Purchase returns (I-Q14).** Each return line links to the bill line it reverses, and `lotKey`
+   (:6279-6286, :6378-6385) gains the rate so matching stays unique when one item is sold at two rates.
+6. **Reports (I-Q11).** `ROUND_OFF_ACCOUNT` (imported, never a bare string) is EXCLUDED from
+   `salesByTax` net sales
+   (`reports-sales.ts:205`), `creditNoteReport` taxable (:336) and P&L gross sales
+   (`repository.ts:3664-3670`). `salesByTax` (:268-290) groups by the journal line's rate tag, not the
+   invoice header. Reported sales must NOT move for any single-rate invoice.
+7. **API (I-Q13).** `invoiceLine` (`api/server.ts:32-37`) gains an optional rate — it is shared by invoice,
+   bill, credit note, return and recurring template, so one change covers all five. The superRefine at
+   :179-184 moves to line level: the document keeps the TYPE, a 0% line is ALWAYS allowed, and an invoice
+   with a tax type but only exempt lines is allowed.
+8. **Import and export.** The rate becomes a PER-ROW column, not a header one
+   (`import-documents.ts:317-318, :323, :349, :365`; `exports.ts:190, :204-205`). Drop the "must agree
+   across rows" rule for the RATE; keep it for the TYPE.
+9. **Out of scope:** expenses have no lines table, so their rate stays document-level. No UI, no `web/`.
+
+#### I-Q4 IS NOT RULED (S18-4)
+Discount and freight on a mixed-rate document spread PRO RATA over the lines, each rate charged on its
+share. Build it behind ONE clearly named helper, test it, and put a comment at the top of that helper
+saying it rests on an UNCONFIRMED GST reading pending Puneet or Manish. Never cite it as settled.
+
+#### Tests — new `src/database/line-tax.test.ts` plus an HTTP case
+- His hand figure above, asserted line by line against the posted journal.
+- A credit note for the Pen only: 86.29 x 18% = 15.53 (7.76 + 7.77), note 101.82, invoice still owes
+  1,133.18. A FULL return also reverses the 0.44 and the invoice clears to exactly 0.
+- Two lines of Rs 10.10 at 5%: per GROUP gives 1.01 where per line would give 1.02 (I-Q3).
+- An exempt 0% line on an 18% invoice, shown separately in the GST summary (I-Q9).
+- An invoice whose total is already whole rupees posts NO round-off line.
+- An old invoice is never re-rounded (I-Q10): round_off 0, posted figures stand.
+- Receivables, the customer statement and ageing agree with the ledger to the paise (I-Q12).
+- The October ACCEPTANCE test stays green and unchanged.
+
+#### Rules (hard) — §2 above applies, with ONE amendment
+**CBM IS DOWN this session, and its graph is keyed to the old machine's path. Use Grep plus Read with
+offset+limit; NEVER read `repository.ts` (about 7,600 lines) whole.** The repo folder is
+`D:\dhruv-book-accounting-app\Book-Buddha-github\book-buddha`, NOT the `C:\Users\Admin\Desktop` path in
+the skeleton above. Everything else in §2 stands.
+
+**Files you MAY change:** `src/accounting/engine.ts`, `src/accounting/types.ts`,
+`src/database/repository.ts`, `src/database/open-items.ts`, `src/database/reports-sales.ts`,
+`src/api/server.ts`, `src/import-export/import-documents.ts`, `src/import-export/exports.ts`,
+`src/import-export/codec.ts`, and the test file for each. Do NOT touch `migrations.ts`, any `*-schema.ts`,
+`october.e2e.test.ts`, `context/` or `web/`.
+
+#### Done when
+tsc exit 0 . the October ACCEPTANCE test green . vitest run with the new count REPORTED.
+
+**THE BASELINE YOU START FROM**, measured 22 Nov with v34 in place and nothing else changed:
+**1,268 passed / 1 failed of 1,269, in 99 files, in 76-91s.** Two consecutive runs agreed. `tsc` exit 0.
+`vite build` 1.82s. October alone 22/22 in 4.98s.
+
+**The ONE allowed red** is `src/import-export/r10-integration.test.ts:238` ("2,000 single-line invoices
+commit in well under 10 seconds"), a wall-clock budget this machine does not meet: it has measured
+12.31s, 13.90s, 14.06s, 17.28s, 17.61s and 29.37s across the session on UNCHANGED code, and it was the
+single red in the very first baseline run before any of this work. Do NOT touch it and do NOT loosen its
+threshold. Treat every OTHER red as yours.
+
+**If a test TIMES OUT, say so and re-run that file alone before touching anything.** Timeouts used to be
+endemic here - a run on 22 Nov came back with 19 of them - because every test replayed all 34 migrations
+(~147 ms each, ~186 s across the suite). `AccountingRepository` now restores an in-memory database from a
+migrated image instead (~2.4 ms), and timeouts went to zero. So a timeout now means the machine is loaded,
+not that you broke something. NEVER raise a timeout, loosen an assertion or delete a case to get a green
+run: a wrong figure is yours to fix, a slow clock is not. . every existing test you changed listed with WHY. Expect about seven test files
+that assert a rate or a total: `cash-rounding.test.ts`, `cash-view.test.ts`, `credit-note-defects.test.ts`,
+`recurring.test.ts:163`, `import-documents.test.ts:375`, `reports-sales.test.ts:276-282`,
+`repository.test.ts:186`.
+
+*Orchestrator:* Sonnet, SERIAL on `repository.ts` — nothing else runs on that file. Write
+`line-tax-schema.ts` and register v34 BEFORE dispatching. R14-2 waits for this to land.
+
+### I-3 — bill and expense round-off: build (v35)
+**Ruled by Dhruv 22 Nov: I-Q6, recorded as S18-6 in `context/decisions.md`.** His words: optional ·
+default zero · whole paise · bills and expenses ONLY · kept separate from existing document totals ·
+old posted bills and expenses unchanged · no historical document re-rounded.
+
+**Schema is DONE by the orchestrator — do not change it.** `src/database/bill-round-off-schema.ts`,
+registered as v35, proven by 6 tests in `migration-v35-bill-round-off.test.ts`: one signed
+`round_off_paise` column on `purchase_bills` and `expenses`, `NOT NULL DEFAULT 0`, with
+`CHECK (round_off_paise > -100 AND round_off_paise < 100)` so "under Rs 1" is enforced by the database.
+
+#### The ONE thing to get right: nothing is calculated
+An invoice ROUNDS ITSELF to the nearest rupee (I-Q5). A bill does NOT. The owner TYPES a round-off to
+make the bill match the total the supplier printed. There is no `roundToRupee` call anywhere in this
+slice. If you find yourself computing a bill's round-off, stop — you have misread the ruling.
+
+#### Sign convention — the same definition as invoices, mirrored
+`round_off_paise = the total the owner wants - the total the lines compute to`. On an invoice the
+settlement line is a DEBIT (Dr RECEIVABLES), so a positive round-off balances with `Cr ROUND_OFF`. On a
+bill the settlement line is a CREDIT (Cr PAYABLES or CASH), so a positive round-off — a bill worth more
+than its lines — balances with `Dr ROUND_OFF`, which is correct: paying more than computed is a cost.
+Negative mirrors it. Import `ROUND_OFF_ACCOUNT` from `chart-accounts-schema.ts`; a bare `"ROUND_OFF"`
+literal anywhere in your diff is a defect.
+
+#### Behaviour to build
+1. **`purchaseEntry` in `src/accounting/engine.ts`** takes an optional signed round-off. The settlement
+   credit becomes `computedTotal + roundOff`, and a `ROUND_OFF` line carries the difference. A ZERO
+   round-off posts NO line — `journal_lines` rejects a zero line (`chart-accounts-schema.ts:346`).
+2. **Bills** (`finalizePurchaseBill`) and **expenses** (`finalizeExpense`) in `repository.ts` pass the
+   stored value through. `getPurchaseBill` (:5937-area) and `getExpense` (:6573-area) read it back
+   alongside the computed subtotal, tax and total, as its own field — NOT folded into any of them.
+3. **API** `src/api/server.ts`: `purchaseTaxFields` / `purchaseBillInput` / `expenseInput` gain an
+   optional `roundOffPaise`, an integer, refused outside ±99 with a message in the house style. The
+   stored total stays computed; this is a separate figure.
+4. **Cancellation** already mirrors every line (`engine.ts` `reverseEntry`), so a cancelled bill
+   reverses its round-off with no extra work — assert it rather than adding code.
+5. **Out of scope:** no re-rounding of anything; no round-off on purchase RETURNS or credit notes
+   (I-Q6 is bills and expenses only, and the v35 test pins that); no import/export column; no UI.
+
+#### Tests — new `src/database/bill-round-off.test.ts`
+- A bill of 100 x Rs 25.00 at 18%: subtotal 2,500.00, tax 450.00, computed total 2,950.00. With a typed
+  round-off of **+37 paise** the entry is `Dr INVENTORY 250000 · Dr INPUT_CGST 22500 · Dr INPUT_SGST
+  22500 · Dr ROUND_OFF 37 · Cr PAYABLES 295037`, and it balances.
+- The same bill at **−37 paise**: `Cr PAYABLES 294963` and `Cr ROUND_OFF 37`.
+- A round-off of **0** posts NO `ROUND_OFF` line at all.
+- An expense of Rs 2,000.00 with a +15 paise round-off, posted and then cancelled: every account nets
+  to zero, round-off included.
+- ±100 is refused at the API with the exact message you chose, and by the CHECK at the database.
+- A bill finalized BEFORE v35 (round_off 0) is unchanged and posts no round-off line.
+- The October ACCEPTANCE test stays green and untouched.
+
+#### Rules (hard) — §2 above applies, with the same amendment as I-2
+CBM is DOWN; use Grep plus narrow Read, never read `repository.ts` whole. Repo is
+`D:\dhruv-book-accounting-app\Book-Buddha-github\book-buddha`. Do NOT touch `migrations.ts`, any
+`*-schema.ts`, `october.e2e.test.ts`, `context/`, `web/`, or the `emptyMigratedDatabase` block at the
+top of `AccountingRepository`.
+
+**Files you MAY change:** `src/accounting/engine.ts`, `src/accounting/types.ts`,
+`src/database/repository.ts`, `src/database/purchasing-types.ts`, `src/api/server.ts`, and the test
+file for each.
+
+#### Done when
+tsc exit 0 · the October ACCEPTANCE test green · vitest with the new count reported. Baseline going in:
+**1,300 passed / 1 failed of 1,301** (I-2 plus the 6 v35 migration tests), the one red being the
+pre-existing `r10-integration.test.ts:238` wall-clock budget. Report every file changed with a why,
+every existing test changed with why, the exact messages, and every call you made yourself.
+
+*Orchestrator:* Sonnet, SERIAL on `repository.ts`. Runs after I-2 has landed, not alongside it.
 
 ### Q16-2 — .xlsx and PDF build (after Dhruv approves the installs)
 Fill the skeleton from the Q16-1 recommendation:
@@ -240,9 +417,9 @@ Fill the skeleton from the Q16-1 recommendation:
 The files are `src/import-export/*`, `src/api/export-routes.ts` and `import-routes.ts`, plus tests.
 No `repository.ts`.
 
-### R14-2 — archive build (v35)
+### R14-2 — archive build (v36)
 Fill the skeleton from the approved R14-1 mini-spec. The schema file is
-`src/database/master-status-schema.ts` (the orchestrator registers it as v35).
+`src/database/master-status-schema.ts` (the orchestrator registers it as v36).
 
 ### F2 — opening sets vs posted documents and history (after Dhruv rules; see §1)
 Fill the skeleton from his ruling. The doors are the three save and three reverse opening-balance
@@ -294,7 +471,7 @@ The mini-spec must answer, each with a recommended default:
    - stock on hand;
    - open drafts, quotations or recurring templates referencing it;
    - an un-ended fair.
-4. **Migration v35:** a `status` column per master (ACTIVE, INACTIVE or ARCHIVED), default ACTIVE,
+4. **Migration v36:** a `status` column per master (ACTIVE, INACTIVE or ARCHIVED), default ACTIVE,
    additive.
 5. **Every path that must respect it:** document create/save doors, imports (an archived customer
    named in an import row), list endpoints (`?includeArchived`), and reports (past data keeps
@@ -303,7 +480,7 @@ The mini-spec must answer, each with a recommended default:
 **Output:** at most about 100 lines with `file:line` citations.
 *Orchestrator:*
 - Put it to Dhruv briefly, then write R14-2 (schema `src/database/master-status-schema.ts`, which
-  the orchestrator registers as v35).
+  the orchestrator registers as v36).
 - R14-2 runs after I-2, because both are serial on repository.ts.
 
 ### REV — Whole-build review (READ-ONLY, three reviewers in parallel)
