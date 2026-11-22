@@ -5,7 +5,154 @@ DEC = plan/Decisions — the 15 questions, FD = Feature Design V1, H13 = 13 Nov 
 These pre-date this harness, so they keep their original IDs. **Future** decisions made
 in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at the top.*
 
+## Rules and lessons carried forward (moved from Progress.md, S17-11)
+- Owner's standing rule: build backend only, no UI (session 8). Screenshots only of things that really work.
+- A slice is accepted when the accounting logic is satisfied (S12-1). The nineteen questions are closed (S11-1 to S11-22); do not re-ask them.
+- Where the data model forces a choice, make it and say so; accounting policy is Dhruv's (S9-1 trade-off; v18 and v19 precedent).
+- Date the entry, never the stock layer. FIFO runs ORDER BY occurred_at, rowid. Restored stock goes to the end of the queue (v19).
+- A stock reversal stamps the BILL's id on the movement, then asserts the ledger equals valuation (session 9 bug).
+- Reports key on entry_date, not created_at, and group by chart_accounts type or role via JOIN, never a hard-coded code list.
+- An unknown fair must throw, not return zero rows (S11-9).
+- A new seeded account needs a new frozen seed list and a new migration; migration-v15-seeding goes red by design, so add the list there.
+- Migration tests: build to version n-1, insert rows by raw SQL, call the new apply function directly. A whole-chain run on an empty database tests nothing.
+- Any rebuild of chart_accounts must replay every trigger that mentions it (journal_lines_account_exists).
+- The posting door rejects a 0/0 journal line; filter zero lines out first.
+- New API routes are protected automatically; a public route must be added to PUBLIC_ROUTES deliberately. Every new route needs an HTTP test.
+- buildApi takes two positional arguments: buildApi(repository, { __unsafeDisableAuthForTests: true }).
+- Fastify tests cannot use fake timers; age a session with validateSession(token, future).
+- Edit with the Edit or Write tool, never perl -i -pe (it eats $ signs). Write markdown with Write, not a shell heredoc.
+- Reproduce a defect before fixing it; mutation-test key assertions; restore by byte comparison, never git checkout while work is uncommitted.
+- Triage any red test: old behaviour, stale count, or an ACCEPTANCE figure (stop and look; never edit it).
+- Verify a stated blocker in the code before planning around it (S9-3: "purchase returns blocked on S7-2" was never true).
+- Maximum two builders, never both in repository.ts; the orchestrator owns migrations.ts and runs the full suite alone (S5-5).
+- Stage by explicit path, one commit per idea, honest limits in the commit message.
+- Builder rules (every brief restates): CBM first · no new `context/` file · never open `.env`, secrets or `*.db` · only own files · no installs · no git writes · journal writes only via `postJournalEntry`, audit only via `appendAuditEvent` (`single-writer.test.ts` enforces) · money in whole paise · every new posting names one business · reversals not edits · every create/update/cancel audited · gates unpiped, counts read · loop until green, then report.
+
+## Open to-dos and spec questions (moved from Progress.md, S17-11; may be stale)
+**Waiting on Dhruv**
+- Is the other Claude session in this folder his, and should it continue (S13-3)?
+- Smaller calls: base64 vs multipart for attachments (S11-19, defaulted to base64); OPENING_DATE label in Collections; `web/src/App.tsx` StockMovementType lacks the v22 types (UI is his).
+- R12 set-two calls to confirm: over-payment matching refused in V1 (part-payment allowed) · statements CSV/JSON only · rules cannot target the Uncategorised accounts · Add/Split/Uncategorise post as vouchers · an import that adds nothing still writes an import row and audit event · matching a document overwrites the line's business; posted-line matches show exact amounts only · deleting a bank rule is a hard delete (audited); a TRANSFER rule cannot target its own bank account.
+- R12 set-one calls (from Builder B, unasked): a credit note / purchase return on a document paid at once into a bank posts back to THAT bank; a credit document naming a money account/mode/reference is refused (name them on each payment). (The `PUT /invoices/:id` reset-to-CASH trap is fixed by S17 Builder A.)
+- R10 choices made without him: customer/supplier payments are also refused on or before the opening date; imported credit notes confirm back-dating automatically (the preview is the confirmation). (Equal-payments rule replaced by S16-3 / Builder B.)
+- Amend FD §D6 to two Uncategorized accounts (S11-8): wording edit only, no migration — confirm done.
+- **S17-10 edge (asked 22 Nov; ON HOLD — Dhruv is checking, do not build either option until he rules):** a bill discount EQUAL to the stock value on a bill that is ALL stock (nothing payable). Saves, but finalize fails: the ledger refuses a nil payable line. Options:
+  (a) refuse at save: "The bill discount equals the whole bill, so nothing is payable. Record free stock as a stock adjustment instead." The free stock then goes in through a stock adjustment.
+  (b) allow it as a nil-total bill: stock comes in at nil cost and no journal entry is posted.
+  (a) is recommended because a bill with nothing to pay has no ledger story; (b) leaves a "posted" bill with no entry, which the audit and cancel-with-reversal rules do not expect. With other lines (freight etc.) the equal case already posts fine.
+- **F plan (22 Nov, for his approval) — pre-opening items as HISTORY (S16-2(c), Q13).** Today the app
+  ACCEPTS and POSTS a document/payment dated on/before the opening date (counts twice); only imports refuse.
+  Design: a `before_opening` 0/1 column (v33) on invoices, purchase_bills, expenses, credit_notes,
+  purchase_returns, payments, supplier_payments; status stays FINALIZED. Rule enforced at WRITE: a history
+  item is never journalled and never moves stock, so every ledger-based report (TB, BS, P&L, GL, cash
+  flow, §13) excludes it untouched; 14 read paths that read document tables directly (open items/
+  receivables/ageing, payables, supplier statement ×4, customer credit balance, sales-by-item, sales
+  returns, cash view loops) get `before_opening = 0`. Confirm like `confirmBackdatedMonth`:
+  "This is dated before your opening date — it will be kept as history and not posted. Continue?";
+  imports keep such rows as history automatically (per-row "kept as history"). Numbering unchanged
+  (app numbers for app documents, imported keep theirs). Defaults proposed: flag frozen at finalize; warn
+  with a count before reversing the last opening set or saving one dated after posted documents;
+  vouchers/transfers out of scope (no party). Questions put to him: payment after opening on a history
+  invoice/bill · credit note/return on a history document · cancel a history document · opening-balance
+  receipt dated exactly ON the opening date (today allowed). **BUILT 22 Nov.** Builder's own calls (for
+  review): a history finalize/cancel returns an empty, unstored entry id `history-…`; a payment on/before
+  opening against a POSTED document is refused; a history supplier payment cannot carry a settlement
+  discount; credit/return refusals also at draft save; applying credit to / refunding a history document
+  refused; a note/return dated pre-opening against a posted document is itself history; the importer
+  accepts and ignores a "Before opening" column (history always decided from the date).
+**Build work still open (see Progress.md live briefs for order)**
+- R10 follow-ups: .xlsx import/export and PDF export need a package install (Q16: name each package + size, ask first).
+- Pre-opening documents/payments kept as HISTORY (S16-2(c), Q13) · back-dating confirm on every dated entry (Q12) · GST per line (Q24) · round-off line (Q23).
+**From todos.md (seeded 14 Nov; may be stale)**
+- FD §H listed as open: archive scope; auto-record payment on a bank match; whether the Uncategorized account is auto-created or named by the owner (section header says closed — confirm).
+- Subscriptions deferred (S1-5). Outside advisers: CA (principal vs agent on magazine resale, GST timing, "Exempt" scope); lawyer (buyer personal data under DPDP Rules 2025). The old todos.md build order is superseded by HOT.md.
+**Open spec conflicts and technical decisions**
+- Rounding: whole rupee (DD §7.4, PRD) vs exact paise (ANTI §4, TEST §5.3). Tax placement: per-line GST (DD §13.1) vs invoice-level (prototype).
+- Reports count: 8 in BP vs about 17 in DD §12. Archive scope: v1-skip (DEC Q7) vs v2 (DD §1.5/§17) vs V1 (FD/H13). M4 challan↔invoice link: pending (DEC) vs decided (DD §11.4).
+- Tech stack (TS + Fastify + SQLite + React) never formally confirmed. Desktop packaging: Tauri vs Electron undecided; how it installs for a non-engineer. PDF extraction library: pdfplumber/Camelot are Python, prototype is TS. OCR: Tesseract vs PaddleOCR; whether cloud OCR is allowed.
+- Who builds: Sonnet builds, Opus reviews (ANTI §5), proposed not owner-confirmed. Test basis: fixtures partly answered by Vitest tests. Prototype roles: admin/accountant/viewer vs Phase-1 admin-only (DD §15.1).
+- Canonical repo path: docs say D:\dhruv-book-accounting-app\Book-Buddha-github; this checkout is C:\Users\Admin\Desktop\Book Buddha — confirm which. Build status: docs say nothing built; HOT shows a working prototype. Prototype cancel: claimed as reversal, unverified.
+- `testing/testing.md` is a stale draft (says DD §5 unwritten; calls a fair a tag). Phase 2 design open: invoicing-user login and recovery, permission matrix, tablet layout, LAN, connection drop (DD §2.4).
+
 ## Session decisions (harness convention, newest first)
+
+- **S17-13 (2026-11-22) — HIS RULINGS FOR THE REMAINING PLAN.** (1) G back-dating tests: the app gets a
+  settable "today" (clock); each test pins its own month — the October ACCEPTANCE test may change its
+  SETUP only (pin today), never figures or request bodies. (2) D's expenses-import defaults KEPT as built
+  (blank payment account → Payables if a supplier is named, else Cash; one amount per expense).
+  (3) Old React screen `web/src/App.tsx`: remove the invoice-number and credit-note-number boxes as a small
+  fix (like Q22); no other screen work. Full plan + briefs: `book-buddha/BUILD_PLAN_S18.md`.
+
+- **S17-12 (2026-11-22) — HIS RULINGS ON F (pre-opening history; plan above approved as proposed).**
+  (1) A payment dated AFTER the opening date on a history invoice/bill is REFUSED: "record it as a receipt
+  against the customer's / settlement against the supplier's opening balance". (2) A credit note or
+  purchase return against a history document is REFUSED, pointing to the opening balance. (3) A history
+  document CAN be cancelled: status Cancelled + audit event, posts nothing. (4) An opening-balance
+  receipt/settlement dated ON or before the opening date is REFUSED ("already included in the opening
+  balance") — was allowed on the date itself.
+
+- **S17-11 (2026-11-22) — HIS RULING: Progress.md ≤ 60 LINES (WHOLE FILE); Testing.md ≤ 200 LINES,
+  STRUCTURED/TABULAR.** "I said 50 is the upper limit, raising it now to 60, rest transfer all the test
+  details to Testing file … keep that under 200 lines only." He chose whole-file (not summary-only).
+  Progress.md = summary + the live briefs of the current session only (one or two lines each); test
+  details → Testing.md (tables); slice definitions → architecture.md; rules/lessons and open spec
+  questions → decisions.md; closed briefs dropped (git history keeps them). CLAUDE.md rule 10 updated.
+
+- **S17-10 (2026-11-22) — HIS RULING: A BILL DISCOUNT LARGER THAN THE BILL'S STOCK VALUE IS REFUSED**
+  ("Refuse it"), instead of spilling the excess to Discount received. Follows from S17-7 (discount is on
+  stock items only), so a discounted bill with NO stock lines is refused too (stock value 0) — told him.
+  Built after S17-E leaves repository.ts. **Agreed messages (400, shown on screen):** (1) "The bill discount
+  (Rs 800.00) is more than the value of the stock items on this bill (Rs 700.00). A bill discount applies to
+  stock items only — lower the discount or check the lines." (2) No stock lines: "This bill has no stock
+  items, so it cannot carry a bill discount. A bill discount applies to stock items only." Checked at save
+  AND finalize.
+
+- **S17-9 (2026-11-22) — HIS RULINGS: NUMBER FORMAT + OCTOBER TEST LABELS.** (1) Format `INV-001/25-26`
+  (TRF style), per business, restarting each financial year; prefixes INV, QUO, CN, PR (RV/PV/TRF already
+  built). (2) **The October ACCEPTANCE test may be edited for LABELS ONLY** — typed numbers removed for
+  app-created documents (4 invoices, CN-001, PR-001) and the app's numbers expected (e.g. INV-004/25-26);
+  every approved figure unchanged; PB-001/PB-002/EXP-001 keep their own numbers.
+
+- **S17-8 (2026-11-22) — HIS RULING: AN APP DOCUMENT GETS ITS NUMBER WHEN FIRST SAVED** (not at finalize).
+  Offered: finalize keeps the GST series gap-free (drafts can't be deleted, so an abandoned draft keeps
+  its number); he chose first save. Completes S17-4.
+
+- **S17-4 (2026-11-22) — HIS RULING: NO MANUAL NUMBERING; THE APP NUMBERS WHAT IT CREATES (replaces
+  S16-9(2)).** His words: "app shall give normal numbering only but screen will have an option to open the
+  linked quotation … No manual numbering in the app anywhere where a doc is been created else it may
+  disturb the accounting flow." And: "App given number only on document created through the app, all
+  rest identified from their respective document number only." So: (a) documents the app ORIGINATES get
+  the next number in the app's series (quotation conversion and recurring runs included; the "refuse a
+  taken number" path and the optional `number` on convert go away); (b) an invoice made from a quotation
+  stores a LINK to it (backend: the quotation id on the invoice, readable both ways) so the screen can
+  jump to it; (c) documents that originate ELSEWHERE keep their own number — imported past documents keep
+  their old number; a supplier's bill is identified by the supplier's own bill number (typed from the
+  paper). Orchestrator's reading, to confirm at the mini-spec: series = `TRF`-style `<PREFIX>-001/26-27`
+  per business per financial year (reuse `nextDocumentNumber`); number given at FINALIZE (no gaps from
+  deleted drafts, GST practice), drafts unnumbered; expenses follow the supplier-bill rule (vendor's
+  receipt number).
+- **S17-5 (2026-11-22) — HIS RULING: Q16, Q17, Q18, Q23 AND THE 2 SLOW TESTS JOIN THIS SESSION'S AIM**
+  ("Then let's aim to complete this too!"). Q16 installs still need each package named + sized and his yes.
+- **S17-6 (2026-11-22) — HIS RULINGS: R13 = DIRECT METHOD ONLY; sections as proposed** — Capital, Opening
+  Balance Equity, Loans → Financing; an asset account he creates asks for a section (default Operating);
+  everything else Operating. Needs a per-account section setting (migration). S15-4 (OD/CC) and 12c
+  (internal transfers are not cash flows) apply.
+- **S17-7 (2026-11-22) — HIS RULING: BILL DISCOUNT IS ON STOCK ITEMS ONLY.** "The discount is assumed to be
+  on stock items only and not for related expenses" — spread pro-rata by value across the STOCK lines only,
+  per unit in whole paise, remainder on the last unit (Q1); non-stock lines keep their full price.
+
+- **S17-1 (2026-11-22) — HIS ORDER: BUILD → REVIEW → TESTS (replaces "tests FIRST" in S16-11).** His
+  words: "Build this pending work and then review and then write the tests." Builders still finish with
+  tsc 0, the EXISTING suite green and the October ACCEPTANCE green; old-behaviour tests that an S16
+  ruling deliberately reverses may be updated; an ACCEPTANCE test is never edited. New tests are written
+  after the orchestrator's review. Step 1 (S16-9) shown to him again for review while the build starts.
+- **S17-2 (2026-11-22) — HIS RULING: NO SUB-CUSTOMER LIST/REPORT FOR FAIR BUYERS.** "As fair comes under
+  Project feature of our app, hence, No sub-customer wise report needed for customers under project."
+  Closes the open half of S16-9(3). Buyer name/contact on each fair invoice stays as recorded.
+- **S17-3 (2026-11-22) — HIS RULING: R14 (archive) ONLY IF R13 IS COMPLETED THIS SESSION.** Otherwise
+  stays deferred (S12-4). Told him the backend list also holds Q16 (.xlsx/PDF, install), Q17 expenses
+  import, Q18 every report exports, Q23 rupee round-off line, plus the 2 slow tests — all verified
+  unbuilt in the code on 22 Nov; asked where they fit.
 
 - **S16-11 (2026-11-21) — HIS ORDER FOR SESSION 17.** Aim: "complete the full backend in next session,
   with all or little pending tests". Order: (1) first he completes the "taken invoice numbers refused"

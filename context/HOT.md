@@ -1,49 +1,46 @@
 # HOT — Book Buddha
 
-## STANDING ORDER (his words, mark every session — S12-3)
-"Pause on acceptance tests, do the tests in the above prompt, then will continue with development
-work and build everything till R12. Then till R12 will run all the tests for pending ones and the
-newly build and check the backend end to end." **DONE in S16:** R12 committed, the all-together run
-done (October 2025 end-to-end ACCEPTANCE test, S16-5), and all 16 audit defects fixed. **R14 deferred (S12-4).**
+## STANDING ORDER (his words — S17-1, replaces S16-11)
+"Build this pending work and then review and then write the tests." Order: **BUILD → REVIEW → TESTS.**
+Aim: full backend done, few or no pending tests. R14 archive is in scope (R13 is built, S17-3).
 
 ## Last session
-Session 16 (21 Nov) — R12 committed; October e2e ACCEPTANCE on his figures; 16 audit defects fixed;
-S16-9 taken invoice numbers refused; S16-10 every parked acceptance slice closed, probe files deleted.
+Session 17 (22 Nov). **Built:** S16 slice (A, B), R13 cash flow, Q17/Q18, slow tests, bill discount on
+stock only + settlement discount, app numbering INV-001/25-26, S17-10 refusal, quotation-edit guard,
+F pre-opening history. Migrations v30–v33. Rulings S17-1..13. Code commit 451f9ab, pushed.
 
 ## State now
-Branch `autonomous/book-buddha-finish`. Gates **all green, measured 21 Nov after the last change:
-tsc 0 · 1,060 tests, 93 files · vite 1.05s.** Migration **v29**. **Count unpushed commits, never quote a
-figure from here:** `git log --oneline @{u}..HEAD`. **PUSH in the background and ASK HIM EVERY TIME
-(S11-17).** The October ACCEPTANCE test (`src/e2e/october.e2e.test.ts`) is the end-to-end regression
-check — it must stay green. **ACCEPTANCE (per slice): hand-verified R3, R4c · on trust 7d, 8c ·
-R1, R2, R4, R4b, R5, R7, R8 CLOSED (S16-10, on the S16 run + October e2e). No acceptance backlog.**
+Branch `autonomous/book-buddha-finish`. Gates (22 Nov, after the last change): tsc 0 · **1,134 tests,
+97 files** · vite 1.23s. Migration **v33**. Count unpushed commits fresh with
+`git log --oneline @{u}..HEAD`. PUSH in the background, and ASK HIM EVERY TIME (S11-17).
+The October ACCEPTANCE test (`src/e2e/october.e2e.test.ts`) must stay green.
 
 ## NEXT STEP — resume here
-**His order for session 17 (S16-11), aim = the FULL BACKEND done, few or no pending tests:**
-1. **First, the "taken invoice number refused" change (S16-9)** — he will "complete" it. It is already
-   committed (1196954) and pushed: ASK him what is left (his check? screens? more cases?).
-2. **Then the tests:** tests written FIRST for the unbuilt work (S16 slice · bill discount Q1/Q2 · GST per
-   line Q24 · R13 cash flow), plus the 2 slow tests (R10 2,000-invoice timing 6.5–7.4 s of 10 s; the
-   engine.test.ts fuzz test that can time out under load).
-3. **Then build those** till the tests pass. S16 slice = refund account choice · keep money account on
-   edit · import repeated payments + last-import banner · pre-opening items as history · back-dating
-   warning everywhere · attachment + restore audit · zero-cost write-down FY lock · stock adjustment (Q15).
+**Open `book-buddha/BUILD_PLAN_S18.md`**: the whole remaining plan, with ready builder briefs.
+1. Run the §0 gates.
+2. Dispatch **G**: settable "today" + back-dating confirm on every dated entry (Q12, S17-13). This is
+   the serial `repository.ts` builder.
+3. In parallel: **P1** old screen number boxes · **P2** `/imports/last` company filter · **I-1** GST
+   per line + round-off mini-spec · **Q16-1** .xlsx/PDF package research · **R14-1** archive mini-spec.
+4. Take I-1, the Q16 installs (name + size) and R14-1 to Dhruv. Then build I-2 → Q16-2 → R14-2,
+   then REV (3 reviewers) → FIX → TST (with workings for his hand check).
 
-## Waiting on him (ask when a slice touches it, not as a batch)
-1. **Fair buyers as sub-customers (S16-9(3))** — does he want a sub-customer list/report? Ask when the
-   fair/customer screens are planned, not before.
+## Waiting on him
+1. **ON HOLD (he is checking):** a bill discount EQUAL to the stock value on an ALL-stock bill saves but
+   cannot finalize. Options are in decisions.md (S17-10 edge); refusing it is recommended.
+2. At their step: the I-1 mini-spec · Q16 packages + sizes · R14 mini-spec · REV rulings · TST workings.
 **Still NO real database (S11-16)** — never touch his file.
 
 ## Corrections that must not be re-inherited
 **`getTrialBalance` returns NET balances** (S10-5). **THREE gates, not four.** `salesByItem` does
-**not** spread header discount/GST. **A `SALE` stock row is NOT always an invoice** (S12-6).
-**A cancelled payment has NO statement row** (S13-1). **There is NO restore route** — by design.
-**S8-1 is REPLACED by S16-7(3):** a payment cancelled in a later month leaves the earlier month alone.
-**Fair invoices must be to the fair's host customer** (repository.ts:4858). **A taken invoice number is
-REFUSED, never renumbered** (S16-9) — conversion takes an optional `number`.
+**not** spread header discount/GST. **A `SALE` stock row is NOT always an invoice** (S12-6). **A
+cancelled payment has NO statement row** (S13-1). **There is NO restore route** — by design. **S8-1 is
+REPLACED by S16-7(3).** **Fair invoices go to the fair's host customer.** **The app numbers every
+document it creates (S17-4):** routes refuse a `number`, imports keep their own, and conversion takes
+NO number. **History items (F) post nothing.**
 
 ## Workflow
-Gates from `book-buddha/`: `tsc.cmd` **first** · `vitest.cmd run --root .` · `vite.cmd build` —
-**never through a pipe; READ the count.** **An `ACCEPTANCE` test going red = STOP.** Builders that edit
-`repository.ts` run ONE AT A TIME; others in parallel on DISJOINT files; briefs in `Progress.md` first.
-New confirmed defects go in `src/e2e/known-defects.test.ts` as `knownDefect(...)`; flip to `it("FIXED…")`.
+Gates from `book-buddha/`: `tsc.cmd` **first** · `vitest.cmd run --root .` · `vite.cmd build`. Never run
+them through a pipe; READ the count. **An `ACCEPTANCE` test going red = STOP.** `repository.ts`
+builders run ONE AT A TIME; others in parallel on DISJOINT files. Only the orchestrator registers
+migrations. Live briefs go in Progress.md, one or two lines each.
