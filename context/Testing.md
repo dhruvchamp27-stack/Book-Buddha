@@ -13,6 +13,7 @@ Rules: an **ACCEPTANCE** test going red = STOP and look, never edit its figures 
 ## Latest gates
 | Date | tsc | Tests / files | vite | Note |
 |---|---|---|---|---|
+| 22 Nov S18 (after G + S18-1) | 0 | **1,262 / 98** | OK | backdating.test.ts 122 new (30 doors × refused/confirmed/same month/FY lock + history, HTTP, import); bill-discount-refusal.test.ts S18-1 block 5 (1 old pin replaced); import-masters +1 (past-month opening import, proven red); import-routes +1 (P2, proven red); ~50 files pinned with `todayAt()` (src/database/test-clock.ts). October 22/22, unedited |
 | 22 Nov (after F, v33) | 0 | **1,134 / 97** | 1.23 s | before-opening.test.ts 20 new (hand figure: opening Rs 10,000 + history invoice Rs 10,000 → receivables, statement, TB Rs 10,000 once); 4 test files adjusted to S17-12 |
 | 22 Nov (after quotation-edit gap) | 0 | 1,114 / 96 | 1.19 s | 1 new test in sales-defects.test.ts (S17-4 block) |
 | 22 Nov (after S17-10) | 0 | 1,113 / 96 | 1.17 s | bill-discount-refusal.test.ts 13 new; bill-discount.test.ts 7 changed to the S17-10 rule |

@@ -76,6 +76,30 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S18-2 (2026-11-22) — HIS RULING ON "INACTIVE" (R14, replaces R14-Q2 default):** "No Inactive shall
+  mean user cannot carry out any work on it! They need to be activated - they are not visible only on the
+  UI but exists." So INACTIVE = hidden from the screens and frozen: NO work of any kind until it is
+  activated again. The record stays in the database. Follow-ups ruled the same day: (a) making a master
+  Inactive is REFUSED while anything is open on it (balance incl. opening, open credit/refund, stock on
+  hand, draft/quotation, active recurring template, un-ended fair, hosted live fair). (b) TWO STATES ONLY:
+  Active / Inactive; no "Archived" (replaces FD §F's third state). (c) Past invoices and payments KEEP
+  showing in reports for old periods, so the books tie. R14 = make the existing `active` flag real (add it
+  to fairs; chart accounts keep their own guards), not a new status column.
+
+- **S18-1 (2026-11-22) — HIS RULING ON THE S17-10 EDGE: "refuse it".** A bill discount EQUAL to the stock
+  value on an all-stock bill (nothing payable) is REFUSED AT SAVE with: "The bill discount equals the whole
+  bill, so nothing is payable. Record free stock as a stock adjustment instead." Option (b), a nil bill, is
+  rejected. **BUILT 22 Nov:** refused when payable = 0 (lines − discount + extra charge ≤ 0), at create
+  and at finalize; there is no draft-edit door for bills. The old test pinning "saves but cannot post" was replaced.
+
+- **S18 (2026-11-22) — ASKED, NOT YET RULED.** The I-1 mini-spec (GST per line + round-off, I-Q1..10),
+  the Q16 installs (SheetJS 0.20.3 from the CDN + pdfkit 0.21.0, Q16-a..d), and the R14-1 mini-spec
+  (archive, R14-Q1..8) were put to him with their recommended defaults. The full text and the
+  hand-worked figures are in `book-buddha/REVIEW_PACK_S18.md`. Two research findings: customers,
+  suppliers and items ALREADY have an `active` flag, though no document door checks it; and the
+  `ROUNDING` account is cash-view only, so the plan is a NEW `ROUND_OFF` account. Migrations stay
+  v34 = I and v35 = R14.
+
 - **S17-13 (2026-11-22) — HIS RULINGS FOR THE REMAINING PLAN.** (1) G back-dating tests: the app gets a
   settable "today" (clock); each test pins its own month — the October ACCEPTANCE test may change its
   SETUP only (pin today), never figures or request bodies. (2) D's expenses-import defaults KEPT as built

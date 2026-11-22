@@ -5,32 +5,25 @@
 Aim: full backend done, few or no pending tests. R14 archive is in scope (R13 is built, S17-3).
 
 ## Last session
-Session 17 (22 Nov). **Built:** S16 slice (A, B), R13 cash flow, Q17/Q18, slow tests, bill discount on
-stock only + settlement discount, app numbering INV-001/25-26, S17-10 refusal, quotation-edit guard,
-F pre-opening history. Migrations v30–v33. Rulings S17-1..13. Code commit 451f9ab, pushed.
+Session 18 (22 Nov). **Built:** P1 (old screen number boxes), P2 (`/imports/last?companyId=`), **G**
+(settable "today" + back-dating confirm on 30 doors), S18-1 refusal. Research I-1, Q16-1, R14-1 done.
+Rulings S18-1, S18-2 (Inactive = hidden + frozen, two states only). Uncommitted at time of writing.
 
 ## State now
-Branch `autonomous/book-buddha-finish`. Gates (22 Nov, after the last change): tsc 0 · **1,134 tests,
-97 files** · vite 1.23s. Migration **v33**. Count unpushed commits fresh with
-`git log --oneline @{u}..HEAD`. PUSH in the background, and ASK HIM EVERY TIME (S11-17).
-The October ACCEPTANCE test (`src/e2e/october.e2e.test.ts`) must stay green.
+Branch `autonomous/book-buddha-finish`. Gates (22 Nov): tsc 0 · **1,262 tests, 98 files** · vite OK.
+Migration **v33**. Count unpushed with `git log --oneline @{u}..HEAD`. PUSH in the background, and
+ASK HIM EVERY TIME (S11-17). The October ACCEPTANCE test must stay green.
 
 ## NEXT STEP — resume here
-**Open `book-buddha/BUILD_PLAN_S18.md`**: the whole remaining plan, with ready builder briefs.
-1. Run the §0 gates.
-2. Dispatch **G**: settable "today" + back-dating confirm on every dated entry (Q12, S17-13). This is
-   the serial `repository.ts` builder.
-3. In parallel: **P1** old screen number boxes · **P2** `/imports/last` company filter · **I-1** GST
-   per line + round-off mini-spec · **Q16-1** .xlsx/PDF package research · **R14-1** archive mini-spec.
-4. Take I-1, the Q16 installs (name + size) and R14-1 to Dhruv. Then build I-2 → Q16-2 → R14-2,
-   then REV (3 reviewers) → FIX → TST (with workings for his hand check).
+**Everything waiting on him: `book-buddha/REVIEW_PACK_S18.md`.** Plan + briefs: `BUILD_PLAN_S18.md`.
+1. On his answers: I-2 (GST per line, v34) → Q16 install + Q16-2 → R14-2 (now two states, `active`
+   made real; v35) → F2 → REV (3 reviewers) → FIX → TST (workings for his hand check).
+2. REV must look at: a bank-feed preview of a past-month line gives 400 without the confirm; test
+   clock pins that come before their documents.
 
 ## Waiting on him
-1. **ON HOLD (he is checking):** a bill discount EQUAL to the stock value on an ALL-stock bill saves but
-   cannot finalize. Options are in decisions.md (S17-10 edge); refusing it is recommended.
-2. **F2:** a warning with a count + confirm before saving an opening set dated after posted documents,
-   and before reversing the last set. Not ruled; plan §1.
-3. At their step: the I-1 mini-spec · Q16 packages + sizes · R14 mini-spec · REV rulings · TST workings.
+1. **Review pack:** B1 GST per line (I-Q1..10) · B2 Q16 installs · B3 R14 remaining questions · F2.
+2. His `run-agent-pair.ps1` failed (PS 5.1 splits quoted prompts, worker lines 30/34); not fixed.
 **Still NO real database (S11-16)** — never touch his file.
 
 ## Corrections that must not be re-inherited

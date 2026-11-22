@@ -26,17 +26,16 @@
 | S16 slice | Refund account, money account kept on edit, repeated payments, audit, FY lock, stock adjustment | ✅ (A, B) | in gate | review pending |
 | F | Pre-opening items kept as history, never posted (S16-2(c), Q13, S17-12; v33) | ✅ | 20 | review pending |
 | R13 | Cash Flow Statement, direct method (S17-6; v30) | ✅ (C) | 7 | review pending |
-| G | Back-dating confirm on every dated entry + settable "today" (Q12, S17-13) | ⬜ next | — | — |
+| G | Back-dating confirm on every dated entry + settable "today" (Q12, S17-13) | ✅ (S18) | 122 + in gate | review pending |
 | I | GST per line (Q24) + rupee round-off line (Q23); v34 | ⬜ mini-spec first | — | — |
 | R14 | Archive masters: Active / Inactive / Archived (S11-6, FD §F; v35) | ⬜ mini-spec first | — | — |
 | §13 reports 1–6, S10-4 | Customer, stock and profit reports; stock write-down | ✅ | in gate | ✅ closed (S16-10) |
 | 7d, 8c | Cash-basis invoice, bill and P&L figures | ✅ | in gate | on trust |
 
 ## Known issues / review items
-- **ON HOLD (Dhruv checking):** a bill discount equal to the stock value on an all-stock bill saves but cannot finalize. Options are in decisions.md (S17-10 edge).
+- **S18-1 ruled "refuse it" and BUILT:** a bill discount that leaves nothing payable is refused at save (and at finalize).
 - **F2 (ask Dhruv):** saving an opening set dated after posted documents is unchecked, so they double count silently. Reversing the last set leaves history items with no opening figure. Proposed: warn with a count + confirm (BUILD_PLAN_S18.md §1).
-- Old React screen `web/src/App.tsx` sends `number` → 400. Fix = brief P1 (S17-13(3)).
-- `GET /imports/last` is not company-filtered. Fix = brief P2.
+- **S18: everything waiting on Dhruv is in `book-buddha/REVIEW_PACK_S18.md`** (I-1, Q16 installs, R14-1, S17-10 edge, F2, REV calls).
 - For REV:
   - The settlement discount is stored only on the posted entry (no column).
   - F builder's own calls (decisions.md "F plan").
@@ -52,4 +51,6 @@
 <!-- END OF SUMMARY - the session-start hook loads only what is above this line -->
 
 ## Live briefs (one or two lines each; full text in BUILD_PLAN_S18.md §3)
-- None running at session end. Next: G (serial) + P1, P2, I-1, Q16-1, R14-1 in parallel.
+- S18 (22 Nov): **P1** done (App.tsx number boxes removed) · **P2** done (`/imports/last?companyId=` required, +1 test) · **I-1, Q16-1, R14-1** research done → REVIEW_PACK_S18.md. Gates: tsc 0 · 1,135 / 97 · vite OK. Uncommitted.
+- **G** BUILT + verified by orchestrator: tsc 0 · 1,257 / 98 · October 22/22 · vite OK. 30 doors, shared `assertPostable` (FY lock first). Orchestrator fixed the opening-import gap (import-masters.ts, +1 test, proven red without it). Open for REV: bank-feed preview of a past-month line returns 400 without the confirm; some test pins precede their documents.
+- **S18-1** BUILT + verified: refused at create and at finalize (no draft-edit door exists for bills). Gates tsc 0 · **1,262 / 98** · October 22/22. The agent-pair run failed in 6 s: PS 5.1 splits a quoted prompt, `agent-pair-worker.ps1:30/34`.

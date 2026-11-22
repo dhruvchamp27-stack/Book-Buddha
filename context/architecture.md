@@ -154,6 +154,14 @@ New folder `src/import-export/`; **no migration** (still v22). Every write goes 
 *Note: `book-buddha/CLAUDE_FINISHING_PLAN.md` was NOT read and may govern the
 prototype's own next steps — read it before acting on the prototype.*
 
+## Clock and back-dating (G, built S18)
+- One settable "today" per database: `new AccountingRepository(path, { today })` (default IST via
+  `istDateOf()`), `buildApi(repo, { today })`; banking modules read it with `todayOf(db)` (`ist-date.ts`).
+- Every dated posting door calls `assertPostable` (repository.ts): FY lock FIRST (absolute), then
+  `assertBackdatedConfirmed` — an earlier calendar month than today needs `confirmBackdatedMonth: true`.
+  History items (F) return before both. Imports: preview flags rows, commit is the confirmation.
+- Tests pin today with `todayAt(date)` / `moveToday(repo, date)` from `src/database/test-clock.ts`.
+
 ## Slice definitions (moved from Progress.md, S17-11; condensed)
 
 ### §13 reports 1–6 (REPORT_DEFINITIONS_S12, built session 13)
