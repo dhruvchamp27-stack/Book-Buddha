@@ -111,7 +111,6 @@ export function App() {
   const [yearEndsOn, setYearEndsOn] = useState("");
   const [invoices, setInvoices] = useState<InvoiceSummary[]>([]);
   const [invoice, setInvoice] = useState<Invoice | null>(null);
-  const [invoiceNumber, setInvoiceNumber] = useState("");
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
   const [dueDate, setDueDate] = useState("");
   const [discountPaise, setDiscountPaise] = useState(0);
@@ -160,7 +159,6 @@ export function App() {
   const [creditNotes, setCreditNotes] = useState<CreditNoteSummary[]>([]);
   const [returnedByItem, setReturnedByItem] = useState<Record<string, number>>({});
   const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({});
-  const [creditNoteNumber, setCreditNoteNumber] = useState("");
   const [creditNoteReason, setCreditNoteReason] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -203,7 +201,6 @@ export function App() {
     await run(async () => {
       const selected = await api<Invoice>(`/invoices/${encodeURIComponent(id)}`);
       setInvoice(selected);
-      setInvoiceNumber(selected.number);
       setInvoiceDate(selected.invoiceDate ?? new Date().toISOString().slice(0, 10));
       setDueDate(selected.dueDate ?? "");
       setDiscountPaise(selected.discountPaise ?? 0);
@@ -292,7 +289,6 @@ export function App() {
         throw new Error("Every invoice line needs a description.");
       }
       const payload = {
-        number: invoiceNumber.trim() || `INV-${Date.now()}`,
         businessId,
         customerId,
         paymentAccount,
@@ -321,7 +317,6 @@ export function App() {
         }),
         });
       setInvoice(saved);
-      setInvoiceNumber(saved.number);
       setInvoiceDate(saved.invoiceDate ?? invoiceDate);
       setDueDate(saved.dueDate ?? "");
       setDiscountPaise(saved.discountPaise ?? 0);
@@ -462,9 +457,9 @@ export function App() {
       if (!creditNoteReason.trim()) throw new Error("Enter a reason for the return.");
       await api<CreditNote>("/credit-notes", {
         method: "POST",
-        body: JSON.stringify({ invoiceId: invoice.id, number: creditNoteNumber.trim() || `CN-${Date.now()}`, reason: creditNoteReason.trim(), lines }),
+        body: JSON.stringify({ invoiceId: invoice.id, reason: creditNoteReason.trim(), lines }),
       });
-      setReturnQuantities({}); setCreditNoteNumber(""); setCreditNoteReason("");
+      setReturnQuantities({}); setCreditNoteReason("");
       await loadCreditNotes(invoice.id);
       setMessage("Draft credit note saved. Finalize it to post the return.");
     });
@@ -678,7 +673,7 @@ export function App() {
           <label>Company name<input name="companyName" defaultValue="My Company" required /></label><label>Accounting basis<select name="accountingBasis" defaultValue="ACCRUAL"><option value="ACCRUAL">Accrual basis</option><option value="CASH">Cash basis</option></select></label><label>Business name<input name="businessName" defaultValue="My Business" required /></label><label>Customer name<input name="customerName" defaultValue="Sample Customer" required /></label><label>Item name<input name="itemName" defaultValue="Sample Book" required /></label><label>Item unit<input name="itemUnit" defaultValue="each" required /></label><label className="check"><input name="trackStock" type="checkbox" defaultChecked /> Track stock</label><button className="primary" disabled={busy}>Save new setup</button>
         </form></article>
         <article className="card"><p className="eyebrow">Sales</p><h3>Invoice lifecycle</h3><form onSubmit={submitInvoice} className="form">
-          <div className="form-row"><label>Invoice number<input value={invoiceNumber} placeholder={`INV-${Date.now()}`} onChange={(event) => setInvoiceNumber(event.target.value)} required /></label><label>Invoice date<input type="date" value={invoiceDate} onChange={(event) => setInvoiceDate(event.target.value)} required /></label><label>Due date<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label></div>
+          <div className="form-row">{invoice && <label>Invoice number<input value={invoice.number} readOnly /></label>}<label>Invoice date<input type="date" value={invoiceDate} onChange={(event) => setInvoiceDate(event.target.value)} required /></label><label>Due date<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label></div>
           <div className="form-row"><label>Discount (₹)<input type="number" min="0" step="0.01" value={discountPaise / 100} onChange={(event) => setDiscountPaise(Math.round(Number(event.target.value) * 100))} /></label><label>Extra charge (₹)<input type="number" min="0" step="0.01" value={extraChargePaise / 100} onChange={(event) => setExtraChargePaise(Math.round(Number(event.target.value) * 100))} /></label><label>Payment terms<input value={paymentTerms} onChange={(event) => setPaymentTerms(event.target.value)} placeholder="e.g. Due in 30 days" /></label></div>
           <div className="form-row"><label>Tax type<select value={taxType} onChange={(event) => setTaxType(event.target.value as typeof taxType)}><option value="NONE">No tax</option><option value="CGST_SGST">CGST + SGST</option><option value="IGST">IGST</option></select></label><label>GST rate (%)<input type="number" min="0" max="100" step="0.01" value={taxRateBasisPoints / 100} onChange={(event) => setTaxRateBasisPoints(Math.round(Number(event.target.value) * 100))} disabled={taxType === "NONE"} /></label></div>
           <label>Notes<textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} placeholder="Optional customer-facing notes" /></label>
@@ -701,7 +696,7 @@ export function App() {
       </section>
       {invoice?.status === "FINALIZED" && <section className="card"><p className="eyebrow">Sales returns</p><h3>Credit note for {invoice.number}</h3>
         <form onSubmit={submitCreditNote} className="form">
-          <div className="form-row"><label>Credit note number<input value={creditNoteNumber} placeholder="CN-…" onChange={(event) => setCreditNoteNumber(event.target.value)} /></label><label>Reason<input value={creditNoteReason} onChange={(event) => setCreditNoteReason(event.target.value)} placeholder="e.g. Damaged copies returned" required /></label></div>
+          <div className="form-row"><label>Reason<input value={creditNoteReason} onChange={(event) => setCreditNoteReason(event.target.value)} placeholder="e.g. Damaged copies returned" required /></label></div>
           <div className="line-editor">
             {invoice.lines.map((line, index) => (
               <div className="line-row" key={index}>
