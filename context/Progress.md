@@ -34,6 +34,7 @@
 
 ## Known issues / review items
 - **ON HOLD (Dhruv checking):** a bill discount equal to the stock value on an all-stock bill saves but cannot finalize. Options are in decisions.md (S17-10 edge).
+- **F2 (ask Dhruv):** saving an opening set dated after posted documents is unchecked, so they double count silently. Reversing the last set leaves history items with no opening figure. Proposed: warn with a count + confirm (BUILD_PLAN_S18.md §1).
 - Old React screen `web/src/App.tsx` sends `number` → 400. Fix = brief P1 (S17-13(3)).
 - `GET /imports/last` is not company-filtered. Fix = brief P2.
 - For REV:

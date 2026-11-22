@@ -19,7 +19,7 @@ Rules: an **ACCEPTANCE** test going red = STOP and look, never edit its figures 
 | 22 Nov (after C, D, H, E, v30–v32) | 0 | 1,100 / 95 | 1.36 s | latest measured; October e2e 22/22; R10 2,000-invoice 6.4 s; cash-basis fuzz 11.1 s under load (watch) |
 | 22 Nov (after A + B) | 0 | 1,068 / 93 | 1.46 s | migration v29 then |
 | 22 Nov baseline | 0 | 1,060 / 93 | 1.54 s | before any session-17 change |
-Run the full suite again after S17-10.
+Latest row = state at session 17 close (commit 451f9ab). Wall-clock tests to pin in G: `purchase-returns.test.ts` (`PR-001/26-27`), `server.test.ts` number regexes.
 
 ## Gate history
 | When | Tests / files | vite | What changed |

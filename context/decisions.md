@@ -62,7 +62,7 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
   accepts and ignores a "Before opening" column (history always decided from the date).
 **Build work still open (see Progress.md live briefs for order)**
 - R10 follow-ups: .xlsx import/export and PDF export need a package install (Q16: name each package + size, ask first).
-- Pre-opening documents/payments kept as HISTORY (S16-2(c), Q13) · back-dating confirm on every dated entry (Q12) · GST per line (Q24) · round-off line (Q23).
+- Pre-opening HISTORY: BUILT (F, 22 Nov); F2 open (see BUILD_PLAN_S18.md §1). Still to build: back-dating confirm on every dated entry (Q12) · GST per line (Q24) · round-off line (Q23). The full order is in `book-buddha/BUILD_PLAN_S18.md`.
 **From todos.md (seeded 14 Nov; may be stale)**
 - FD §H listed as open: archive scope; auto-record payment on a bank match; whether the Uncategorized account is auto-created or named by the owner (section header says closed — confirm).
 - Subscriptions deferred (S1-5). Outside advisers: CA (principal vs agent on magazine resale, GST timing, "Exempt" scope); lawyer (buyer personal data under DPDP Rules 2025). The old todos.md build order is superseded by HOT.md.
@@ -83,7 +83,10 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
   (3) Old React screen `web/src/App.tsx`: remove the invoice-number and credit-note-number boxes as a small
   fix (like Q22); no other screen work. Full plan + briefs: `book-buddha/BUILD_PLAN_S18.md`.
 
-- **S17-12 (2026-11-22) — HIS RULINGS ON F (pre-opening history; plan above approved as proposed).**
+- **S17-12 (2026-11-22) — HIS RULINGS ON F (pre-opening history): his answers to the four questions
+  below. The F plan's other defaults were NOT ruled by him: the frozen flag; a warning with a count
+  before saving an opening set dated after posted documents; the same before reversing the last opening
+  set. They are open as F2 in `book-buddha/BUILD_PLAN_S18.md` §1.**
   (1) A payment dated AFTER the opening date on a history invoice/bill is REFUSED: "record it as a receipt
   against the customer's / settlement against the supplier's opening balance". (2) A credit note or
   purchase return against a history document is REFUSED, pointing to the opening balance. (3) A history

@@ -28,7 +28,9 @@ The October ACCEPTANCE test (`src/e2e/october.e2e.test.ts`) must stay green.
 ## Waiting on him
 1. **ON HOLD (he is checking):** a bill discount EQUAL to the stock value on an ALL-stock bill saves but
    cannot finalize. Options are in decisions.md (S17-10 edge); refusing it is recommended.
-2. At their step: the I-1 mini-spec · Q16 packages + sizes · R14 mini-spec · REV rulings · TST workings.
+2. **F2:** a warning with a count + confirm before saving an opening set dated after posted documents,
+   and before reversing the last set. Not ruled; plan §1.
+3. At their step: the I-1 mini-spec · Q16 packages + sizes · R14 mini-spec · REV rulings · TST workings.
 **Still NO real database (S11-16)** — never touch his file.
 
 ## Corrections that must not be re-inherited

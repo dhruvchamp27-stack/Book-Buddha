@@ -41,6 +41,18 @@ parallel with anything.
 | 8 | **TST** tests: gap map, new tests, hand-check workings for Dhruv | builder | no | — |
 | 9 | Session end: context files, commit (announce), push (ask) | orchestrator | — | — |
 
+**Not yet ruled. Ask Dhruv, then run brief F2 (serial on repository.ts, after G):**
+- **F2: opening sets vs documents already posted.** Saving an opening set dated ON or AFTER documents
+  that were already posted is not checked today (`saveOpeningBalances`, `saveOpeningCustomerBalance`,
+  `saveOpeningSupplierBalance`, repository.ts about 7214, 7417, 7647), so those documents count twice
+  silently. Reversing the last live opening set (`reverseOpening*`, about 7323, 7508, 7706) leaves
+  history items with no opening figure behind them.
+- **Proposed in the F plan; he has NOT ruled:**
+  - Warn with a count, and require a confirm, before saving an opening set dated on or after posted
+    documents. The documents are left alone.
+  - Show the count of history items, and require a confirm, before reversing the last live set.
+  - The flag stays frozen; nothing flips automatically.
+
 **On hold (no brief until Dhruv rules):**
 - S17-10 edge: a bill discount equal to the stock value on an all-stock bill. The options are in
   `decisions.md`; refusing it is recommended.
@@ -95,8 +107,17 @@ own last import.
 1. **Clock.** The app gets one settable "today" (IST). Add an option to the repository, for example
    `new AccountingRepository(path, { today?: () => string })` (ISO `YYYY-MM-DD`, default
    `istDateOf()`), plus a pass-through in `buildApi`. Route EVERY "today" decision in the backend
-   through it. There are 29 non-test calls to `istDateOf()`; list each and say whether it is a
-   "today" decision. Do not change `istDateOf(instant)` calls that convert a stored timestamp.
+   through it.
+   - There are 29 non-test calls to `istDateOf()`; list each and say whether it is a "today" decision.
+   - ALSO sweep `new Date()` used as "today": for example `generateDueInvoices` defaults `asOfDate` to
+     `new Date().toISOString().slice(0, 10)`. Note that this gives the UTC date, not IST.
+   - Do not change `istDateOf(instant)` calls that convert a stored timestamp. Do not change
+     `new Date().toISOString()` used as an audit timestamp.
+   - **Wall-clock tests to pin:**
+     - `src/database/purchase-returns.test.ts` expects `PR-001/26-27`. It follows the real date and goes
+       red on 1 April 2027.
+     - `src/api/server.test.ts` matches its invoice and CN numbers with a regex for the same reason.
+     - Pin both through the clock.
 2. **Rule (Q12).** An entry is back-dated when its date is in an EARLIER CALENDAR MONTH than today.
    Posting it needs an explicit confirm, `confirmBackdatedMonth: true`. Today only `finalizeCreditNote`
    has this (repository.ts about 2378). Mirror its message style for every door:
@@ -180,11 +201,56 @@ The mini-spec must answer, each with a recommended default and a hand-worked exa
 - Put the mini-spec to Dhruv briefly: questions in the chat, the full text into `decisions.md`.
 - After his yes, write the I-2 brief from it. Pattern: like the F research → plan → S17-12 → build.
 
+### Build-brief skeleton (use it for I-2, Q16-2, R14-2, F2 and FIX)
+These five briefs CANNOT be written yet, because each depends on a mini-spec, an install approval, a
+ruling or the review findings. Fill this skeleton once that input exists. It is the shape the F builder
+used in session 17.
+```
+You are the builder for <part> on Book Buddha (TypeScript / better-sqlite3 / Fastify),
+repo C:\Users\Admin\Desktop\Book Buddha\book-buddha. Work only inside that folder. Backend only
+unless stated.
+## Goal — rulings <ids from decisions.md>
+<what the owner ruled, in his words where possible; the hand-worked example>
+**Schema is DONE by the orchestrator — do not change it:** <schema file + migration vN, columns>
+## Behaviour to build
+1. <each door / method, file:line (approximate; confirm with Grep)>, refusal messages word for word
+2. <read paths that must change, file:line>  3. <API schema fields>  4. <imports/exports>
+5. Out of scope: <list>
+## Tests (new file <name>.test.ts + an HTTP case)
+- hand figure: <figures> · each refusal with its exact message · each read path · October stays green
+## Rules (hard) — paste §2 of BUILD_PLAN_S18.md
+Files you MAY change: <list>. Do NOT touch migrations.ts, *-schema.ts, october.e2e.test.ts,
+context/, web/.
+## Done when
+tsc exit 0 · vitest all green (was <n> tests / <f> files; report new count).
+Report: files changed + why, read paths changed (file:line), exact messages, tests added,
+existing tests changed + why, your own calls.
+```
+
 ### I-2 — GST per line + round-off: build (v34)
-Write this brief from the approved I-1 mini-spec. Template: the F builder brief (session 17
-transcript). It covers the schema file `src/database/line-tax-schema.ts`, which the orchestrator
-registers as v34; the engine; the repository; the reports; import/export; the API; and the tests from
-I-1 §6.
+Fill the skeleton from the approved I-1 mini-spec. The schema file is `src/database/line-tax-schema.ts`
+(the orchestrator registers it as v34). The brief covers the engine, the repository, the reports,
+import/export, the API, and the tests from I-1 §6.
+
+### Q16-2 — .xlsx and PDF build (after Dhruv approves the installs)
+Fill the skeleton from the Q16-1 recommendation:
+- xlsx read and write through the codec (`codec.ts`), with the same field mapping as CSV;
+- PDF export for every report (Q18);
+- tests that round-trip an xlsx file and check each PDF opens and carries its totals.
+The files are `src/import-export/*`, `src/api/export-routes.ts` and `import-routes.ts`, plus tests.
+No `repository.ts`.
+
+### R14-2 — archive build (v35)
+Fill the skeleton from the approved R14-1 mini-spec. The schema file is
+`src/database/master-status-schema.ts` (the orchestrator registers it as v35).
+
+### F2 — opening sets vs posted documents and history (after Dhruv rules; see §1)
+Fill the skeleton from his ruling. The doors are the three save and three reverse opening-balance
+methods. Confirm flags go on their routes.
+
+### FIX — after REV
+Fill the skeleton with the findings the orchestrator has verified, one numbered item each:
+file:line, failure scenario, required fix, and a test that fails before the fix and passes after.
 
 ### Q16-1 — .xlsx and PDF packages: research (READ-ONLY, no install) (Q16)
 **Goal:** Q16 was approved IN PRINCIPLE: name each package and its size, then ask before installing.
