@@ -52,7 +52,11 @@ function world() {
   repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 10, unitCostPaise: PAISE(50), businessId: bizA });
   repository.addStockMovement({ itemId: banyan, movementType: "OPENING", quantity: 5, unitCostPaise: PAISE(20), businessId: bizB });
   at("2026-03-05");
-  repository.addStockMovement({ itemId: atlas, movementType: "PURCHASE", quantity: 5, unitCostPaise: PAISE(60) });
+  // S17: the door refuses a bare PURCHASE, so this old-database shape (source-less, posts nothing)
+  // is inserted by hand. Every figure below is unchanged.
+  repository.db
+    .prepare("INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES ('legacy-purchase', ?, NULL, 'PURCHASE', 5, ?, ?)")
+    .run(atlas, PAISE(60), new Date().toISOString());
   at("2026-03-10");
   invoice("INV-S1", bizA, alpha, atlas, 4, 100, "2026-03-10", fair1);
   at("2026-03-11");

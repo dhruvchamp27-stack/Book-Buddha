@@ -266,7 +266,7 @@ describe("over HTTP", () => {
       const created = await app.inject({
         method: "POST", url: "/credit-notes",
         payload: {
-          invoiceId: "INV-1", number: "CN-1", reason: "Returned", noteDate: "2026-01-20",
+          invoiceId: "INV-1", reason: "Returned", noteDate: "2026-01-20",
           lines: [{ itemId: w.itemId, description: "Design", quantity: 1, unitPricePaise: 100000 }],
         },
       });
@@ -284,7 +284,7 @@ describe("over HTTP", () => {
       const bad = await app.inject({
         method: "POST", url: "/credit-notes",
         payload: {
-          invoiceId: "INV-1", number: "CN-2", reason: "Returned", noteDate: "20 Jan",
+          invoiceId: "INV-1", reason: "Returned", noteDate: "20 Jan",
           lines: [{ itemId: w.itemId, description: "Design", quantity: 1, unitPricePaise: 100 }],
         },
       });

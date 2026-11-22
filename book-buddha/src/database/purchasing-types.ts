@@ -110,6 +110,8 @@ export interface PurchaseBillRecord {
   /** taxable + tax: what the supplier is actually owed. */
   readonly totalPaise: number;
   readonly paidPaise: number;
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening: boolean;
 }
 
 export interface ExpenseInput {
@@ -147,12 +149,22 @@ export interface ExpenseRecord {
   readonly taxPaise: number;
   readonly totalPaise: number;
   readonly paidPaise: number;
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening: boolean;
 }
 
 export interface SupplierPaymentInput {
+  /** F: confirm that a payment dated on or before the opening date is kept as history (not posted). */
+  readonly confirmBeforeOpening?: boolean;
   readonly billId?: string;
   readonly expenseId?: string;
+  /** The money that actually leaves the money account. */
   readonly amountPaise: number;
+  /**
+   * Q2 / S17-7. A discount the supplier allows AT PAYMENT (whole paise, >= 0): "Discount received"
+   * income. The document is settled by amount + discount; only `amountPaise` leaves the account.
+   */
+  readonly settlementDiscountPaise?: number;
   /** Business date the money moved (YYYY-MM-DD, IST). Defaults to today. */
   readonly paidOn?: string;
 }
@@ -204,7 +216,8 @@ export interface PurchaseReturnLine {
 export interface PurchaseReturnInput {
   readonly id?: string;
   readonly billId: string;
-  readonly number: string;
+  /** S17-4: the app numbers a purchase return (PR-001/25-26); given only by the import path. */
+  readonly number?: string;
   readonly reason: string;
   /**
    * YYYY-MM-DD, the day the goods actually went back. Defaults to today (IST).
@@ -227,6 +240,8 @@ export interface PurchaseReturnRecord {
   readonly lines: readonly PurchaseReturnLine[];
   /** The lines: what the goods were billed at. */
   readonly valuePaise: number;
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening: boolean;
 }
 
 /** What a finalized return is worth back from the supplier, and how much is still undischarged. */

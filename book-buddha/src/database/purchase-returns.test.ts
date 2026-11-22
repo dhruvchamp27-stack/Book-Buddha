@@ -553,13 +553,13 @@ describe("R8: over HTTP", () => {
       const created = await app.inject({
         method: "POST", url: "/purchase-returns",
         payload: {
-          billId: bill.id, number: "PR-1", reason: "Faulty", returnDate: "2026-05-15",
+          billId: bill.id, reason: "Faulty", returnDate: "2026-05-15",
           lines: [{ itemId, description: "Novel", quantity: 4, unitPricePaise: 10000 }],
         },
       });
       expect(created.statusCode).toBe(201);
       const ret = created.json() as { id: string; status: string; valuePaise: number };
-      expect(ret).toMatchObject({ status: "DRAFT", valuePaise: 40000 });
+      expect(ret).toMatchObject({ status: "DRAFT", valuePaise: 40000, number: "PR-001/26-27" });
 
       expect((await app.inject({ method: "POST", url: `/purchase-returns/${ret.id}/finalize` })).statusCode).toBe(200);
       expect((await app.inject({ method: "GET", url: `/purchase-returns/${ret.id}/balance` })).json())
@@ -579,7 +579,7 @@ describe("R8: over HTTP", () => {
       const bad = await app.inject({
         method: "POST", url: "/purchase-returns",
         payload: {
-          billId: bill.id, number: "PR-2", reason: "Faulty",
+          billId: bill.id, reason: "Faulty",
           lines: [{ itemId, description: "Novel", quantity: 99, unitPricePaise: 10000 }],
         },
       });

@@ -72,7 +72,7 @@ describe("ACCEPTANCE R12 set one: HDFC October, end to end over HTTP", () => {
     expect(trf.number).toBe("TRF-001/25-26");
 
     // ---- 8 Oct: customer pays Rs 23,600 by NEFT into HDFC (12b).
-    await post("/invoices", { id: "inv-a", number: "INV-001", businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(23_600) }] });
+    await post("/invoices", { id: "inv-a",businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(23_600) }] });
     await post("/invoices/inv-a/finalize", {}, 200);
     const neft = await post<{ id: string; moneyAccount: string; paymentMode: string; paymentReference: string }>(
       "/invoices/inv-a/payments", { amountPaise: RS(23_600), paidOn: "2025-10-08", moneyAccount: HDFC, paymentMode: "NEFT", paymentReference: "UTR8OCT" },
@@ -89,7 +89,7 @@ describe("ACCEPTANCE R12 set one: HDFC October, end to end over HTTP", () => {
     await post(`/expenses/${expense.id}/finalize`, {}, 200);
 
     // ---- 28 Oct: customer cheque Rs 5,900 deposited into HDFC (clears in November).
-    await post("/invoices", { id: "inv-b", number: "INV-002", businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-25", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(5_900) }] });
+    await post("/invoices", { id: "inv-b",businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-25", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(5_900) }] });
     await post("/invoices/inv-b/finalize", {}, 200);
     await post("/invoices/inv-b/payments", { amountPaise: RS(5_900), paidOn: "2025-10-28", moneyAccount: HDFC, paymentMode: "CHEQUE", paymentReference: "CHQ 778812" });
 

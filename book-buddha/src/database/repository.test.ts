@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import type { Invoice } from "../accounting/types.js";
+import { financialYearLabel } from "../banking/internal-transfers.js";
 
 function createRepository(): AccountingRepository {
   return new AccountingRepository();
@@ -59,8 +60,12 @@ describe("AccountingRepository", () => {
 
       expect(converted.status).toBe("DRAFT");
       expect(converted.id).not.toBe(quotation.id);
-      expect(converted.number).toBe("INV-QUO-001");
+      // S17-4/S17-8: the next INV number (the quotation's own QUO-001 is a different series), linked both ways.
+      expect(converted.number).toBe(`INV-001/${financialYearLabel(converted.invoiceDate ?? "")}`);
       expect(repository.getInvoice(quotation.id).convertedInvoiceId).toBe(converted.id);
+      expect(repository.getInvoice(converted.id).sourceQuotationId).toBe(quotation.id);
+      expect(repository.getInvoice(quotation.id).convertedInvoiceIds).toEqual([converted.id]);
+      expect(repository.getInvoice(quotation.id).sourceQuotationId).toBeNull();
       expect(() => repository.convertQuotation(quotation.id)).toThrow("already been converted");
     } finally {
       repository.close();
@@ -309,7 +314,11 @@ describe("AccountingRepository", () => {
       const customerId = repository.createCustomer({ companyId, name: "Stock Customer" });
       const itemId = repository.createItem({ companyId, name: "Stock Book", unit: "each", trackStock: true });
       repository.addStockMovement({ itemId, movementType: "OPENING", quantity: 2, unitCostPaise: 1000 });
-      repository.addStockMovement({ itemId, movementType: "PURCHASE", quantity: 2, unitCostPaise: 1500 });
+      // S17: the door refuses a bare PURCHASE, so this old-database shape (a source-less PURCHASE
+      // row that posted nothing) is inserted by hand. Every figure below is unchanged.
+      repository.db
+        .prepare("INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES ('legacy-purchase', ?, NULL, 'PURCHASE', 2, 1500, ?)")
+        .run(itemId, new Date().toISOString());
       const invoice: Invoice = {
         id: "stock-invoice",
         number: "INV-STOCK",

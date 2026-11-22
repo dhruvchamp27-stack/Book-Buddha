@@ -103,7 +103,7 @@ export function buildCustomerStatement(db: Database.Database, filter: CustomerSt
 
   const payments = db.prepare(
     `SELECT id, amount_paise, date(paid_at, '+330 minutes') AS on_date
-       FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL ORDER BY rowid`,
+       FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL AND before_opening = 0 ORDER BY rowid`,
   );
   const applications = db.prepare(
     `SELECT a.id, a.amount_paise, a.applied_on, cn.number
@@ -188,7 +188,7 @@ export function buildCustomerStatement(db: Database.Database, filter: CustomerSt
  * through the note's own invoice. A cancelled note owes nothing (its entries are reversed).
  */
 function unappliedCredit(db: Database.Database, filter: CustomerStatementFilter): number {
-  const conditions: string[] = ["cn.status = 'FINALIZED'", "i.customer_id = ?"];
+  const conditions: string[] = ["cn.status = 'FINALIZED'", "cn.before_opening = 0", "i.customer_id = ?"];
   const params: string[] = [filter.customerId];
   if (filter.businessId !== undefined) { conditions.push("i.business_id = ?"); params.push(filter.businessId); }
   if (filter.fairId !== undefined) { conditions.push("i.fair_id = ?"); params.push(filter.fairId); }

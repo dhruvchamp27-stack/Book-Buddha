@@ -73,12 +73,12 @@ describe("ACCEPTANCE R12 set two: HDFC October from the bank's own statement, en
       lines: [{ account: HDFC, debitPaise: RS(50_000), creditPaise: 0 }, { account: "CASH", debitPaise: RS(20_000), creditPaise: 0 }],
     }, 201);
     await call("POST", "/internal-transfers", { businessId, date: "2025-10-03", fromAccount: "CASH", toAccount: HDFC, amountPaise: RS(12_000), memo: "Fair cash banked" }, 201);
-    await call("POST", "/invoices", { id: "inv-a", number: "INV-001", businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(23_600) }] }, 201);
+    await call("POST", "/invoices", { id: "inv-a",businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(23_600) }] }, 201);
     await call("POST", "/invoices/inv-a/finalize", {});
     const bill = await call<{ id: string }>("POST", "/purchase-bills", { businessId, supplierId, number: "PB-001", billDate: "2025-10-10", paymentAccount: "PAYABLES", lines: [{ description: "Paper", quantity: 1, unitPricePaise: RS(18_000) }] }, 201);
     await call("POST", `/purchase-bills/${bill.id}/finalize`, {});
     await call("POST", "/supplier-payments", { billId: bill.id, amountPaise: RS(18_000), paidOn: "2025-10-15", moneyAccount: HDFC, paymentMode: "CHEQUE", paymentReference: "CHQ 000451" }, 201);
-    await call("POST", "/invoices", { id: "inv-b", number: "INV-002", businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-25", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(5_900) }] }, 201);
+    await call("POST", "/invoices", { id: "inv-b",businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-25", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(5_900) }] }, 201);
     await call("POST", "/invoices/inv-b/finalize", {});
     await call("POST", "/invoices/inv-b/payments", { amountPaise: RS(5_900), paidOn: "2025-10-28", moneyAccount: HDFC, paymentMode: "CHEQUE" }, 201);
 
@@ -125,7 +125,7 @@ describe("ACCEPTANCE R12 set two: HDFC October from the bank's own statement, en
 
     // NEFT: matched to the open invoice. Asked first (confirm false writes nothing), then posted.
     const neftMatches = await call<{ documents: Array<{ id: string; number: string; outstandingPaise: number }> }>("GET", `/bank-feed/lines/${neft}/matches`);
-    expect(neftMatches.documents[0]).toMatchObject({ id: "inv-a", number: "INV-001", outstandingPaise: RS(23_600) });
+    expect(neftMatches.documents[0]).toMatchObject({ id: "inv-a",outstandingPaise: RS(23_600) });
     const counts = (): number[] => ["journal_lines", "payments", "bank_statement_line_links", "audit_events"].map(count);
     const beforeAsk = counts();
     const asked = await call<{ confirmed: boolean; willPost: Array<{ lines: Array<{ account: string; debitPaise: number; creditPaise: number }> }> }>(

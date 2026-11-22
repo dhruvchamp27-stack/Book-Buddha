@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CreditNote, Invoice } from "../accounting/types.js";
 import { migrations, runMigrations } from "../database/migrations.js";
+import { verifyAuditChain } from "../database/audit-log.js";
 import { AccountingRepository } from "../database/repository.js";
 import {
   BACKUP_ID_PATTERN,
@@ -110,6 +111,9 @@ describe("backup of real books", () => {
 
     const restored = track(new AccountingRepository(target));
     expect(figures(restored)).toEqual(before);
+    const restoredEvents = restored.db.prepare("SELECT entity_id, entity_type FROM audit_events WHERE action = 'backup.restored'").all();
+    expect(restoredEvents).toEqual([{ entity_id: manifest.id, entity_type: "backup" }]);
+    expect(verifyAuditChain(restored.db).ok).toBe(true);
     restored.close();
   });
 

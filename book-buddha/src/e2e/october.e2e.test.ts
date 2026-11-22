@@ -178,7 +178,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
   it("events 5-7 (2-6 Oct): INV-001, Internal Transfer, opening supplier balance paid in cash", async () => {
     // Event 5 + 5a: INV-001 to Raman on credit, 118 Novel A at Rs 200.
     const inv1 = await call<{ id: string }>("POST", "/invoices", {
-      id: "inv-001", number: "INV-001", businessId: w.businessId, customerId: w.raman, paymentAccount: "RECEIVABLES",
+      id: "inv-001", businessId: w.businessId, customerId: w.raman, paymentAccount: "RECEIVABLES",
       invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0,
       lines: [{ itemId: w.novel, description: "Novel A", quantity: 118, unitPricePaise: RS(200) }],
     }, 201);
@@ -241,7 +241,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
 
     // Event 8: the 23,600 NEFT (ref UTR123) is matched to INV-001: this is the payment. Asked first (writes nothing), then done.
     const neftMatches = await call<{ documents: Array<{ id: string; number: string; outstandingPaise: number }> }>("GET", `/bank-feed/lines/${neft}/matches`);
-    expect(neftMatches.documents.find((d) => d.number === "INV-001")).toMatchObject({ id: "inv-001", outstandingPaise: RS(23_600) });
+    expect(neftMatches.documents.find((d) => d.number === "INV-001/25-26")).toMatchObject({ id: "inv-001", outstandingPaise: RS(23_600) });
     const docs = [{ kind: "INVOICE", id: "inv-001", amountPaise: RS(23_600) }];
     const asked = await call<{ confirmed: boolean; willPost: Array<{ lines: Array<{ account: string; debitPaise: number; creditPaise: number }> }> }>(
       "POST", `/bank-feed/lines/${neft}/match`, { documents: docs, paymentMode: "NEFT", confirm: false },
@@ -275,7 +275,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
     await call("POST", `/purchase-bills/${w.pb002}/finalize`, {});
     // Event 12: PR-001, 10 Novel A returned to Om at Rs 150. PB-001 is already paid, so it becomes a supplier credit.
     const pr001 = await call<{ id: string }>("POST", "/purchase-returns", {
-      billId: w.pb001, number: "PR-001", reason: "Damaged copies", returnDate: "2025-10-18",
+      billId: w.pb001, reason: "Damaged copies", returnDate: "2025-10-18",
       lines: [{ itemId: w.novel, description: "Novel A", quantity: 10, unitPricePaise: RS(150) }],
     }, 201);
     w.pr001 = pr001.id;
@@ -305,14 +305,14 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
 
     // Events 14 + 14a (21 Oct): INV-002, fair walk-in, paid in cash, 30 Novel A at Rs 200.
     await call("POST", "/invoices", {
-      id: "inv-002", number: "INV-002", businessId: w.businessId, customerId: w.sunrise, buyerName: "Walk-in buyer", paymentAccount: "CASH", moneyAccount: "CASH", fairId: w.fairId,
+      id: "inv-002", businessId: w.businessId, customerId: w.sunrise, buyerName: "Walk-in buyer", paymentAccount: "CASH", moneyAccount: "CASH", fairId: w.fairId,
       invoiceDate: "2025-10-21", taxType: "NONE", taxRateBasisPoints: 0,
       lines: [{ itemId: w.novel, description: "Novel A", quantity: 30, unitPricePaise: RS(200) }],
     }, 201);
     await call("POST", "/invoices/inv-002/finalize", {});
     // Events 15 + 15a (21 Oct): INV-003, fair walk-in, paid in cash, 50 Notebooks at Rs 40 + GST 18%.
     await call("POST", "/invoices", {
-      id: "inv-003", number: "INV-003", businessId: w.businessId, customerId: w.sunrise, buyerName: "Walk-in buyer", paymentAccount: "CASH", moneyAccount: "CASH", fairId: w.fairId,
+      id: "inv-003", businessId: w.businessId, customerId: w.sunrise, buyerName: "Walk-in buyer", paymentAccount: "CASH", moneyAccount: "CASH", fairId: w.fairId,
       invoiceDate: "2025-10-21", taxType: "CGST_SGST", taxRateBasisPoints: 1800,
       lines: [{ itemId: w.notebook, description: "Notebook", quantity: 50, unitPricePaise: RS(40) }],
     }, 201);
@@ -326,7 +326,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
 
     // Events 17 + 17a (22 Oct): CN-001 on INV-002, 5 Novel A at Rs 200, cash given back at once.
     const cn = await call<{ id: string }>("POST", "/credit-notes", {
-      invoiceId: "inv-002", number: "CN-001", reason: "Customer returned 5 books", noteDate: "2025-10-22",
+      invoiceId: "inv-002", reason: "Customer returned 5 books", noteDate: "2025-10-22",
       lines: [{ itemId: w.novel, description: "Novel A", quantity: 5, unitPricePaise: RS(200) }],
     }, 201);
     await call("POST", `/credit-notes/${cn.id}/finalize`, {});
@@ -340,7 +340,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
 
     // Events 18 + 18a (22 Oct): INV-004 to Sunrise School on credit, at the fair, 20 Novel A at Rs 250.
     await call("POST", "/invoices", {
-      id: "inv-004", number: "INV-004", businessId: w.businessId, customerId: w.sunrise, paymentAccount: "RECEIVABLES", fairId: w.fairId,
+      id: "inv-004", businessId: w.businessId, customerId: w.sunrise, paymentAccount: "RECEIVABLES", fairId: w.fairId,
       invoiceDate: "2025-10-22", taxType: "NONE", taxRateBasisPoints: 0,
       lines: [{ itemId: w.novel, description: "Novel A", quantity: 20, unitPricePaise: RS(250) }],
     }, 201);
@@ -509,7 +509,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
 
   it("Receivables, Payables, Inventory valuation agree with their accounts (section 4)", async () => {
     const receivables = await call<Array<{ invoiceNumber: string; customerId: string; outstandingPaise: number }>>("GET", `/reports/receivables?businessId=${w.businessId}`);
-    expect(receivables.map((r) => [r.invoiceNumber, r.customerId, r.outstandingPaise])).toEqual([["INV-004", w.sunrise, RS(5_000)]]);
+    expect(receivables.map((r) => [r.invoiceNumber, r.customerId, r.outstandingPaise])).toEqual([["INV-004/25-26", w.sunrise, RS(5_000)]]);
     expect(receivables.reduce((t, r) => t + r.outstandingPaise, 0)).toBe(RS(5_000));
 
     const payables = await call<unknown[]>("GET", `/reports/payables?businessId=${w.businessId}`);
@@ -548,7 +548,7 @@ describe("ACCEPTANCE: October 2025 end to end (E2E-WORKINGS.md, ruling S16-5)", 
     ]);
     expect(raman.closingBalancePaise).toBe(0);
     const sunrise = await call<CustomerStatement>("GET", `/reports/customer-statement?customerId=${w.sunrise}&businessId=${w.businessId}`);
-    expect(sunrise.rows.map((r) => [r.reference, r.type, r.amountPaise])).toEqual([["INV-004", "INVOICE", RS(5_000)]]);
+    expect(sunrise.rows.map((r) => [r.reference, r.type, r.amountPaise])).toEqual([["INV-004/25-26", "INVOICE", RS(5_000)]]);
     expect(sunrise.closingBalancePaise).toBe(RS(5_000));
   });
 

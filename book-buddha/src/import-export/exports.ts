@@ -29,6 +29,18 @@
  * - journal-entries:   Entry date, Entry ID, Source type, Source ID, Description, Reversal, Account,
  *                      Debit, Credit  (one row per journal line, in entry-date order)
  * - trial-balance:     Account, Debit, Credit  (balances, one row per account)
+ * Report datasets (Q18), flattened one row per line with totals as labelled rows, each taking its
+ * /reports route's filters as query parameters (businessId, fairId, customerId, itemId, fromDate,
+ * toDate, asAtDate, basis - see REPORT_PARAMS):
+ * - profit-and-loss:   Section, Account, Debit, Credit, Amount
+ * - balance-sheet:     Section, Account, Debit, Credit, Amount
+ * - customer-statement:        Customer, Date, Type, Reference, Reversal, Amount, Balance  (customerId required)
+ * - customer-balance-detail:   Customer, Kind, Number, Date, Due date, Fair, Total, Settled, Outstanding
+ * - collections:       As at, Customer, Email, Phone, Phone 2, Kind, Number, Date, Due on, Due date basis,
+ *                      Days overdue, Fair, Total, Outstanding
+ * - stock-ageing:      As at, Item, Unit, then quantity and value per age band, Quantity, Value
+ * - inventory-valuation-detail: As at, Item, Unit, Received on, Date basis, Age days, Quantity, Unit cost, Value, Source ID
+ * - item-profitability:        Item, Unit, Net quantity, Net sales, Cost of goods sold, Gross margin
  *
  * Scope: `companyId` / `businessId` narrow every dataset. The journal comes from the general ledger
  * (Entry date is the business date, not the time it was written) and is filtered by business; a
@@ -41,17 +53,27 @@
  * columns and the same strings but is NOT prefixed: it is for programs, which do not execute formulas,
  * and it stays exactly what is in the books.
  */
-import type { AccountingRepository } from "../database/repository.js";
+import { RepositoryValidationError, type AccountingRepository, type ReportAccountRow } from "../database/repository.js";
 
 export const EXPORT_DATASETS = [
   "customers", "suppliers", "items", "invoices", "credit-notes", "payments",
   "purchase-bills", "supplier-payments", "stock-movements", "journal-entries", "trial-balance",
+  "profit-and-loss", "balance-sheet", "customer-statement", "customer-balance-detail", "collections",
+  "stock-ageing", "inventory-valuation-detail", "item-profitability",
 ] as const;
 export type ExportDataset = (typeof EXPORT_DATASETS)[number];
 
 export interface ExportScope {
   readonly companyId?: string;
   readonly businessId?: string;
+  /** Report filters (the report datasets only; see REPORT_PARAMS for who takes which). */
+  readonly fairId?: string;
+  readonly customerId?: string;
+  readonly itemId?: string;
+  readonly fromDate?: string;
+  readonly toDate?: string;
+  readonly asAtDate?: string;
+  readonly basis?: "CASH" | "ACCRUAL";
 }
 
 export interface ExportTable {
@@ -79,6 +101,8 @@ export function formatPaise(paise: number): string {
 
 const money = (paise: number | null | undefined): string => (paise === null || paise === undefined ? "" : formatPaise(paise));
 const text = (value: string | null | undefined): string => value ?? "";
+/** F: the "Before opening" cell - "Yes" for a document or payment kept as history, blank otherwise. */
+const beforeOpeningCell = (flag: boolean | undefined): string => (flag === true ? "Yes" : "");
 const yesNo = (value: boolean): string => (value ? "Yes" : "No");
 const int = (value: number | null | undefined): string => (value === null || value === undefined ? "" : String(value));
 
@@ -163,7 +187,7 @@ const itemName = (l: Lookups, itemId: string | undefined | null): string => (ite
 function invoicesTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
   const columns = [
     "Number", "Invoice date", "Due date", "Customer", "Status", "Item", "Description", "Quantity", "Unit price",
-    "Discount", "Extra charge", "Tax type", "Tax rate", "Fair", "Notes",
+    "Discount", "Extra charge", "Tax type", "Tax rate", "Fair", "Notes", "Before opening",
   ];
   const l = lookups(repository);
   const businesses = businessIdsInScope(repository, scope);
@@ -180,6 +204,7 @@ function invoicesTable(repository: AccountingRepository, scope: ExportScope): Ex
       money(invoice.discountPaise ?? 0), money(invoice.extraChargePaise ?? 0), invoice.taxType ?? "NONE",
       formatBasisPoints(invoice.taxRateBasisPoints ?? 0),
       invoice.fairId === undefined ? "" : l.fairs.get(invoice.fairId) ?? "", text(invoice.notes),
+      beforeOpeningCell(invoice.beforeOpening),
     ];
     if (invoice.lines.length === 0) rows.push([...head(), "", "", "", "", ...tail()]);
     for (const line of invoice.lines) {
@@ -190,7 +215,7 @@ function invoicesTable(repository: AccountingRepository, scope: ExportScope): Ex
 }
 
 function creditNotesTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
-  const columns = ["Number", "Credit note date", "Invoice number", "Customer", "Status", "Reason", "Item", "Description", "Quantity", "Unit price"];
+  const columns = ["Number", "Credit note date", "Invoice number", "Customer", "Status", "Reason", "Item", "Description", "Quantity", "Unit price", "Before opening"];
   const l = lookups(repository);
   const businesses = businessIdsInScope(repository, scope);
   const invoices = new Map(repository.listInvoices().filter((s) => businesses.has(s.businessId)).map((s) => [s.id, s]));
@@ -204,14 +229,14 @@ function creditNotesTable(repository: AccountingRepository, scope: ExportScope):
       note.status, note.reason,
     ];
     for (const line of note.lines) {
-      rows.push([...head(), itemName(l, line.itemId), line.description, int(line.quantity), money(line.unitPricePaise)]);
+      rows.push([...head(), itemName(l, line.itemId), line.description, int(line.quantity), money(line.unitPricePaise), beforeOpeningCell(note.beforeOpening)]);
     }
   }
   return table(columns, rows, ["Credit note date", "Quantity", "Unit price"]);
 }
 
 function paymentsTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
-  const columns = ["Payment ID", "Invoice number", "Customer", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason", "Money account", "Payment mode", "Reference"];
+  const columns = ["Payment ID", "Invoice number", "Customer", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason", "Money account", "Payment mode", "Reference", "Before opening"];
   const l = lookups(repository);
   const businesses = businessIdsInScope(repository, scope);
   const rows: string[][] = [];
@@ -221,7 +246,7 @@ function paymentsTable(repository: AccountingRepository, scope: ExportScope): Ex
       rows.push([
         p.id, summary.number, l.customers.get(summary.customerId) ?? "", isoDay(p.paidAt), money(p.amountPaise),
         p.paymentAccount, p.cancelledAt === null ? "Active" : "Cancelled", isoDay(p.cancelledAt), text(p.cancellationReason),
-        p.moneyAccount, text(p.paymentMode), text(p.paymentReference),
+        p.moneyAccount, text(p.paymentMode), text(p.paymentReference), beforeOpeningCell(p.beforeOpening),
       ]);
     }
   }
@@ -231,7 +256,7 @@ function paymentsTable(repository: AccountingRepository, scope: ExportScope): Ex
 function purchaseBillsTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
   const columns = [
     "Number", "Supplier invoice number", "Bill date", "Due date", "Supplier", "Status", "Item", "Description", "Quantity",
-    "Unit price", "Discount", "Extra charge", "Tax type", "Tax rate", "Payment account", "Fair", "Notes",
+    "Unit price", "Discount", "Extra charge", "Tax type", "Tax rate", "Payment account", "Fair", "Notes", "Before opening",
   ];
   const l = lookups(repository);
   const businesses = businessIdsInScope(repository, scope);
@@ -245,6 +270,7 @@ function purchaseBillsTable(repository: AccountingRepository, scope: ExportScope
     const tail = (): string[] => [
       money(bill.discountPaise), money(bill.extraChargePaise), bill.taxType, formatBasisPoints(bill.taxRateBasisPoints),
       text(bill.paymentAccount), bill.fairId === undefined ? "" : l.fairs.get(bill.fairId) ?? "", text(bill.notes),
+      beforeOpeningCell(bill.beforeOpening),
     ];
     if (bill.lines.length === 0) rows.push([...head(), "", "", "", "", ...tail()]);
     for (const line of bill.lines) {
@@ -255,7 +281,7 @@ function purchaseBillsTable(repository: AccountingRepository, scope: ExportScope
 }
 
 function supplierPaymentsTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
-  const columns = ["Payment ID", "Supplier", "Bill number", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason", "Money account", "Payment mode", "Reference"];
+  const columns = ["Payment ID", "Supplier", "Bill number", "Paid on", "Amount", "Account", "Status", "Cancelled on", "Cancellation reason", "Money account", "Payment mode", "Reference", "Before opening"];
   const l = lookups(repository);
   const companySuppliers = scope.companyId === undefined ? undefined : new Set(repository.listSuppliers(scope.companyId).map((s) => s.id));
   const bills = new Map(repository.listPurchaseBills().map((b) => [b.id, b]));
@@ -269,7 +295,7 @@ function supplierPaymentsTable(repository: AccountingRepository, scope: ExportSc
     rows.push([
       p.id, l.suppliers.get(p.supplierId) ?? "", bill?.number ?? "", isoDay(p.paidAt), money(p.amountPaise), p.paymentAccount,
       p.cancelledAt === null ? "Active" : "Cancelled", isoDay(p.cancelledAt), text(p.cancellationReason),
-      p.moneyAccount, text(p.paymentMode), text(p.paymentReference),
+      p.moneyAccount, text(p.paymentMode), text(p.paymentReference), beforeOpeningCell(p.beforeOpening),
     ]);
   }
   return table(columns, rows, ["Paid on", "Amount", "Cancelled on"]);
@@ -307,9 +333,180 @@ function journalEntriesTable(repository: AccountingRepository, scope: ExportScop
 
 function trialBalanceTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
   const columns = ["Account", "Debit", "Credit"];
-  const filter = scope.businessId === undefined ? {} : { businessId: scope.businessId };
-  const rows = repository.getTrialBalance(filter).map((r) => [r.account, money(r.debitPaise), money(r.creditPaise)]);
+  const rows = repository.getTrialBalance(reportFilter("trial-balance", scope)).map((r) => [r.account, money(r.debitPaise), money(r.creditPaise)]);
   return table(columns, rows, ["Debit", "Credit"]);
+}
+
+// ---- report datasets (Q18) --------------------------------------------------------------------
+//
+// Each report dataset takes the SAME filters as its /reports route (see REPORT_PARAMS) and is built
+// from the same repository method, so a figure in the file is the figure on the screen. Nested
+// report shapes are flattened to one row per line; totals are rows labelled in the first text column.
+// A filter the report does not take is refused (400), exactly as the strict /reports route refuses it,
+// rather than silently ignored. `companyId` is accepted on every dataset and ignored by the reports
+// (a report is read for one business or all of them).
+
+type ReportParam = "businessId" | "fairId" | "customerId" | "itemId" | "fromDate" | "toDate" | "asAtDate" | "basis";
+
+const REPORT_PARAMS: Readonly<Record<string, readonly ReportParam[]>> = {
+  "trial-balance": ["businessId", "fairId", "asAtDate"],
+  "profit-and-loss": ["businessId", "fairId", "fromDate", "toDate", "basis"],
+  "balance-sheet": ["businessId", "asAtDate"],
+  "customer-statement": ["customerId", "businessId", "fairId"],
+  "customer-balance-detail": ["businessId", "customerId", "fairId", "asAtDate"],
+  "collections": ["businessId", "customerId", "fairId", "asAtDate"],
+  "stock-ageing": ["asAtDate"],
+  "inventory-valuation-detail": ["asAtDate"],
+  "item-profitability": ["businessId", "fairId", "itemId", "fromDate", "toDate"],
+};
+
+/** The filters the dataset takes, as a plain object with no undefined values. Refuses the ones it does not take. */
+function reportFilter(dataset: string, scope: ExportScope): Record<string, string> {
+  const allowed = REPORT_PARAMS[dataset] ?? [];
+  const given: Record<ReportParam, string | undefined> = {
+    businessId: scope.businessId, fairId: scope.fairId, customerId: scope.customerId, itemId: scope.itemId,
+    fromDate: scope.fromDate, toDate: scope.toDate, asAtDate: scope.asAtDate, basis: scope.basis,
+  };
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(given) as Array<[ReportParam, string | undefined]>) {
+    if (value === undefined) continue;
+    if (!allowed.includes(key)) {
+      throw new RepositoryValidationError(
+        `The ${dataset} export does not take "${key}". It takes: ${allowed.length === 0 ? "no filters" : allowed.join(", ")}.`,
+      );
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+const AMOUNT_COLUMNS = ["Debit", "Credit", "Amount"] as const;
+
+function accountSection(section: string, rows: readonly ReportAccountRow[]): string[][] {
+  return rows.map((r) => [section, r.account, money(r.debitPaise), money(r.creditPaise), money(r.balancePaise)]);
+}
+
+function profitAndLossTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getProfitAndLoss(reportFilter("profit-and-loss", scope));
+  const rows: string[][] = [
+    ["Basis", report.basis, "", "", ""],
+    ...accountSection("Income", report.income),
+    ["Total", "Total income", "", "", money(report.totalIncomePaise)],
+    ...accountSection("Expenses", report.expenses),
+    ["Total", "Total expenses", "", "", money(report.totalExpensesPaise)],
+    ["Total", "Net profit", "", "", money(report.netProfitPaise)],
+    ["Memo", "Gross sales including GST", "", "", money(report.grossSalesPaise)],
+    ["Memo", "GST on sales", "", "", money(report.gstOnSalesPaise)],
+  ];
+  return table(["Section", "Account", "Debit", "Credit", "Amount"], rows, [...AMOUNT_COLUMNS]);
+}
+
+function balanceSheetTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getBalanceSheet(reportFilter("balance-sheet", scope));
+  const rows: string[][] = [
+    ...accountSection("Assets", report.assets),
+    ["Total", "Total assets", "", "", money(report.totalAssetsPaise)],
+    ...accountSection("Liabilities", report.liabilities),
+    ["Total", "Total liabilities", "", "", money(report.totalLiabilitiesPaise)],
+    ...accountSection("Equity", report.equity),
+    ["Total", "Total equity", "", "", money(report.totalEquityPaise)],
+    ["Memo", "Retained earnings", "", "", money(report.retainedEarnings.totalPaise)],
+  ];
+  const split = report.retainedEarnings.split;
+  if (split !== null) {
+    rows.push(["Memo", "Retained earnings brought forward", "", "", money(split.broughtForwardPaise)]);
+    rows.push(["Memo", "Profit for the year", "", "", money(split.profitForYearPaise)]);
+  }
+  return table(["Section", "Account", "Debit", "Credit", "Amount"], rows, [...AMOUNT_COLUMNS]);
+}
+
+function customerStatementTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const filter = reportFilter("customer-statement", scope);
+  if (filter["customerId"] === undefined) throw new RepositoryValidationError("The customer-statement export needs a customerId.");
+  const report = repository.getCustomerStatement({
+    customerId: filter["customerId"],
+    ...(filter["businessId"] === undefined ? {} : { businessId: filter["businessId"] }),
+    ...(filter["fairId"] === undefined ? {} : { fairId: filter["fairId"] }),
+  });
+  const rows: string[][] = report.rows.map((r) => [
+    report.customerName, r.date, r.type, r.reference, yesNo(r.isReversal), money(r.amountPaise), money(r.balancePaise),
+  ]);
+  rows.push([report.customerName, "", "TOTAL", "Closing balance (what the customer owes)", "", "", money(report.closingBalancePaise)]);
+  rows.push([report.customerName, "", "TOTAL", "Unapplied credit (owed to the customer, not netted)", "", "", money(report.unappliedCreditPaise)]);
+  rows.push([report.customerName, "", "TOTAL", "Opening balances left out by the fair filter", "", "", money(report.excludedOpeningBalancesPaise)]);
+  return table(["Customer", "Date", "Type", "Reference", "Reversal", "Amount", "Balance"], rows, ["Date", "Reversal", "Amount", "Balance"]);
+}
+
+function customerBalanceDetailTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getCustomerBalanceDetail(reportFilter("customer-balance-detail", scope));
+  const fairs = lookups(repository).fairs;
+  const rows: string[][] = [];
+  for (const group of report.groups) {
+    for (const i of group.items) {
+      rows.push([
+        group.customerName, i.kind, i.number, i.date, isoDay(i.dueDate), i.fairId === null ? "" : fairs.get(i.fairId) ?? "",
+        money(i.totalPaise), money(i.settledPaise), money(i.outstandingPaise),
+      ]);
+    }
+    rows.push([group.customerName, "SUBTOTAL", "Subtotal", "", "", "", "", "", money(group.subtotalPaise)]);
+  }
+  rows.push(["", "TOTAL", "Report total", "", "", "", "", "", money(report.totalPaise)]);
+  rows.push(["", "TOTAL", "Opening balances left out by the fair filter", "", "", "", "", "", money(report.excludedOpeningBalancesPaise)]);
+  return table(
+    ["Customer", "Kind", "Number", "Date", "Due date", "Fair", "Total", "Settled", "Outstanding"], rows,
+    ["Date", "Due date", "Total", "Settled", "Outstanding"],
+  );
+}
+
+function collectionsTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getCollections(reportFilter("collections", scope));
+  const fairs = lookups(repository).fairs;
+  const rows: string[][] = report.rows.map((r) => [
+    report.asAtDate, r.customerName, text(r.email), text(r.phone), text(r.phone2), r.kind, r.number, r.date, r.dueOn,
+    r.dueDateBasis, int(r.daysOverdue), r.fairId === null ? "" : fairs.get(r.fairId) ?? "", money(r.totalPaise), money(r.outstandingPaise),
+  ]);
+  rows.push([report.asAtDate, "", "", "", "", "TOTAL", "Total overdue", "", "", "", "", "", "", money(report.totalOverduePaise)]);
+  return table(
+    ["As at", "Customer", "Email", "Phone", "Phone 2", "Kind", "Number", "Date", "Due on", "Due date basis", "Days overdue", "Fair", "Total", "Outstanding"],
+    rows, ["As at", "Date", "Due on", "Days overdue", "Total", "Outstanding"],
+  );
+}
+
+function stockAgeingTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getStockAgeing(reportFilter("stock-ageing", scope));
+  const bands = report.totals.buckets.map((b) => b.label);
+  const columns = ["As at", "Item", "Unit", ...bands.flatMap((b) => [`${b} quantity`, `${b} value`]), "Quantity", "Value"];
+  const rows: string[][] = report.rows.map((r) => [
+    report.asAtDate, r.itemName, r.unit,
+    ...r.buckets.flatMap((b) => [int(b.quantity), money(b.valuePaise)]), int(r.quantity), money(r.valuePaise),
+  ]);
+  rows.push([
+    report.asAtDate, "Total", "",
+    ...report.totals.buckets.flatMap((b) => [int(b.quantity), money(b.valuePaise)]), int(report.totals.quantity), money(report.totals.valuePaise),
+  ]);
+  return table(columns, rows, columns.filter((c) => c !== "Item" && c !== "Unit"));
+}
+
+function inventoryValuationDetailTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getInventoryValuationDetail(reportFilter("inventory-valuation-detail", scope));
+  const rows: string[][] = report.rows.map((r) => [
+    report.asAtDate, r.itemName, r.unit, r.receivedOn, r.dateBasis, int(r.ageDays), int(r.quantity),
+    money(r.unitCostPaise), money(r.valuePaise), text(r.sourceId),
+  ]);
+  rows.push([report.asAtDate, "Total", "", "", "", "", int(report.totals.quantity), "", money(report.totals.valuePaise), ""]);
+  return table(
+    ["As at", "Item", "Unit", "Received on", "Date basis", "Age days", "Quantity", "Unit cost", "Value", "Source ID"],
+    rows, ["As at", "Received on", "Age days", "Quantity", "Unit cost", "Value"],
+  );
+}
+
+function itemProfitabilityTable(repository: AccountingRepository, scope: ExportScope): ExportTable {
+  const report = repository.getItemProfitability(reportFilter("item-profitability", scope));
+  const rows: string[][] = report.rows.map((r) => [
+    r.itemName, text(r.unit), int(r.netQuantity), money(r.netSalesPaise), money(r.cogsPaise), money(r.grossMarginPaise),
+  ]);
+  rows.push(["Total", "", "", money(report.totals.netSalesPaise), money(report.totals.cogsPaise), money(report.totals.grossMarginPaise)]);
+  return table(["Item", "Unit", "Net quantity", "Net sales", "Cost of goods sold", "Gross margin"], rows, ["Net quantity", "Net sales", "Cost of goods sold", "Gross margin"]);
 }
 
 export function buildExport(repository: AccountingRepository, dataset: ExportDataset, scope: ExportScope = {}): ExportTable {
@@ -325,6 +522,14 @@ export function buildExport(repository: AccountingRepository, dataset: ExportDat
     case "stock-movements": return stockMovementsTable(repository, scope);
     case "journal-entries": return journalEntriesTable(repository, scope);
     case "trial-balance": return trialBalanceTable(repository, scope);
+    case "profit-and-loss": return profitAndLossTable(repository, scope);
+    case "balance-sheet": return balanceSheetTable(repository, scope);
+    case "customer-statement": return customerStatementTable(repository, scope);
+    case "customer-balance-detail": return customerBalanceDetailTable(repository, scope);
+    case "collections": return collectionsTable(repository, scope);
+    case "stock-ageing": return stockAgeingTable(repository, scope);
+    case "inventory-valuation-detail": return inventoryValuationDetailTable(repository, scope);
+    case "item-profitability": return itemProfitabilityTable(repository, scope);
   }
 }
 

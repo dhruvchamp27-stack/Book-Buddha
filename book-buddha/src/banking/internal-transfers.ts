@@ -111,8 +111,18 @@ export function nextDocumentNumber(
   const rows = db
     .prepare(`SELECT number FROM ${table} WHERE company_id = ? AND number LIKE ?`)
     .all(companyId, `${prefix}-%/${label}`) as Array<{ number: string }>;
+  return nextNumberAfter(rows.map((r) => r.number), prefix, label);
+}
+
+/**
+ * The pure half of the numbering: given every number already issued in one series, the next one,
+ * `PREFIX-001/25-26`. The highest ever issued plus one (a count would reuse a cancelled number).
+ * Shared with the per-business series in repository.ts (INV, QUO, CN, PR).
+ */
+export function nextNumberAfter(existing: readonly string[], prefix: string, label: string): string {
   let highest = 0;
-  for (const { number } of rows) {
+  for (const number of existing) {
+    if (!number.startsWith(`${prefix}-`) || !number.endsWith(`/${label}`)) continue;
     const n = Number(number.slice(prefix.length + 1, number.indexOf("/")));
     if (Number.isInteger(n) && n > highest) highest = n;
   }

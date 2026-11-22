@@ -127,7 +127,7 @@ describe("R10-E integration", () => {
 
       const invoiceInspected = await inspect(target, "invoices", "invoices.csv", interleaved);
       const allHeaders = (head ?? "").split(",");
-      expect(allHeaders).toHaveLength(15);
+      expect(allHeaders).toHaveLength(16); // F: 15 + "Before opening"
       // Every export header maps to a field, none twice.
       expect(Object.values(invoiceInspected.suggestedColumnMap).sort()).toEqual([...allHeaders].sort());
       expect(invoiceInspected.rowCount).toBe(5);

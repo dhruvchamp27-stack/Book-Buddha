@@ -15,6 +15,9 @@
  *                       Payment account, Fair, Notes
  *  - credit-notes:      Number*, Invoice number*, Note date*, Reason*, Item, Description, Quantity*,
  *                       Unit price*   (the export calls the date "Credit note date"; a synonym)
+ *  - expenses:          Number*, Expense date*, Supplier, Category, Status, Description*, Amount*, Tax type,
+ *                       Tax rate, Payment account, Money account, Payment mode, Reference, Fair
+ *                       (grouped by Number; lines are folded into one expense - see expensesKind)
  *  - payments:          Invoice number*, Amount*, Paid on*, Status
  *  - supplier-payments: Bill number*, Amount*, Paid on*, Status
  *  (* = required.) Invoices, bills and credit notes are grouped by Number: one unit = one document.
@@ -23,9 +26,10 @@
  *  - Payment account. An imported invoice is a CREDIT invoice ("RECEIVABLES") and an imported bill is
  *    "PAYABLES" unless the bill's Payment account cell says CASH. That is the only way a payment can
  *    be recorded against it later (the repository refuses payments on cash documents).
- *  - Opening-balance date = the latest `asAt` among the business's general opening sets and its
- *    customer and supplier opening balances. A REVERSED opening set no longer counts, so it does not
- *    block the dates it used to cover.
+ *  - Opening date = `repository.openingDateOf` (the latest `asAt` among the business's live general,
+ *    customer and supplier opening sets). A row dated on or before it is KEPT AS HISTORY (F): not
+ *    refused, not journalled, reported as "kept as history (before opening date)". A reversed
+ *    opening set no longer counts.
  *  - A later row of a document may leave a header cell BLANK (not a disagreement); a different
  *    non-blank value, or a value where the first row was blank, fails the unit naming the field.
  *  - A Status cell that is not blank / Finalized / Active (e.g. Cancelled, Draft) is SKIPPED: the
@@ -37,8 +41,12 @@
  *    run's context object (the engine hands every unit the same one). A document is added to an
  *    index only AFTER all its writes have succeeded (the last step of `post`), so a unit that
  *    throws - and is rolled back by its savepoint - never leaves a ghost entry behind.
- *  - A payment identical in document, amount and date to a non-cancelled one is SKIPPED, which also
- *    means two genuinely equal payments on the same day are imported once. That is the S14-3 rule.
+ *  - Equal payments (same document, amount, IST day) WITHIN one file all import; an equal payment
+ *    already in the books before the run (an earlier import or hand-entered) is a duplicate. This is
+ *    count-based (S16-3): each run snapshots the live equal-payment counts per document the first
+ *    time it meets it, and the k-th equal row of the file is skipped only if the snapshot holds >= k.
+ *    So re-importing a file skips every row, and a file with two equal rows of which one already
+ *    exists imports one. The snapshot is never updated by the run's own rows, so preview == commit.
  */
 import { randomUUID } from "node:crypto";
 import type { CreditNote, Invoice, InvoiceTaxType, PurchasePaymentAccount } from "../accounting/types.js";
@@ -88,26 +96,26 @@ function businessOf(context: ImportContext): string {
   return context.businessId;
 }
 
-/** Latest as-at date over the business's live opening sets (general, customer, supplier). */
-function latestOpeningDate(repository: AccountingRepository, businessId: string): string | undefined {
-  const dates = [
-    ...repository.getOpeningBalances(businessId).filter((s) => s.reversedAt === null).map((s) => s.asAt),
-    ...repository.listOpeningCustomerBalances(businessId).filter((s) => s.reversedAt === null).map((s) => s.asAt),
-    ...repository.listOpeningSupplierBalances(businessId).filter((s) => s.reversedAt === null).map((s) => s.asAt),
-  ];
-  return dates.reduce<string | undefined>((latest, d) => (latest === undefined || d > latest ? d : latest), undefined);
-}
+/**
+ * The exports now carry a "Before opening" column (Yes / blank). It is accepted on import so an
+ * exported file maps straight back, and IGNORED: whether a row is history is decided afresh from
+ * its date and the business's opening date, never from this cell.
+ */
+const BEFORE_OPENING_FIELD: ImportField = field("beforeOpening", "Before opening", false);
 
-function assertAfterOpening(context: ImportContext, businessId: string, date: string, what: string): void {
+/** What the preview / commit says of a row that was kept as history instead of being posted. */
+const HISTORY_MESSAGE = "kept as history (before opening date)";
+
+/**
+ * F (S16-2(c), Q13): a row dated on or before the business's opening date is kept as HISTORY - not
+ * refused. The rule itself is the repository's (`openingDateOf`, the one place that decides it);
+ * document runs never write opening balances, so the date is read once per run.
+ */
+function isHistoryDate(context: ImportContext, businessId: string, date: string): boolean {
   const cache = cacheOf(context);
-  // Document runs never write opening balances, so the date is read once per run.
-  cache.openingDate ??= { value: latestOpeningDate(context.repository, businessId) };
+  cache.openingDate ??= { value: context.repository.openingDateOf(businessId) };
   const opening = cache.openingDate.value;
-  if (opening !== undefined && date <= opening) {
-    throw new ImportRowError(
-      `${what}: dated on or before the opening balances of ${opening} — would count twice (the document is dated ${date}).`,
-    );
-  }
+  return opening !== undefined && date <= opening;
 }
 
 /** Not blank / Finalized / Active means "do not post this row as a live document". */
@@ -150,6 +158,7 @@ interface Lookups {
   supplier(name: string): { id: string };
   item(name: string): { id: string; name: string };
   fair(name: string): { id: string };
+  category(name: string): { id: string };
 }
 
 // ---------------------------------------------------------------- per-run indexes (speed)
@@ -158,9 +167,14 @@ interface NamedRef { readonly id: string; readonly name: string }
 interface RunCache {
   invoices?: Map<string, NumberedRef>;
   bills?: Map<string, NumberedRef>;
+  expenses?: Map<string, NumberedRef>;
   creditNotes?: Set<string>;
   openingDate?: { value: string | undefined };
-  lists?: Partial<Record<"customers" | "suppliers" | "items" | "fairs", Map<string, NamedRef[]>>>;
+  lists?: Partial<Record<"customers" | "suppliers" | "items" | "fairs" | "categories", Map<string, NamedRef[]>>>;
+  /** Payments: per document, live equal-payment counts as they stood BEFORE this run touched it. */
+  paymentSnapshots?: Map<string, Map<string, number>>;
+  /** Payments: how many equal rows of this file have been seen so far, per document|amount|day. */
+  paymentSeen?: Map<string, number>;
 }
 const runCaches = new WeakMap<ImportContext, RunCache>();
 function cacheOf(context: ImportContext): RunCache {
@@ -192,6 +206,16 @@ function billIndex(context: ImportContext, businessId: string): Map<string, Numb
   return cache.bills;
 }
 
+function expenseIndex(context: ImportContext, businessId: string): Map<string, NumberedRef> {
+  const cache = cacheOf(context);
+  if (cache.expenses === undefined) {
+    const map = new Map<string, NumberedRef>();
+    for (const e of context.repository.listExpenses({ businessId })) map.set(normaliseName(e.number), { id: e.id, number: e.number });
+    cache.expenses = map;
+  }
+  return cache.expenses;
+}
+
 /** Normalised numbers of the business's credit notes. */
 function creditNoteIndex(context: ImportContext, businessId: string): Set<string> {
   const cache = cacheOf(context);
@@ -206,7 +230,7 @@ function creditNoteIndex(context: ImportContext, businessId: string): Set<string
 
 function lookups(context: ImportContext): Lookups {
   const r = context.repository;
-  const one = (which: "customers" | "suppliers" | "items" | "fairs", kindName: string, load: () => readonly NamedRef[], name: string): NamedRef => {
+  const one = (which: "customers" | "suppliers" | "items" | "fairs" | "categories", kindName: string, load: () => readonly NamedRef[], name: string): NamedRef => {
     const cache = cacheOf(context);
     cache.lists ??= {};
     let byName = cache.lists[which];
@@ -228,6 +252,7 @@ function lookups(context: ImportContext): Lookups {
     supplier: (n) => one("suppliers", "Supplier", () => r.listSuppliers(context.companyId), n),
     item: (n) => one("items", "Item", () => r.listItems(context.companyId), n),
     fair: (n) => one("fairs", "Fair", () => r.listFairs(context.companyId), n),
+    category: (n) => one("categories", "Expense category", () => r.listExpenseCategories(context.companyId), n),
   };
 }
 
@@ -279,6 +304,7 @@ const INVOICE_FIELDS: readonly ImportField[] = [
   field("taxRate", "Tax rate", false, ["GST rate", "GST %", "Tax %"]),
   field("fair", "Fair", false, ["Project"]),
   field("notes", "Notes", false, ["Remarks"]),
+  BEFORE_OPENING_FIELD,
 ];
 const INVOICE_HEADER_KEYS = ["customer", "invoiceDate", "dueDate", "discount", "extraCharge", "taxType", "taxRate", "fair"];
 
@@ -303,7 +329,7 @@ const invoicesKind: ImportKindDefinition = {
     const invoiceDate = parsed(first, "Invoice date", requireValue(first, "invoiceDate", "Invoice date"), (t) => parseDate(t, context.dateFormat));
     const dueText = val(first, "dueDate");
     const dueDate = dueText === "" ? undefined : parsed(first, "Due date", dueText, (t) => parseDate(t, context.dateFormat));
-    assertAfterOpening(context, businessId, invoiceDate, `Invoice ${number}`);
+    const history = isHistoryDate(context, businessId, invoiceDate);
     const fairName = val(first, "fair");
     const fair = fairName === "" ? undefined : look.fair(fairName);
     const taxType = parseTaxType(first, val(first, "taxType"));
@@ -329,9 +355,9 @@ const invoicesKind: ImportKindDefinition = {
       lines,
     };
     repo.saveDraft(invoice);
-    repo.finalizeInvoice(id);
+    repo.finalizeInvoice(id, { confirmBeforeOpening: true });
     invoices.set(wanted, { id, number }); // last step, nothing below can throw: a rolled-back unit leaves no entry
-    return created(number);
+    return created(number, history ? HISTORY_MESSAGE : undefined);
   },
 };
 
@@ -358,6 +384,7 @@ const BILL_FIELDS: readonly ImportField[] = [
   field("paymentReference", "Reference", false, ["Payment reference", "UTR", "Cheque number"]),
   field("fair", "Fair", false, ["Project"]),
   field("notes", "Notes", false, ["Remarks"]),
+  BEFORE_OPENING_FIELD,
 ];
 const BILL_HEADER_KEYS = [
   "supplier", "billDate", "dueDate", "supplierInvoiceNumber", "discount", "extraCharge", "taxType", "taxRate", "paymentAccount",
@@ -385,7 +412,7 @@ const purchaseBillsKind: ImportKindDefinition = {
     const billDate = parsed(first, "Bill date", requireValue(first, "billDate", "Bill date"), (t) => parseDate(t, context.dateFormat));
     const dueText = val(first, "dueDate");
     const dueDate = dueText === "" ? undefined : parsed(first, "Due date", dueText, (t) => parseDate(t, context.dateFormat));
-    assertAfterOpening(context, businessId, billDate, `Bill ${number}`);
+    const history = isHistoryDate(context, businessId, billDate);
     const fairName = val(first, "fair");
     const fair = fairName === "" ? undefined : look.fair(fairName);
     const taxType = parseTaxType(first, val(first, "taxType"));
@@ -420,9 +447,101 @@ const purchaseBillsKind: ImportKindDefinition = {
       ...(fair === undefined ? {} : { fairId: fair.id }),
       lines,
     });
-    repo.finalizePurchaseBill(bill.id);
+    repo.finalizePurchaseBill(bill.id, { confirmBeforeOpening: true });
     bills.set(wanted, { id: bill.id, number }); // last step: see the header note on indexes
-    return created(number);
+    return created(number, history ? HISTORY_MESSAGE : undefined);
+  },
+};
+
+// ---------------------------------------------------------------- expenses
+/**
+ * Expenses (Q17, S17-4c). An expense is ONE amount with ONE description in the books, so a file's
+ * lines are folded into it: the Amounts are summed and the Descriptions joined with "; ". The
+ * expense KEEPS the file's Number. Supplier and Category are matched by name (blank = none). A blank
+ * Payment account means PAYABLES when a Supplier is named and CASH when not (an expense payable later
+ * must name a supplier).
+ */
+const EXPENSE_FIELDS: readonly ImportField[] = [
+  field("number", "Number", true, ["Expense number", "Expense no", "Expense #", "Voucher number", "Voucher no"]),
+  field("expenseDate", "Expense date", true, ["Date"]),
+  field("supplier", "Supplier", false, ["Supplier name", "Vendor", "Paid to"]),
+  field("category", "Category", false, ["Expense category", "Head", "Account head"]),
+  field("status", "Status", false),
+  field("description", "Description", true, ["Particulars", "Narration", "Details"]),
+  field("amount", "Amount", true, ["Line amount", "Value", "Cost"]),
+  field("taxType", "Tax type", false, ["GST type"]),
+  field("taxRate", "Tax rate", false, ["GST rate", "GST %", "Tax %"]),
+  field("paymentAccount", "Payment account", false),
+  field("moneyAccount", "Money account", false, ["Paid from", "Bank account"]),
+  field("paymentMode", "Payment mode", false, ["Mode"]),
+  field("paymentReference", "Reference", false, ["Payment reference", "UTR", "Cheque number"]),
+  field("fair", "Fair", false, ["Project"]),
+];
+const EXPENSE_HEADER_KEYS = [
+  "expenseDate", "supplier", "category", "taxType", "taxRate", "paymentAccount", "moneyAccount", "paymentMode", "paymentReference", "fair",
+];
+
+const expensesKind: ImportKindDefinition = {
+  kind: "expenses",
+  scope: "BUSINESS",
+  fields: EXPENSE_FIELDS,
+  groupBy: "number",
+  post(context, rows): UnitOutcome {
+    const businessId = businessOf(context);
+    const repo = context.repository;
+    const first = rows[0] as MappedRow;
+    const number = requireValue(first, "number", "Number");
+    const wanted = normaliseName(number);
+    const expenses = expenseIndex(context, businessId);
+    if (expenses.has(wanted)) return skipped(number, "already exists");
+    if (inactiveStatus(val(first, "status"))) return skipped(number, `status is "${val(first, "status")}"; only finalized documents are imported`);
+    checkHeader(rows, EXPENSE_FIELDS, EXPENSE_HEADER_KEYS, number);
+
+    const look = lookups(context);
+    const supplierName = val(first, "supplier");
+    const supplier = supplierName === "" ? undefined : look.supplier(supplierName);
+    const categoryName = val(first, "category");
+    const category = categoryName === "" ? undefined : look.category(categoryName);
+    const expenseDate = parsed(first, "Expense date", requireValue(first, "expenseDate", "Expense date"), (t) => parseDate(t, context.dateFormat));
+    const history = isHistoryDate(context, businessId, expenseDate);
+    const fairName = val(first, "fair");
+    const fair = fairName === "" ? undefined : look.fair(fairName);
+    const taxType = parseTaxType(first, val(first, "taxType"));
+    const accountText = val(first, "paymentAccount").toUpperCase();
+    if (accountText !== "" && accountText !== "CASH" && accountText !== "PAYABLES") {
+      throw new ImportRowError(`Row ${first.rowNumber}: Payment account: "${val(first, "paymentAccount")}" is not CASH or PAYABLES.`);
+    }
+    const paymentAccount: PurchasePaymentAccount = accountText === "" ? (supplier === undefined ? "CASH" : "PAYABLES") : (accountText as PurchasePaymentAccount);
+    const moneyAccount = val(first, "moneyAccount");
+    const paymentMode = val(first, "paymentMode");
+    const paymentReference = val(first, "paymentReference");
+
+    let amountPaise = 0;
+    const descriptions: string[] = [];
+    for (const r of rows) {
+      descriptions.push(requireValue(r, "description", "Description"));
+      amountPaise += parsed(r, "Amount", requireValue(r, "amount", "Amount"), (t) => parseRupeesToPaise(t));
+    }
+
+    const expense = repo.createExpense({
+      ...(moneyAccount === "" ? {} : { moneyAccount }),
+      ...(paymentMode === "" ? {} : { paymentMode }),
+      ...(paymentReference === "" ? {} : { paymentReference }),
+      businessId,
+      ...(supplier === undefined ? {} : { supplierId: supplier.id }),
+      ...(category === undefined ? {} : { categoryId: category.id }),
+      ...(fair === undefined ? {} : { fairId: fair.id }),
+      number,
+      expenseDate,
+      description: descriptions.join("; "),
+      amountPaise,
+      taxType,
+      taxRateBasisPoints: optionalRate(first),
+      paymentAccount,
+    });
+    repo.finalizeExpense(expense.id, { confirmBeforeOpening: true });
+    expenses.set(wanted, { id: expense.id, number }); // last step: see the header note on indexes
+    return created(number, history ? HISTORY_MESSAGE : undefined);
   },
 };
 
@@ -437,6 +556,7 @@ const CREDIT_NOTE_FIELDS: readonly ImportField[] = [
   field("description", "Description", false, ["Particulars"]),
   field("quantity", "Quantity", true, ["Qty"]),
   field("unitPrice", "Unit price", true, ["Price", "Rate"]),
+  BEFORE_OPENING_FIELD,
 ];
 const CREDIT_NOTE_HEADER_KEYS = ["invoiceNumber", "noteDate", "reason"];
 
@@ -461,7 +581,7 @@ const creditNotesKind: ImportKindDefinition = {
     const invoice = invoices.get(normaliseName(invoiceNumber));
     if (invoice === undefined) throw new ImportRowError(`Invoice "${invoiceNumber}" was not found in this business.`);
     const noteDate = parsed(first, "Note date", requireValue(first, "noteDate", "Note date"), (t) => parseDate(t, context.dateFormat));
-    assertAfterOpening(context, businessId, noteDate, `Credit note ${number}`);
+    const history = isHistoryDate(context, businessId, noteDate);
     const lines = readLines(rows, lookups(context));
 
     const id = randomUUID();
@@ -476,9 +596,9 @@ const creditNotesKind: ImportKindDefinition = {
     };
     repo.saveCreditNote(note);
     // The preview is the user's confirmation that a date in an earlier month is what they mean.
-    repo.finalizeCreditNote(id, { confirmBackdatedMonth: true });
+    repo.finalizeCreditNote(id, { confirmBackdatedMonth: true, confirmBeforeOpening: true });
     notes.add(wanted); // last step: see the header note on indexes
-    return created(number);
+    return created(number, history ? HISTORY_MESSAGE : undefined);
   },
 };
 
@@ -486,11 +606,45 @@ const creditNotesKind: ImportKindDefinition = {
 /** The IST calendar date of a stored payment instant (payments are stored at 12:00 IST). */
 const istDay = (instant: string): string => new Date(Date.parse(instant) + 330 * 60_000).toISOString().slice(0, 10);
 
+/**
+ * Repeated-payment rule (S16-3). `existing` are the document's live payments as listed NOW; the
+ * snapshot of their equal-payment counts is taken the first time this run meets the document
+ * (before any of this run's rows for it is posted) and never updated, so it behaves identically in
+ * the preview and the commit. The k-th equal row of the file is a duplicate only if the snapshot
+ * holds at least k equal payments.
+ */
+function isRepeatOfEarlierPayment(
+  context: ImportContext,
+  documentId: string,
+  existing: () => ReadonlyArray<{ amountPaise: number; paidAt: string; cancelledAt: string | null }>,
+  amountPaise: number,
+  paidOn: string,
+): boolean {
+  const cache = cacheOf(context);
+  const snapshots = (cache.paymentSnapshots ??= new Map());
+  let snapshot = snapshots.get(documentId);
+  if (snapshot === undefined) {
+    snapshot = new Map<string, number>();
+    for (const p of existing()) {
+      if (p.cancelledAt !== null) continue;
+      const key = `${p.amountPaise}|${istDay(p.paidAt)}`;
+      snapshot.set(key, (snapshot.get(key) ?? 0) + 1);
+    }
+    snapshots.set(documentId, snapshot);
+  }
+  const seen = (cache.paymentSeen ??= new Map());
+  const seenKey = `${documentId}|${amountPaise}|${paidOn}`;
+  const k = (seen.get(seenKey) ?? 0) + 1;
+  seen.set(seenKey, k);
+  return (snapshot.get(`${amountPaise}|${paidOn}`) ?? 0) >= k;
+}
+
 const PAYMENT_FIELDS: readonly ImportField[] = [
   field("invoiceNumber", "Invoice number", true, ["Invoice", "Invoice no"]),
   field("amount", "Amount", true, ["Paid", "Payment amount"]),
   field("paidOn", "Paid on", true, ["Date", "Payment date"]),
   field("status", "Status", false),
+  BEFORE_OPENING_FIELD,
 ];
 
 const paymentsKind: ImportKindDefinition = {
@@ -508,12 +662,12 @@ const paymentsKind: ImportKindDefinition = {
     if (invoice === undefined) throw new ImportRowError(`Invoice "${invoiceNumber}" was not found in this business.`);
     const amountPaise = parsed(row, "Amount", requireValue(row, "amount", "Amount"), (t) => parseRupeesToPaise(t));
     const paidOn = parsed(row, "Paid on", requireValue(row, "paidOn", "Paid on"), (t) => parseDate(t, context.dateFormat));
-    if (repo.listPayments(invoice.id).some((p) => p.cancelledAt === null && p.amountPaise === amountPaise && istDay(p.paidAt) === paidOn)) {
+    if (isRepeatOfEarlierPayment(context, invoice.id, () => repo.listPayments(invoice.id), amountPaise, paidOn)) {
       return skipped(reference, "already exists");
     }
-    assertAfterOpening(context, businessId, paidOn, `Payment for invoice ${invoiceNumber}`);
-    repo.recordPayment(invoice.id, amountPaise, paidOn);
-    return created(reference);
+    const history = isHistoryDate(context, businessId, paidOn);
+    repo.recordPayment(invoice.id, amountPaise, paidOn, {}, { confirmBeforeOpening: true });
+    return created(reference, history ? HISTORY_MESSAGE : undefined);
   },
 };
 
@@ -522,6 +676,7 @@ const SUPPLIER_PAYMENT_FIELDS: readonly ImportField[] = [
   field("amount", "Amount", true, ["Paid", "Payment amount"]),
   field("paidOn", "Paid on", true, ["Date", "Payment date"]),
   field("status", "Status", false),
+  BEFORE_OPENING_FIELD,
 ];
 
 const supplierPaymentsKind: ImportKindDefinition = {
@@ -539,12 +694,12 @@ const supplierPaymentsKind: ImportKindDefinition = {
     if (bill === undefined) throw new ImportRowError(`Bill "${billNumber}" was not found in this business.`);
     const amountPaise = parsed(row, "Amount", requireValue(row, "amount", "Amount"), (t) => parseRupeesToPaise(t));
     const paidOn = parsed(row, "Paid on", requireValue(row, "paidOn", "Paid on"), (t) => parseDate(t, context.dateFormat));
-    if (repo.listSupplierPayments({ billId: bill.id }).some((p) => p.cancelledAt === null && p.amountPaise === amountPaise && istDay(p.paidAt) === paidOn)) {
+    if (isRepeatOfEarlierPayment(context, bill.id, () => repo.listSupplierPayments({ billId: bill.id }), amountPaise, paidOn)) {
       return skipped(reference, "already exists");
     }
-    assertAfterOpening(context, businessId, paidOn, `Payment for bill ${billNumber}`);
-    repo.recordSupplierPayment({ billId: bill.id, amountPaise, paidOn });
-    return created(reference);
+    const history = isHistoryDate(context, businessId, paidOn);
+    repo.recordSupplierPayment({ billId: bill.id, amountPaise, paidOn, confirmBeforeOpening: true });
+    return created(reference, history ? HISTORY_MESSAGE : undefined);
   },
 };
 
@@ -554,4 +709,5 @@ export const DOCUMENT_IMPORT_KINDS: readonly ImportKindDefinition[] = [
   creditNotesKind,
   paymentsKind,
   supplierPaymentsKind,
+  expensesKind,
 ];

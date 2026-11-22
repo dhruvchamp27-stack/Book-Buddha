@@ -289,13 +289,13 @@ describe("R12b money through any cash/bank account", () => {
       expect((await post("/supplier-payments", { billId: supplierBill.id, amountPaise: 5_000, moneyAccount: "AXIS_OTHER" })).statusCode).toBe(400);
       // Cash invoice, bill and expense through the routes.
       const cashInvoice = await post("/invoices", {
-        number: "INV-H", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", moneyAccount: "HDFC", paymentMode: "UPI",
+        businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", moneyAccount: "HDFC", paymentMode: "UPI",
         lines: [{ description: "Books", quantity: 1, unitPricePaise: 10_000 }],
       });
       expect(cashInvoice.statusCode).toBe(201);
       expect(cashInvoice.json()).toMatchObject({ moneyAccount: "HDFC", paymentMode: "UPI", paymentReference: null });
       const badInvoice = await post("/invoices", {
-        number: "INV-B", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", moneyAccount: "NOPE",
+        businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", moneyAccount: "NOPE",
         lines: [{ description: "Books", quantity: 1, unitPricePaise: 10_000 }],
       });
       expect(badInvoice.statusCode).toBe(400);
@@ -432,6 +432,44 @@ describe("R12b money through any cash/bank account", () => {
       expect(balance(r, "HDFC")).toBe(400_000 - 100_000 + 20_000);
       expect(balance(r, "CASH")).toBe(0);
       expect(ledgerBalances(r)).toBe(true);
+    } finally { w.repository.close(); }
+  });
+
+  it("S17 REFUND DEFAULT: with no account named, a refund goes back through the document's original money account; a named one wins", () => {
+    const w = world();
+    try {
+      const r = w.repository;
+      // Hand figure: Rs 10,000 credit invoice, paid Rs 6,000 into CASH then Rs 4,000 into HDFC
+      // (the latest live payment), Rs 5,000 credit note -> Rs 5,000 owed back to the customer.
+      // (A document paid at once has nothing left to refund: its note goes straight out of the bank.)
+      creditInvoice(w, "i1", 1_000_000);
+      r.recordPayment("i1", 600_000, "2025-10-20");
+      r.recordPayment("i1", 400_000, "2025-10-21", { moneyAccount: "HDFC" });
+      r.saveCreditNote({ id: "cn2", invoiceId: "i1", number: "CN-2", reason: "Return", status: "DRAFT", lines: [{ description: "Back", quantity: 1, unitPricePaise: 500_000 }] });
+      r.finalizeCreditNote("cn2");
+      const hdfc = balance(r, "HDFC");
+      const cash = balance(r, "CASH");
+      r.recordCreditNoteRefund({ id: "rf1", creditNoteId: "cn2", amountPaise: 400_000, refundedOn: "2027-01-01" });
+      expect(balance(r, "HDFC")).toBe(hdfc - 400_000); // the BANK, not CASH
+      expect(balance(r, "CASH")).toBe(cash);
+      r.recordCreditNoteRefund({ id: "rf2", creditNoteId: "cn2", amountPaise: 100_000, refundedOn: "2027-01-01", moneyAccount: "CASH" });
+      expect(balance(r, "CASH")).toBe(cash - 100_000); // a named account wins
+      expect(ledgerBalances(r)).toBe(true);
+    } finally { w.repository.close(); }
+  });
+
+  it("S17 EDIT KEEPS MONEY: updating a draft saved with HDFC does not turn it back into CASH; a new choice does", () => {
+    const w = world();
+    try {
+      const r = w.repository;
+      r.saveDraft(invoice(w, "d1", "CASH", 500_000, { moneyAccount: "HDFC", paymentMode: "NEFT", paymentReference: "UTR1" }));
+      const stored = () => r.db.prepare("SELECT money_account, payment_mode, payment_reference FROM invoices WHERE id = 'd1'").get();
+      r.updateDraft(invoice(w, "d1", "CASH", 600_000));
+      expect(stored()).toEqual({ money_account: "HDFC", payment_mode: "NEFT", payment_reference: "UTR1" });
+      r.updateDraft(invoice(w, "d1", "CASH", 600_000, { moneyAccount: "CASH" }));
+      expect(stored()).toMatchObject({ money_account: "CASH" });
+      r.updateDraft(invoice(w, "d1", "RECEIVABLES", 600_000));
+      expect(stored()).toEqual({ money_account: "CASH", payment_mode: null, payment_reference: null });
     } finally { w.repository.close(); }
   });
 

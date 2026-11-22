@@ -25,6 +25,10 @@ import { applyMoneyMovementsSchema } from "../banking/money-movements-schema.js"
 import { applyReconciliationSchema } from "../banking/reconciliation-schema.js";
 import { applyStatementLinesSchema } from "../banking/statement-lines-schema.js";
 import { applyBankRulesSchema } from "../banking/bank-rules-schema.js";
+import { applyCashFlowSectionSchema } from "./cash-flow-section-schema.js";
+import { applyQuotationLinkSchema } from "./quotation-link-schema.js";
+import { applyInvoiceNumberIndexSchema } from "./invoice-number-index-schema.js";
+import { applyBeforeOpeningSchema } from "./before-opening-schema.js";
 
 export interface Migration {
   version: number;
@@ -347,6 +351,35 @@ export const migrations: readonly Migration[] = [
     // Additive: bank_rules + bank_rule_conditions. Rules only PRE-FILL a suggestion for a statement
     // line (FD §D5); they never post. R12g.
     up: applyBankRulesSchema,
+  },
+  {
+    version: 30,
+    name: "cash_flow_section",
+    // Additive: chart_accounts.cash_flow_section (OPERATING/INVESTING/FINANCING, NULL = derive).
+    // ALTER TABLE ADD COLUMN, no rebuild. R13 direct-method Cash Flow Statement (ruling S17-6).
+    up: applyCashFlowSectionSchema,
+  },
+  {
+    version: 31,
+    name: "quotation_link",
+    // Additive: invoices.source_quotation_id (nullable, → invoices.id) + index. An invoice made from
+    // a quotation keeps a link to it (ruling S17-4). ALTER TABLE ADD COLUMN, no rebuild.
+    up: applyQuotationLinkSchema,
+  },
+  {
+    version: 32,
+    name: "invoice_number_index",
+    // Additive: index invoices(business_id, number) - the per-save number check and the S17-4 series
+    // read stop scanning every invoice of the business (R10 2,000-invoice timing). Not unique (D11).
+    up: applyInvoiceNumberIndexSchema,
+  },
+  {
+    version: 33,
+    name: "before_opening",
+    // Additive: before_opening 0/1 on invoices, purchase_bills, expenses, credit_notes,
+    // purchase_returns, payments, supplier_payments. Items dated on/before the opening date are kept
+    // as HISTORY, never posted (rulings S16-2(c), Q13, S17-12). ALTER TABLE ADD COLUMN, no rebuild.
+    up: applyBeforeOpeningSchema,
   },
 ];
 

@@ -77,7 +77,7 @@ describe("R12 cancel guard: money on a bank line is cancelled only through Undo 
 
   it("4. a payment typed by hand, then matched: refused, then Undo (which only unlinks) lets it cancel", async () => {
     const { id: customerId } = await call<{ id: string }>("/customers", { companyId, name: "Asha School" }, 201);
-    await call("/invoices", { id: "inv-a", number: "INV-001", businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(5_900) }] }, 201);
+    await call("/invoices", { id: "inv-a",businessId, customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-10-02", taxType: "NONE", taxRateBasisPoints: 0, lines: [{ description: "Books", quantity: 1, unitPricePaise: RS(5_900) }] }, 201);
     await call("/invoices/inv-a/finalize", {});
     const payment = await call<{ id: string }>("/invoices/inv-a/payments", { amountPaise: RS(5_900), paidOn: "2025-10-28", moneyAccount: HDFC, paymentMode: "CHEQUE" }, 201);
     const id = line("2025-10-30", "CLG CHQ ASHA", RS(5_900));

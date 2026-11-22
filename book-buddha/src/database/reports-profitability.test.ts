@@ -40,7 +40,7 @@ function world() {
   const fair2 = repository.createFair({ companyId, hostCustomerId: customerId, name: "Fair Two" });
 
   repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 3, unitCostPaise: 5000, occurredOn: "2026-04-02" });
-  repository.addStockMovement({ itemId: atlas, movementType: "PURCHASE", quantity: 10, unitCostPaise: 6000, occurredOn: "2026-04-10" });
+  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 6000, occurredOn: "2026-04-10" });
 
   const sell = (id: string, date: string, lines: Array<{ itemId: string; quantity: number; unitPricePaise: number }>, fairId?: string): void => {
     repository.saveDraft({

@@ -196,17 +196,25 @@ export interface PurchaseEntryInput {
   readonly sourceId: string;
   readonly sourceType: Extract<JournalSourceType, "PURCHASE_BILL" | "EXPENSE">;
   readonly description: string;
-  /** Total cost of stock-tracked lines (debits INVENTORY). */
+  /**
+   * Cost of stock-tracked lines (debits INVENTORY), NET of any part of the header discount that
+   * was spread into it (see `spreadDiscountPaise`).
+   */
   readonly inventoryPaise: number;
   /** Total of non-stock lines / expense amount (debits EXPENSE). */
   readonly expensePaise: number;
   /**
-   * R8. Header-level discount the supplier gave on the bill as a whole. CREDITS its own
-   * PURCHASE_DISCOUNT account rather than reducing the goods cost: see V18_ADDED_ACCOUNTS for
-   * why (an integer stock-layer unit cost cannot absorb it exactly, and a bill of nothing but
-   * stock has no expense debit to net it against). Reduces the GST-taxable value, as on a sale.
+   * R8. Header-level discount the supplier gave on the bill as a whole. Reduces the GST-taxable
+   * value, as on a sale. Owner ruling S17-7: the discount is assumed to be on STOCK items only, so
+   * the repository spreads it into the stock lots (`spreadDiscountPaise`); only the part that
+   * could not be spread (a bill with no stock lines) CREDITS PURCHASE_DISCOUNT.
    */
   readonly discountPaise?: number;
+  /**
+   * The part of `discountPaise` already netted into `inventoryPaise` (spread across the stock
+   * lines). Not credited to PURCHASE_DISCOUNT. Defaults to 0 (the whole discount is credited).
+   */
+  readonly spreadDiscountPaise?: number;
   /** R8. Freight, packing and the like added by the supplier. DEBITS PURCHASE_EXTRA_CHARGES. */
   readonly extraChargePaise?: number;
   readonly taxType: InvoiceTaxType;
@@ -229,9 +237,9 @@ export interface PurchaseEntryResult {
  * Dr INVENTORY / Dr EXPENSE / Dr PURCHASE_EXTRA_CHARGES / Dr INPUT tax;
  * Cr PURCHASE_DISCOUNT; Cr CASH or PAYABLES for what is actually owed.
  *
- * INVENTORY is debited with the FULL line cost of the stock-tracked lines, never a discounted
- * share of it, so the INVENTORY ledger stays equal to the stock-layer value to the paise. The
- * reasoning, and the trade-off it accepts, is written out on V18_ADDED_ACCOUNTS.
+ * S17-7: INVENTORY is debited the NET stock cost (the header discount spread into the stock lots
+ * by `spreadBillDiscount`), so the INVENTORY ledger equals the stock-layer value to the paise. A
+ * discount with no stock lines to carry it still credits PURCHASE_DISCOUNT.
  */
 export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
   if (!Number.isInteger(input.inventoryPaise) || input.inventoryPaise < 0
@@ -246,7 +254,12 @@ export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
   if (!Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
     throw new AccountingError("Bill extra charges must be a non-negative whole number of paise.");
   }
-  const subtotalPaise = input.inventoryPaise + input.expensePaise;
+  const spreadDiscountPaise = input.spreadDiscountPaise ?? 0;
+  if (!Number.isInteger(spreadDiscountPaise) || spreadDiscountPaise < 0 || spreadDiscountPaise > discountPaise) {
+    throw new AccountingError("The spread part of a bill discount must be whole paise within the discount.");
+  }
+  // Gross value of the lines: the stock cost is net of the spread discount, so add it back.
+  const subtotalPaise = input.inventoryPaise + spreadDiscountPaise + input.expensePaise;
   if (subtotalPaise <= 0) {
     throw new AccountingError("A purchase must have a total above zero.");
   }
@@ -262,7 +275,7 @@ export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
     ...(input.inventoryPaise > 0 ? [{ account: "INVENTORY" as const, debitPaise: input.inventoryPaise, creditPaise: 0 }] : []),
     ...(input.expensePaise > 0 ? [{ account: "EXPENSE" as const, debitPaise: input.expensePaise, creditPaise: 0 }] : []),
     ...(extraChargePaise > 0 ? [{ account: "PURCHASE_EXTRA_CHARGES" as const, debitPaise: extraChargePaise, creditPaise: 0 }] : []),
-    ...(discountPaise > 0 ? [{ account: "PURCHASE_DISCOUNT" as const, debitPaise: 0, creditPaise: discountPaise }] : []),
+    ...(discountPaise - spreadDiscountPaise > 0 ? [{ account: "PURCHASE_DISCOUNT" as const, debitPaise: 0, creditPaise: discountPaise - spreadDiscountPaise }] : []),
     ...inputTaxLines(input.taxType, taxPaise),
     { account: input.paymentAccount, debitPaise: 0, creditPaise: totalPaise },
   ];
@@ -280,6 +293,77 @@ export function purchaseEntry(input: PurchaseEntryInput): PurchaseEntryResult {
     taxPaise,
     totalPaise,
   };
+}
+
+export interface DiscountSpreadLine {
+  readonly quantity: number;
+  readonly unitPricePaise: number;
+  /** True when the line is a tracked stock item (creates stock movements). */
+  readonly stock: boolean;
+}
+
+/** A run of identical units of one stock line: `quantity` units at `unitCostPaise` each. */
+export interface DiscountedLot {
+  readonly quantity: number;
+  readonly unitCostPaise: number;
+}
+
+export interface DiscountSpread {
+  /** One entry per input line: its lots (non-stock lines get no lots). Quantities sum to the line quantity. */
+  readonly lots: ReadonlyArray<readonly DiscountedLot[]>;
+  /** The part of the discount that was spread into the stock lots. */
+  readonly spreadPaise: number;
+  /** Net cost of all the stock lines (sum of lots). */
+  readonly stockCostPaise: number;
+}
+
+/**
+ * S17-7 (owner ruling Q1): the bill discount is assumed to be on STOCK items only. It is spread
+ * over the stock lines pro-rata to their value in whole paise (largest remainder, ties to the
+ * earlier line, so the shares sum exactly), then within a line per unit in whole paise with the
+ * remainder on the line's LAST unit: (qty-1) units at floor cost and one at floor + remainder.
+ * If the discount exceeds the stock value, only the stock value is spread; the rest stays
+ * unspread (spreadPaise < discountPaise) for the caller to credit to PURCHASE_DISCOUNT.
+ */
+export function spreadBillDiscount(lines: readonly DiscountSpreadLine[], discountPaise: number): DiscountSpread {
+  if (!Number.isInteger(discountPaise) || discountPaise < 0) {
+    throw new AccountingError("A bill discount must be a non-negative whole number of paise.");
+  }
+  const values = lines.map((line) => (line.stock ? line.quantity * line.unitPricePaise : 0));
+  const stockValue = values.reduce((total, value) => total + value, 0);
+  const spreadPaise = Math.min(discountPaise, stockValue);
+  const shares = values.map(() => 0);
+  if (spreadPaise > 0) {
+    const remainders: Array<{ index: number; remainder: bigint }> = [];
+    let assigned = 0;
+    values.forEach((value, index) => {
+      if (value === 0) return;
+      const product = BigInt(spreadPaise) * BigInt(value);
+      const share = Number(product / BigInt(stockValue));
+      shares[index] = share;
+      assigned += share;
+      remainders.push({ index, remainder: product % BigInt(stockValue) });
+    });
+    remainders.sort((a, b) => (a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1));
+    for (let i = 0; i < spreadPaise - assigned; i += 1) {
+      const target = remainders[i] as { index: number };
+      shares[target.index] = (shares[target.index] as number) + 1;
+    }
+  }
+  let stockCostPaise = 0;
+  const lots = lines.map((line, index): DiscountedLot[] => {
+    if (!line.stock) return [];
+    const net = (values[index] as number) - (shares[index] as number);
+    stockCostPaise += net;
+    const base = Math.floor(net / line.quantity);
+    const remainder = net - base * line.quantity;
+    if (remainder === 0) return [{ quantity: line.quantity, unitCostPaise: base }];
+    return [
+      ...(line.quantity > 1 ? [{ quantity: line.quantity - 1, unitCostPaise: base }] : []),
+      { quantity: 1, unitCostPaise: base + remainder },
+    ];
+  });
+  return { lots, spreadPaise, stockCostPaise };
 }
 
 /** Exact reversal of an entry: every debit becomes a credit and vice versa. */
@@ -302,15 +386,24 @@ export function reverseEntry(original: JournalEntry, entryId: string, descriptio
   };
 }
 
-/** Paying down a supplier balance: Dr PAYABLES, Cr CASH. */
+/**
+ * Paying down a supplier balance: Dr PAYABLES (amount + discount) / Cr CASH (amount).
+ * Q2 / S17-7: a settlement discount taken AT PAYMENT is "Discount received" income:
+ * Cr PURCHASE_DISCOUNT (discount). Without one this is the plain Dr PAYABLES, Cr CASH.
+ */
 export function supplierPaymentEntry(input: {
   readonly entryId: string;
   readonly sourceId: string;
   readonly description: string;
   readonly amountPaise: number;
+  readonly settlementDiscountPaise?: number;
 }): JournalEntry {
   if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
     throw new AccountingError("Payment amount must be a positive whole number of paise.");
+  }
+  const discountPaise = input.settlementDiscountPaise ?? 0;
+  if (!Number.isInteger(discountPaise) || discountPaise < 0) {
+    throw new AccountingError("A settlement discount must be a non-negative whole number of paise.");
   }
   return {
     id: input.entryId,
@@ -318,8 +411,9 @@ export function supplierPaymentEntry(input: {
     sourceType: "SUPPLIER_PAYMENT",
     description: input.description,
     lines: balancedLines([
-      { account: "PAYABLES", debitPaise: input.amountPaise, creditPaise: 0 },
+      { account: "PAYABLES", debitPaise: input.amountPaise + discountPaise, creditPaise: 0 },
       { account: "CASH", debitPaise: 0, creditPaise: input.amountPaise },
+      ...(discountPaise > 0 ? [{ account: "PURCHASE_DISCOUNT" as const, debitPaise: 0, creditPaise: discountPaise }] : []),
     ]),
     isReversal: false,
   };

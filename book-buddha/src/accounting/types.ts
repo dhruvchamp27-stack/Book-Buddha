@@ -41,7 +41,23 @@ export interface Invoice {
   readonly paymentAccount: AccountCode;
   readonly status: InvoiceStatus;
   readonly convertedInvoiceId?: string;
+  /** S17-8: set on an invoice made from a quotation; the quotation it came from. */
+  readonly sourceQuotationId?: string | null;
+  /** S17-8: set on a quotation that was converted; the invoice(s) made from it. */
+  readonly convertedInvoiceIds?: readonly string[];
+  /**
+   * F (S16-2(c), Q13). True when the invoice is dated on or before the business's opening date and
+   * was kept as HISTORY: never journalled, no stock moved, left out of every total. Set once at
+   * finalize and frozen. Always present on what the repository reads back.
+   */
+  readonly beforeOpening?: boolean;
 }
+
+/**
+ * S17-4: what a create call takes. The APP numbers every document it originates; `number` is given
+ * only by the import path (a past document keeps its old number).
+ */
+export type NewInvoice = Omit<Invoice, "number"> & { readonly number?: string };
 
 export type CreditNoteStatus = "DRAFT" | "FINALIZED" | "CANCELLED";
 
@@ -64,7 +80,12 @@ export interface CreditNote {
   readonly noteDate?: string;
   readonly status: CreditNoteStatus;
   readonly lines: readonly CreditNoteLine[];
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening?: boolean;
 }
+
+/** S17-4: a credit note to create; the number is the app's unless the import path supplies one. */
+export type NewCreditNote = Omit<CreditNote, "number"> & { readonly number?: string };
 
 export interface JournalLine {
   /**
@@ -130,6 +151,8 @@ export interface Payment {
    */
   readonly cancelledAt: string | null;
   readonly cancellationReason: string | null;
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening?: boolean;
 }
 
 export interface AuditEvent {
@@ -166,9 +189,13 @@ export interface SupplierPayment {
   readonly billId: string | null;
   readonly expenseId: string | null;
   readonly amountPaise: number;
+  /** S17-7: discount received at payment (settles the document along with amountPaise); 0 when none. */
+  readonly settlementDiscountPaise?: number;
   readonly paymentAccount: "CASH";
   readonly paidAt: string;
   /** R8. The supplier mirror of Payment.cancelledAt. */
   readonly cancelledAt: string | null;
   readonly cancellationReason: string | null;
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening?: boolean;
 }

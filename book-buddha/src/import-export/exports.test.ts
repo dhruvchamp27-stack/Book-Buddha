@@ -79,23 +79,37 @@ describe("fixed headers", () => {
     expect(buildExport(repo, "customers").columns).toEqual([...party, "Customer number", "Active"]);
     expect(buildExport(repo, "suppliers").columns).toEqual([...party, "Active"]);
     expect(buildExport(repo, "items").columns).toEqual(["Name", "Unit", "Track stock", "Description", "Selling price", "Cost price", "MRP", "Reorder level", "Active"]);
+    // F: the invoice export gained a trailing "Before opening" column (the importer accepts and ignores it).
     expect(buildExport(repo, "invoices").columns).toEqual([
       "Number", "Invoice date", "Due date", "Customer", "Status", "Item", "Description", "Quantity", "Unit price", "Discount", "Extra charge",
-      "Tax type", "Tax rate", "Fair", "Notes",
+      "Tax type", "Tax rate", "Fair", "Notes", "Before opening",
     ]);
   });
 
   it("every dataset builds on an empty book, and every row is as wide as its header", () => {
+    // Report datasets carry labelled total rows even on an empty book, and customer-statement needs a
+    // customerId: they are covered by their own HTTP tests in api/export-routes.test.ts. Here, only that
+    // they build and are as wide as their header.
+    const reportDatasets = new Set<string>([
+      "profit-and-loss", "balance-sheet", "customer-statement", "customer-balance-detail", "collections",
+      "stock-ageing", "inventory-valuation-detail", "item-profitability",
+    ]);
     for (const dataset of EXPORT_DATASETS) {
+      if (dataset === "customer-statement") continue;
       const t = buildExport(repo, dataset);
       expect(t.columns.length).toBeGreaterThan(0);
-      expect(t.rows).toEqual([]);
+      if (reportDatasets.has(dataset)) {
+        for (const row of t.rows) expect(row, dataset).toHaveLength(t.columns.length);
+      } else {
+        expect(t.rows).toEqual([]);
+      }
     }
     seedBooks();
     for (const dataset of EXPORT_DATASETS) {
+      if (dataset === "customer-statement") continue;
       const t = buildExport(repo, dataset);
       expect(t.rows.length, dataset).toBeGreaterThan(0);
-      for (const row of t.rows) expect(row).toHaveLength(t.columns.length);
+      for (const row of t.rows) expect(row, dataset).toHaveLength(t.columns.length);
     }
   });
 });

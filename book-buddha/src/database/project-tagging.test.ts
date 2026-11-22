@@ -213,6 +213,7 @@ describe("project (fair) tagging, slice 8b", () => {
       expect(adjust.fairId).toBeUndefined();
       expect(() => w.repository.addStockMovement({ itemId: w.stockItemId, movementType: "OPENING", quantity: 1, unitCostPaise: 1, fairId: "ghost" }))
         .toThrow(RepositoryValidationError);
+      // S17: a bare PURCHASE is refused outright now (it used to be refused only with a project tag).
       expect(() => w.repository.addStockMovement({ itemId: w.stockItemId, movementType: "PURCHASE", quantity: 1, unitCostPaise: 1, fairId: w.fairA }))
         .toThrow(RepositoryValidationError);
     });

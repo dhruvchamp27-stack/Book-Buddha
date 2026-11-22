@@ -47,7 +47,7 @@ async function serviceBill(w: W, number: string, billDate: string, amount: numbe
   return bill.id as string;
 }
 async function serviceReturn(billId: string, number: string, returnDate: string, amount: number): Promise<string> {
-  const ret = await must("POST", "/purchase-returns", { billId, number, reason: "Short supply", returnDate, lines: [{ description: "Service", quantity: 1, unitPricePaise: amount }] });
+  const ret = await must("POST", "/purchase-returns", { billId, reason: "Short supply", returnDate, lines: [{ description: "Service", quantity: 1, unitPricePaise: amount }] });
   await must("POST", `/purchase-returns/${ret.id}/finalize`, {});
   return ret.id as string;
 }
@@ -90,11 +90,11 @@ describe("supplier defects", () => {
     const w = await world();
     const billId = await serviceBill(w, "PB-2c", "2025-04-10", 10000);
     await serviceReturn(billId, "PR-2c", "2025-04-15", 4000);
-    await must("POST", "/purchase-returns", { billId, number: "PR-draft", reason: "x", returnDate: "2025-04-16", lines: [{ description: "Service", quantity: 1, unitPricePaise: 1000 }] });
+    await must("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-16", lines: [{ description: "Service", quantity: 1, unitPricePaise: 1000 }] });
     const stmt = await must("GET", `/reports/supplier-statement?supplierId=${w.supplierId}`);
     const returns = (stmt.rows as any[]).filter((r) => r.type === "RETURN");
     expect(returns).toHaveLength(1);
-    expect(returns[0]).toMatchObject({ date: "2025-04-15", amountPaise: -4000, reference: "PR-2c", documentId: billId });
+    expect(returns[0]).toMatchObject({ date: "2025-04-15", amountPaise: -4000, reference: "PR-001/25-26", documentId: billId });
     expect(stmt.closingBalancePaise).toBe(6000);
   });
 
@@ -152,7 +152,7 @@ describe("supplier defects", () => {
   it("D7: a draft purchase return cannot be finalized once its bill is cancelled", async () => {
     const w = await world();
     const billId = await serviceBill(w, "PB-7", "2025-04-10", 10000);
-    const ret = await must("POST", "/purchase-returns", { billId, number: "PR-7", reason: "x", returnDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
+    const ret = await must("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
     await must("POST", `/purchase-bills/${billId}/cancel`, {});
     const fin = await req("POST", `/purchase-returns/${ret.id}/finalize`, {});
     expect(fin.status).toBeGreaterThanOrEqual(400);
@@ -173,10 +173,10 @@ describe("supplier defects", () => {
   it("D8: with one item on two lines at different prices, a return at either price is accepted and takes that lot's cost", async () => {
     const w = await world();
     const billId = await twoPriceBill(w);
-    for (const [number, price] of [["PR-8a", 10000], ["PR-8b", 30000]] as const) {
+    for (const price of [10000, 30000] as const) {
       const before = ledger("INVENTORY");
       const valBefore = valuation();
-      const create = await req("POST", "/purchase-returns", { billId, number, reason: "Damaged", returnDate: "2025-04-15", lines: [{ ...returnLine(price), itemId: w.itemId }] });
+      const create = await req("POST", "/purchase-returns", { billId, reason: "Damaged", returnDate: "2025-04-15", lines: [{ ...returnLine(price), itemId: w.itemId }] });
       expect(create.status).toBe(201);
       expect((await req("POST", `/purchase-returns/${create.body.id}/finalize`, {})).status).toBe(200);
       expect(before - ledger("INVENTORY")).toBe(price);
@@ -189,18 +189,18 @@ describe("supplier defects", () => {
   it("D8: quantity is capped per (item, price) lot, and a price on no line is refused with the existing wording", async () => {
     const w = await world();
     const billId = await twoPriceBill(w);
-    const twoAtLow = await req("POST", "/purchase-returns", { billId, number: "PR-8c", reason: "x", returnDate: "2025-04-15", lines: [{ ...returnLine(10000, 2), itemId: w.itemId }] });
+    const twoAtLow = await req("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-15", lines: [{ ...returnLine(10000, 2), itemId: w.itemId }] });
     expect(twoAtLow.status).toBeGreaterThanOrEqual(400);
     expect(JSON.stringify(twoAtLow.body)).toMatch(/exceeds what bill/);
-    const wrongPrice = await req("POST", "/purchase-returns", { billId, number: "PR-8d", reason: "x", returnDate: "2025-04-15", lines: [{ ...returnLine(20000), itemId: w.itemId }] });
+    const wrongPrice = await req("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-15", lines: [{ ...returnLine(20000), itemId: w.itemId }] });
     expect(wrongPrice.status).toBeGreaterThanOrEqual(400);
     expect(JSON.stringify(wrongPrice.body)).toMatch(/must use the price the bill charged/);
     // already-returned is per price too: after returning the 100 unit, the 300 unit is still returnable.
-    const first = await must("POST", "/purchase-returns", { billId, number: "PR-8e", reason: "x", returnDate: "2025-04-15", lines: [{ ...returnLine(10000), itemId: w.itemId }] });
+    const first = await must("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-15", lines: [{ ...returnLine(10000), itemId: w.itemId }] });
     await must("POST", `/purchase-returns/${first.id}/finalize`, {});
-    const again = await req("POST", "/purchase-returns", { billId, number: "PR-8f", reason: "x", returnDate: "2025-04-16", lines: [{ ...returnLine(10000), itemId: w.itemId }] });
+    const again = await req("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-16", lines: [{ ...returnLine(10000), itemId: w.itemId }] });
     expect(again.status).toBeGreaterThanOrEqual(400);
-    const other = await req("POST", "/purchase-returns", { billId, number: "PR-8g", reason: "x", returnDate: "2025-04-16", lines: [{ ...returnLine(30000), itemId: w.itemId }] });
+    const other = await req("POST", "/purchase-returns", { billId, reason: "x", returnDate: "2025-04-16", lines: [{ ...returnLine(30000), itemId: w.itemId }] });
     expect(other.status).toBe(201);
   });
 });

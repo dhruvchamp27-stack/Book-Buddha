@@ -6,6 +6,8 @@
  *                          rowCount, the first 10 rows, and a suggested column map
  *   POST /imports/preview  { kind, fileName, contentBase64, columnMap, companyId, businessId?, dateFormat }
  *   POST /imports/commit   the same body; preview runs the real posting path and rolls back, commit keeps it
+ *                          (and writes one `import.committed` audit event)
+ *   GET  /imports/last     per kind, the latest commit: { kind, committedAt, fileName, created, skipped, failed }
  *
  * TRANSPORT: base64 inside a JSON body, like attachments (S11-19), so every route that takes a
  * file carries a per-route `bodyLimit` (`IMPORT_BODY_LIMIT_BYTES`); Fastify's 1 MB default would
@@ -18,6 +20,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { appendAuditEvent } from "../database/audit-log.js";
 import { RepositoryValidationError, type AccountingRepository } from "../database/repository.js";
 import { CodecError, parseTabular, type ParsedTabular } from "../import-export/codec.js";
 import { getImportKind, registeredKinds, runImport, suggestColumnMap } from "../import-export/import-engine.js";
@@ -102,7 +105,7 @@ export function registerImportRoutes(app: FastifyInstance, context: ImportRoutes
         throw new RepositoryValidationError(`Business ${body.businessId} was not found in that company.`);
       }
       const parsed = readFile(body.fileName, body.contentBase64);
-      return runImport({
+      const result = runImport({
         repository,
         kind: definition.kind,
         parsed,
@@ -112,6 +115,31 @@ export function registerImportRoutes(app: FastifyInstance, context: ImportRoutes
         dateFormat: body.dateFormat,
         mode,
       });
+      if (mode === "COMMIT") {
+        appendAuditEvent(repository.db, {
+          action: "import.committed",
+          entityId: result.kind,
+          entityType: "import",
+          occurredAt: new Date().toISOString(),
+          companyId: body.companyId,
+          afterValues: { kind: result.kind, fileName: body.fileName, created: result.created, skipped: result.skipped, failed: result.failed },
+        });
+      }
+      return result;
     });
   }
+
+  app.get("/imports/last", async () => {
+    const rows = repository.db
+      .prepare("SELECT occurred_at, after_values FROM audit_events WHERE action = 'import.committed' ORDER BY id DESC")
+      .all() as Array<{ occurred_at: string; after_values: string | null }>;
+    const latest = new Map<string, { kind: string; committedAt: string; fileName: string; created: number; skipped: number; failed: number }>();
+    for (const r of rows) {
+      if (r.after_values === null) continue;
+      const v = JSON.parse(r.after_values) as { kind: string; fileName: string; created: number; skipped: number; failed: number };
+      if (latest.has(v.kind)) continue;
+      latest.set(v.kind, { kind: v.kind, committedAt: r.occurred_at, fileName: v.fileName, created: v.created, skipped: v.skipped, failed: v.failed });
+    }
+    return { imports: [...latest.values()] };
+  });
 }

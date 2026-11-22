@@ -35,6 +35,7 @@ describe("import routes", () => {
         ["GET", "/imports/kinds"],
         ["POST", "/imports/inspect", body],
         ["POST", "/imports/preview", { ...body, columnMap: { name: "Name" }, companyId: "x", dateFormat: "YYYY-MM-DD" }],
+        ["GET", "/imports/last"],
         ["POST", "/imports/commit", { ...body, columnMap: { name: "Name" }, companyId: "x", dateFormat: "YYYY-MM-DD" }],
       ];
       for (const [method, url, payload] of calls) {
@@ -187,6 +188,97 @@ describe("import routes", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({ created: 1, failed: 0 });
       expect(repository.getOpeningBalances(businessId)).toHaveLength(1);
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("repeated payments import, a re-import skips them, and GET /imports/last reports each kind's latest commit", async () => {
+    const { app, repository, token, companyId, businessId } = await setUp();
+    try {
+      repository.createCustomer({ companyId, name: "Acme Books" });
+      const commit = async (kind: string, fileName: string, csv: string, columnMap: Record<string, string>) =>
+        (await app.inject({
+          method: "POST", url: "/imports/commit", headers: auth(token),
+          payload: { kind, fileName, contentBase64: b64(csv), companyId, businessId, dateFormat: "YYYY-MM-DD", columnMap },
+        })).json<{ created: number; skipped: number; failed: number }>();
+      expect(await app.inject({ method: "GET", url: "/imports/last", headers: auth(token) }).then((r) => r.json())).toEqual({ imports: [] });
+
+      const inv = await commit("invoices", "inv.csv", "Number,Invoice date,Customer,Description,Quantity,Unit price\r\nINV-1,2026-11-01,Acme Books,Binding,1,5000\r\n",
+        { number: "Number", invoiceDate: "Invoice date", customer: "Customer", description: "Description", quantity: "Quantity", unitPrice: "Unit price" });
+      expect(inv).toMatchObject({ created: 1, failed: 0 });
+
+      const pays = "Invoice number,Amount,Paid on\r\nINV-1,1000,2026-11-10\r\nINV-1,1000,2026-11-10\r\n";
+      const map = { invoiceNumber: "Invoice number", amount: "Amount", paidOn: "Paid on" };
+      expect(await commit("payments", "pay.csv", pays, map)).toMatchObject({ created: 2, skipped: 0, failed: 0 });
+      expect(await commit("payments", "pay.csv", pays, map)).toMatchObject({ created: 0, skipped: 2, failed: 0 });
+
+      const last = (await app.inject({ method: "GET", url: "/imports/last", headers: auth(token) })).json<{ imports: Array<Record<string, unknown>> }>();
+      expect(last.imports).toHaveLength(2);
+      const byKind = Object.fromEntries(last.imports.map((i) => [i.kind as string, i]));
+      expect(byKind["payments"]).toMatchObject({ kind: "payments", fileName: "pay.csv", created: 0, skipped: 2, failed: 0 });
+      expect(typeof byKind["payments"]?.committedAt).toBe("string");
+      expect(byKind["invoices"]).toMatchObject({ fileName: "inv.csv", created: 1 });
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("imports expenses: preview then commit posts each journal, a re-import skips, an unknown category fails only its row", async () => {
+    const { app, repository, token, companyId, businessId } = await setUp();
+    try {
+      repository.createSupplier({ companyId, name: "Paper House" });
+      repository.createExpenseCategory({ companyId, name: "Courier" });
+      repository.createExpenseCategory({ companyId, name: "Stationery" });
+      const columnMap = {
+        number: "Number", expenseDate: "Date", supplier: "Supplier", category: "Category", description: "Description",
+        amount: "Amount", paymentAccount: "Payment account",
+      };
+      const csv = [
+        "Number,Date,Supplier,Category,Description,Amount,Payment account",
+        "EXP-1,2026-11-03,Paper House,Stationery,Pens,300,PAYABLES",
+        "EXP-1,2026-11-03,Paper House,Stationery,Files,200,PAYABLES",
+        "EXP-2,2026-11-04,,Courier,Parcel to Pune,150,CASH",
+        "",
+      ].join("\r\n");
+      const payload = { kind: "expenses", fileName: "exp.csv", companyId, businessId, dateFormat: "YYYY-MM-DD", columnMap, contentBase64: b64(csv) };
+      const preview = await app.inject({ method: "POST", url: "/imports/preview", headers: auth(token), payload });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json()).toMatchObject({ mode: "PREVIEW", kind: "expenses", created: 2, skipped: 0, failed: 0 });
+      expect(repository.listExpenses({ businessId })).toHaveLength(0);
+
+      const commit = await app.inject({ method: "POST", url: "/imports/commit", headers: auth(token), payload });
+      expect(commit.json()).toMatchObject({ mode: "COMMIT", created: 2, failed: 0 });
+      const expenses = repository.listExpenses({ businessId });
+      expect(expenses.map((e) => [e.number, e.status, e.expenseDate, e.description, e.amountPaise, e.paymentAccount])).toEqual([
+        ["EXP-1", "FINALIZED", "2026-11-03", "Pens; Files", 50_000, "PAYABLES"],
+        ["EXP-2", "FINALIZED", "2026-11-04", "Parcel to Pune", 15_000, "CASH"],
+      ]);
+      const journalOf = (number: string): Array<[string, number, number]> => {
+        const id = expenses.find((e) => e.number === number)?.id;
+        const entry = repository.listJournalEntries().find((j) => j.sourceId === id);
+        return (entry?.lines ?? []).map((l) => [l.account, l.debitPaise, l.creditPaise]);
+      };
+      expect(journalOf("EXP-1")).toEqual([["EXPENSE", 50_000, 0], ["PAYABLES", 0, 50_000]]);
+      expect(journalOf("EXP-2")).toEqual([["EXPENSE", 15_000, 0], ["CASH", 0, 15_000]]);
+
+      const again = await app.inject({ method: "POST", url: "/imports/commit", headers: auth(token), payload });
+      expect(again.json()).toMatchObject({ created: 0, skipped: 2, failed: 0 });
+      expect(repository.listExpenses({ businessId })).toHaveLength(2);
+
+      const mixed = [
+        "Number,Date,Supplier,Category,Description,Amount,Payment account",
+        "EXP-3,2026-11-05,,Courier,Tape,80,CASH",
+        "EXP-4,2026-11-05,,Postage,Stamps,40,CASH",
+        "",
+      ].join("\r\n");
+      const result = await app.inject({ method: "POST", url: "/imports/commit", headers: auth(token), payload: { ...payload, contentBase64: b64(mixed) } });
+      expect(result.json()).toMatchObject({ created: 1, failed: 1 });
+      const failedMessage = result.json<{ outcomes: Array<{ status: string; message?: string }> }>().outcomes.find((o) => o.status === "FAILED")?.message;
+      expect(failedMessage).toContain("Postage");
+      expect(repository.listExpenses({ businessId }).map((e) => e.number)).toEqual(["EXP-1", "EXP-2", "EXP-3"]);
     } finally {
       await app.close();
       repository.close();

@@ -8,13 +8,17 @@ import {
   inputTaxPaise,
   purchaseEntry,
   reverseEntry,
+  spreadBillDiscount,
   supplierPaymentEntry,
   validatePurchaseTax,
 } from "../accounting/engine.js";
+import type { DiscountedLot } from "../accounting/engine.js";
 import type {
   AccountCode,
   AuditEvent,
   CreditNote,
+  NewCreditNote,
+  NewInvoice,
   CreditNoteLine,
   Invoice,
   InvoiceLine,
@@ -51,6 +55,7 @@ import { assertPeriodOpen, postJournalEntry } from "./ledger.js";
 import { appendAuditEvent } from "./audit-log.js";
 import { resolveMoneyFields, legacyAccountFor, DEFAULT_MONEY_ACCOUNT, type MoneyFields, type MoneyFieldsInput } from "./money-account-schema.js";
 import { assertBankOrCashBalanceZero } from "../banking/bank-accounts.js";
+import { financialYearLabel, nextNumberAfter } from "../banking/internal-transfers.js";
 import { assertMoneyAccount } from "../banking/money-accounts.js";
 import { assertNotOnBankLine } from "../banking/statement-lines.js";
 export type { MoneyFields, MoneyFieldsInput } from "./money-account-schema.js";
@@ -235,9 +240,11 @@ interface InvoiceRow {
   notes: string | null;
   payment_terms: string | null;
   converted_invoice_id: string | null;
+  source_quotation_id?: string | null;
   tax_type: Invoice["taxType"] | null;
   tax_rate_basis_points: number;
   created_at?: string;
+  before_opening?: number;
 }
 
 interface InvoiceLineRow {
@@ -383,6 +390,8 @@ export interface CreditNoteSummary {
   readonly reason: string;
   readonly status: CreditNote["status"];
   readonly createdAt: string;
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening: boolean;
   /** Taxable value of the returned lines, in paise. */
   readonly subtotalPaise: number;
   /** Tax reversed on the returned lines (invoice tax rate), in paise. */
@@ -844,6 +853,8 @@ export interface InvoiceSummary {
   readonly paymentMode: string | null;
   readonly paymentReference: string | null;
   readonly status: Invoice["status"];
+  /** F: kept as history (dated on or before the opening date); never journalled. */
+  readonly beforeOpening: boolean;
   readonly fairId?: string;
   readonly taxType: Invoice["taxType"];
   readonly taxRateBasisPoints: number;
@@ -1400,8 +1411,8 @@ export class AccountingRepository {
     /** The date the journal entry carries (YYYY-MM-DD, IST). Defaults to today. */
     occurredOn?: string;
   }): StockMovement {
-    if (input.fairId !== undefined && input.movementType === "PURCHASE") {
-      throw new RepositoryValidationError("A project can be tagged on an opening or adjustment movement; purchases take the fair of their bill.");
+    if (input.movementType === "PURCHASE") {
+      throw new RepositoryValidationError("Stock comes in through a purchase bill, opening stock, or a stock adjustment.");
     }
     if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
       throw new RepositoryValidationError("Stock quantity must be a positive whole number.");
@@ -1430,6 +1441,7 @@ export class AccountingRepository {
       ? this.resolveStockMovementBusiness(item.company_id, input.businessId, input.movementType)
       : undefined;
     const entryDate = input.occurredOn ?? istDateOf();
+    if (businessId === undefined) this.assertStockDateOpen(item.company_id, input.businessId, entryDate);
     const movementId = randomUUID();
     const journalEntryId = `je-stock-movement-${movementId}`;
     const movement: StockMovement = {
@@ -1529,6 +1541,7 @@ export class AccountingRepository {
       ? this.resolveStockMovementBusiness(item.company_id, input.businessId, "ADJUSTMENT")
       : undefined;
     const entryDate = input.occurredOn ?? istDateOf();
+    if (businessId === undefined) this.assertStockDateOpen(item.company_id, input.businessId, entryDate);
     const writedownId = randomUUID();
     const journalEntryId = `je-stock-writedown-${writedownId}`;
 
@@ -1757,6 +1770,20 @@ export class AccountingRepository {
     throw new RepositoryValidationError(
       `This company has ${businesses.length} businesses (${businesses.map((b) => b.name).join(", ")}), so say which one this stock belongs to.`,
     );
+  }
+
+  /**
+   * Owner ruling S17. A stock row that posts nothing (zero cost) still honours the financial-year
+   * lock. Business named or the company has just one: that business's lock. Several businesses and
+   * none named: refuse when the date is locked for ANY of the company's businesses.
+   */
+  private assertStockDateOpen(companyId: string, businessId: string | undefined, date: string): void {
+    if (businessId !== undefined) {
+      assertPeriodOpen(this.db, this.resolveStockMovementBusiness(companyId, businessId, "ADJUSTMENT"), date);
+      return;
+    }
+    const ids = this.db.prepare("SELECT id FROM businesses WHERE company_id = ? ORDER BY id").all(companyId) as Array<{ id: string }>;
+    for (const row of ids) assertPeriodOpen(this.db, row.id, date);
   }
 
   // ---------------------------------------------------------------------------
@@ -2007,6 +2034,7 @@ export class AccountingRepository {
       paymentMode: row.payment_mode,
       paymentReference: row.payment_reference,
       status: row.status,
+      beforeOpening: row.before_opening === 1,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
     }));
   }
@@ -2045,6 +2073,22 @@ export class AccountingRepository {
   }
 
   /**
+   * Owner ruling S17: a refund with no account named goes back through the document's ORIGINAL
+   * money account. Paid at once: the stored one. On credit: the account of its latest live
+   * (not cancelled) payment. None found: CASH.
+   */
+  private defaultRefundAccount(table: "invoices" | "purchase_bills", paymentsTable: "payments" | "supplier_payments", fkColumn: "invoice_id" | "bill_id", docId: string, paymentAccount: string): string {
+    if (paymentAccount === "CASH") {
+      const row = this.db.prepare(`SELECT money_account FROM ${table} WHERE id = ?`).get(docId) as { money_account: string } | undefined;
+      return row?.money_account ?? DEFAULT_MONEY_ACCOUNT;
+    }
+    const last = this.db
+      .prepare(`SELECT money_account FROM ${paymentsTable} WHERE ${fkColumn} = ? AND cancelled_at IS NULL ORDER BY paid_at DESC, rowid DESC LIMIT 1`)
+      .get(docId) as { money_account: string } | undefined;
+    return last?.money_account ?? DEFAULT_MONEY_ACCOUNT;
+  }
+
+  /**
    * D11 (owner ruling S16-7). An invoice number is unique PER BUSINESS and a CANCELLED invoice keeps
    * its number for good. Quotations are a separate series and are neither checked nor counted.
    * Enforced here, not by a DB index; idx_invoices_business keeps the lookup to one business's rows.
@@ -2058,14 +2102,44 @@ export class AccountingRepository {
     }
   }
 
-  public saveDraft(invoice: Invoice & MoneyFieldsInput): void {
+  /**
+   * S17-4: the app numbers every document it originates, at first save: `INV-001/25-26`, one series
+   * per BUSINESS, prefix and financial year (of the document's own date). Highest ever + 1, so a
+   * cancelled document keeps its number. Invoices (INV) read only non-quotation rows, quotations
+   * (QUO) only quotations, though both live in `invoices`.
+   */
+  private nextBusinessNumber(kind: "INV" | "QUO" | "CN" | "PR", businessId: string, date: string): string {
+    const label = financialYearLabel(date);
+    const like = `${kind}-%/${label}`;
+    const sql = {
+      INV: "SELECT number FROM invoices WHERE business_id = ? AND status <> 'QUOTATION' AND number LIKE ?",
+      QUO: "SELECT number FROM invoices WHERE business_id = ? AND status = 'QUOTATION' AND number LIKE ?",
+      CN: "SELECT cn.number FROM credit_notes cn JOIN invoices i ON i.id = cn.invoice_id WHERE i.business_id = ? AND cn.number LIKE ?",
+      PR: "SELECT pr.number FROM purchase_returns pr JOIN purchase_bills b ON b.id = pr.bill_id WHERE b.business_id = ? AND pr.number LIKE ?",
+    }[kind];
+    const rows = this.db.prepare(sql).all(businessId, like) as Array<{ number: string }>;
+    return nextNumberAfter(rows.map((r) => r.number), kind, label);
+  }
+
+  /** Saves a draft invoice or quotation and returns its number (the app's, unless the import path gave one). */
+  public saveDraft(invoice: NewInvoice & MoneyFieldsInput): string {
+    return this.db.transaction((): string => {
+      const date = invoice.invoiceDate ?? istDateOf();
+      const number = invoice.number
+        ?? this.nextBusinessNumber(invoice.status === "QUOTATION" ? "QUO" : "INV", invoice.businessId, date);
+      this.saveDraftNumbered({ ...invoice, number });
+      return number;
+    })();
+  }
+
+  private saveDraftNumbered(invoice: Invoice & MoneyFieldsInput & { readonly sourceQuotationId?: string | null }): void {
     const transaction = this.db.transaction(() => {
       if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number);
       this.validateInvoiceReferences(invoice);
       const money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, invoice);
       this.db
         .prepare(
-          "INSERT INTO invoices (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, number, invoice_date, due_date, discount_paise, extra_charge_paise, notes, payment_terms, tax_type, tax_rate_basis_points, payment_account, status, converted_invoice_id, created_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO invoices (id, business_id, customer_id, fair_id, buyer_name, buyer_contact, number, invoice_date, due_date, discount_paise, extra_charge_paise, notes, payment_terms, tax_type, tax_rate_basis_points, payment_account, status, converted_invoice_id, created_at, money_account, payment_mode, payment_reference, source_quotation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           invoice.id,
@@ -2095,6 +2169,7 @@ export class AccountingRepository {
           money.moneyAccount,
           money.paymentMode,
           money.paymentReference,
+          invoice.sourceQuotationId ?? null,
         );
       const lineStatement = this.db.prepare(
         "INSERT INTO invoice_lines (invoice_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
@@ -2112,18 +2187,51 @@ export class AccountingRepository {
     transaction();
   }
 
-  public updateDraft(invoice: Invoice & MoneyFieldsInput): void {
-    if (invoice.status !== "DRAFT" && invoice.status !== "QUOTATION") {
+  /** S17-4: editing a draft never changes its number; any `number` passed in is ignored. */
+  public updateDraft(input: NewInvoice & MoneyFieldsInput): void {
+    if (input.status !== "DRAFT" && input.status !== "QUOTATION") {
       throw new Error("Only draft invoices and quotations can be edited.");
     }
     const transaction = this.db.transaction(() => {
-      const current = this.getInvoice(invoice.id);
+      const current = this.getInvoice(input.id);
       if (current.status !== "DRAFT" && current.status !== "QUOTATION") {
         throw new Error("Only draft invoices and quotations can be edited.");
       }
-      if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number, invoice.id);
+      // Owner ruling S17-4: an edit never changes a document between quotation and invoice.
+      if (current.status === "QUOTATION" && input.status === "DRAFT") {
+        throw new RepositoryValidationError(
+          "Use Convert to turn a quotation into an invoice; editing cannot change a quotation into an invoice.",
+        );
+      }
+      if (current.status === "DRAFT" && input.status === "QUOTATION") {
+        throw new RepositoryValidationError(
+          "An invoice cannot be changed into a quotation by editing. Create a new quotation instead.",
+        );
+      }
+      const invoice = { ...input, number: current.number };
       this.validateInvoiceReferences(invoice);
-      const money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, invoice);
+      // Owner ruling S17: an edit never changes the money account / mode / reference unless the
+      // user sends a new one (CASH included, which is then a new choice). Anything left out keeps
+      // the stored value. A document edited into a credit one gets what saveDraft stores for it.
+      let moneyInput: MoneyFieldsInput = invoice;
+      let money: MoneyFields;
+      if (invoice.paymentAccount === "CASH") {
+        const stored = this.db
+          .prepare("SELECT money_account, payment_mode, payment_reference FROM invoices WHERE id = ?")
+          .get(invoice.id) as { money_account: string; payment_mode: string | null; payment_reference: string | null };
+        if (invoice.moneyAccount === undefined && invoice.paymentMode === undefined && invoice.paymentReference === undefined) {
+          money = { moneyAccount: stored.money_account, paymentMode: stored.payment_mode, paymentReference: stored.payment_reference };
+        } else {
+          moneyInput = {
+            moneyAccount: invoice.moneyAccount ?? stored.money_account,
+            paymentMode: invoice.paymentMode === undefined ? stored.payment_mode : invoice.paymentMode,
+            paymentReference: invoice.paymentReference === undefined ? stored.payment_reference : invoice.paymentReference,
+          };
+          money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, moneyInput);
+        }
+      } else {
+        money = this.resolveDocumentMoney(invoice.businessId, invoice.paymentAccount, moneyInput);
+      }
       this.db
         .prepare(
           "UPDATE invoices SET business_id = ?, customer_id = ?, fair_id = ?, buyer_name = ?, buyer_contact = ?, number = ?, invoice_date = ?, due_date = ?, discount_paise = ?, extra_charge_paise = ?, notes = ?, payment_terms = ?, tax_type = ?, tax_rate_basis_points = ?, payment_account = ?, status = ?, money_account = ?, payment_mode = ?, payment_reference = ? WHERE id = ?",
@@ -2180,10 +2288,11 @@ export class AccountingRepository {
   }
 
   /**
-   * Owner ruling S16-9: when the invoice number is already taken the conversion is REFUSED (never
-   * renumbered behind his back); he gives the number. Default number: `INV-<quotation number>`.
+   * Owner ruling S17-4/S17-8: a converted quotation gets the app's NEXT invoice number (INV series,
+   * never the quotation's QUO number) and keeps a link both ways: the invoice's `sourceQuotationId`
+   * and the quotation's `convertedInvoiceIds`. The route takes no number.
    */
-  public convertQuotation(quotationId: string, number?: string): Invoice {
+  public convertQuotation(quotationId: string): Invoice {
     const quotation = this.getInvoice(quotationId);
     if (quotation.status !== "QUOTATION") {
       throw new RepositoryValidationError("Only quotations can be converted into invoices.");
@@ -2192,11 +2301,12 @@ export class AccountingRepository {
     if (quotation.convertedInvoiceId !== undefined) {
       throw new RepositoryValidationError("This quotation has already been converted.");
     }
-    const invoice: Invoice = {
-      ...quotation,
+    const { number: _quotationNumber, convertedInvoiceIds: _ids, ...rest } = quotation;
+    const invoice: NewInvoice = {
+      ...rest,
       id: randomUUID(),
-      number: number ?? `INV-${quotation.number}`,
       status: "DRAFT",
+      sourceQuotationId: quotationId,
     };
     this.saveDraft(invoice);
     this.db.transaction(() => {
@@ -2212,25 +2322,38 @@ export class AccountingRepository {
     return this.getInvoice(invoice.id);
   }
 
-  public saveCreditNote(note: CreditNote): void {
+  /** Saves a draft credit note and returns its number (the app's CN-001/25-26, unless the import path gave one). */
+  public saveCreditNote(note: NewCreditNote): string {
     const invoice = this.getInvoice(note.invoiceId);
     if (invoice.status !== "FINALIZED") throw new RepositoryValidationError("Credit notes require a finalized invoice.");
+    this.assertInvoiceTakesCreditNote(invoice);
     if (note.status !== "DRAFT" || note.lines.length === 0) throw new RepositoryValidationError("Credit notes must start as non-empty drafts.");
     this.validateCreditNoteLines(invoice, note.lines);
     // S11-20: NULL when no date is given. The date is SPECIFIED, never guessed from "today at save".
     const noteDate = note.noteDate ?? null;
     if (noteDate !== null) this.assertIsoDate("Credit note date", noteDate);
-    const transaction = this.db.transaction(() => {
+    const transaction = this.db.transaction((): string => {
+      const number = note.number ?? this.nextBusinessNumber("CN", invoice.businessId, noteDate ?? istDateOf());
       this.db.prepare("INSERT INTO credit_notes (id, invoice_id, number, reason, note_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(note.id, note.invoiceId, note.number, note.reason, noteDate, note.status, new Date().toISOString());
+        .run(note.id, note.invoiceId, number, note.reason, noteDate, note.status, new Date().toISOString());
       const statement = this.db.prepare("INSERT INTO credit_note_lines (credit_note_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)");
       for (const line of note.lines) statement.run(note.id, line.itemId ?? null, line.description, line.quantity, line.unitPricePaise);
       this.insertAuditEvent({ action: "credit_note.created", entityId: note.id, occurredAt: new Date().toISOString() });
+      return number;
     });
-    transaction();
+    return transaction();
   }
 
-  public finalizeCreditNote(creditNoteId: string, options: { readonly confirmBackdatedMonth?: boolean } = {}): JournalEntry {
+  /** F / S17-12: a history invoice was never posted, so it cannot take a credit note. */
+  private assertInvoiceTakesCreditNote(invoice: Invoice): void {
+    if (invoice.beforeOpening === true) {
+      throw new RepositoryValidationError(
+        "This invoice is kept as history (dated before your opening date), so it cannot take a credit note. Adjust the customer's opening balance instead.",
+      );
+    }
+  }
+
+  public finalizeCreditNote(creditNoteId: string, options: { readonly confirmBackdatedMonth?: boolean; readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const note = this.getCreditNote(creditNoteId);
       if (note.status !== "DRAFT") throw new RepositoryValidationError("Only draft credit notes can be finalized.");
@@ -2238,6 +2361,15 @@ export class AccountingRepository {
       // D6: a draft note cannot be posted against an invoice that has since been cancelled (or was never finalized).
       if (invoice.status !== "FINALIZED") {
         throw new RepositoryValidationError(`Invoice ${invoice.number} is ${invoice.status.toLowerCase()}, so credit note ${note.number} cannot be finalized against it.`);
+      }
+      this.assertInvoiceTakesCreditNote(invoice);
+      // F: dated (or, undated, posting today) on or before the opening date: kept as history. The
+      // financial-year lock and the back-dated-month confirm do not apply: nothing is posted.
+      if (this.assertHistoryConfirmed(invoice.businessId, note.noteDate ?? istDateOf(), options.confirmBeforeOpening)) {
+        this.validateCreditNoteLines(invoice, note.lines);
+        this.db.prepare("UPDATE credit_notes SET status = 'FINALIZED', refundable_paise = 0, before_opening = 1 WHERE id = ?").run(note.id);
+        this.insertAuditEvent({ action: "credit_note.recorded_as_history", entityId: note.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(note.id, `Credit note ${note.number} kept as history`, false);
       }
       if (note.noteDate !== undefined) {
         // S11-20/S11-21. The financial-year lock is checked FIRST and is absolute: no confirmation
@@ -2396,11 +2528,20 @@ export class AccountingRepository {
       if (note.status !== "FINALIZED") {
         throw new RepositoryValidationError("Only a finalized credit note can be refunded.");
       }
+      if (note.beforeOpening === true) {
+        throw new RepositoryValidationError("A credit note kept as history (dated on or before your opening date) cannot be refunded.");
+      }
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("A refund must be a whole number of paise above zero.");
       }
       const invoice = this.getInvoice(note.invoiceId);
-      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(invoice.businessId).companyId, input, input.paymentAccount);
+      const refundDefault = input.moneyAccount === undefined && input.paymentAccount === undefined
+        ? this.defaultRefundAccount("invoices", "payments", "invoice_id", invoice.id, invoice.paymentAccount)
+        : undefined;
+      const money = resolveMoneyFields(
+        this.db, this.requireBusinessCompany(invoice.businessId).companyId,
+        refundDefault === undefined ? input : { ...input, moneyAccount: refundDefault }, input.paymentAccount,
+      );
       // Validated as a real date, not merely string-compared: "garbage" sorts after every ISO
       // date, so it would clear the check below and land straight in entryDate.
       this.assertIsoDate("Refund date", input.refundedOn);
@@ -2464,6 +2605,9 @@ export class AccountingRepository {
       if (note.status !== "FINALIZED") {
         throw new RepositoryValidationError("Only a finalized credit note can be applied.");
       }
+      if (note.beforeOpening === true) {
+        throw new RepositoryValidationError("A credit note kept as history (dated on or before your opening date) cannot be applied.");
+      }
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("An applied credit must be a whole number of paise above zero.");
       }
@@ -2479,6 +2623,12 @@ export class AccountingRepository {
       }
       if (target.paymentAccount !== "RECEIVABLES") {
         throw new RepositoryValidationError("A credit can only be applied to a receivable invoice.");
+      }
+      // F: a history invoice was never posted; crediting its receivable would create a balance from nothing.
+      if (target.beforeOpening === true) {
+        throw new RepositoryValidationError(
+          "This invoice is kept as history (dated before your opening date), so a credit cannot be applied to it. Adjust the customer's opening balance instead.",
+        );
       }
       // The credit belongs to one customer; applying it to another would move money between two
       // people's accounts with nothing to show for it.
@@ -2598,6 +2748,12 @@ export class AccountingRepository {
         throw new RepositoryValidationError("Only a finalized credit note can be cancelled.");
       }
       const invoice = this.getInvoice(note.invoiceId);
+      // F / S17-12: a history note was never journalled, so there is nothing to reverse.
+      if (note.beforeOpening === true) {
+        this.db.prepare("UPDATE credit_notes SET status = 'CANCELLED' WHERE id = ?").run(note.id);
+        this.insertAuditEvent({ action: "credit_note.cancelled", entityId: note.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(note.id, `Cancellation of credit note ${note.number} (history)`, true);
+      }
       const balance = this.getCreditNoteBalance(note.id);
       if (balance.dischargedPaise > 0) {
         throw new RepositoryValidationError(
@@ -2619,7 +2775,7 @@ export class AccountingRepository {
                   (SELECT MIN(jl.id) FROM journal_lines jl
                     WHERE jl.journal_entry_id = 'je-credit-note-' || cn.id) AS posted_seq
              FROM credit_notes cn
-            WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'
+            WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED' AND cn.before_opening = 0
             ORDER BY posted_seq DESC
             LIMIT 1`,
         )
@@ -2718,7 +2874,7 @@ export class AccountingRepository {
     const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
     const rows = this.db.prepare(
       `SELECT cn.id, cn.invoice_id, i.number AS invoice_number, cn.number, cn.reason, cn.status, cn.created_at,
-              i.tax_rate_basis_points,
+              cn.before_opening, i.tax_rate_basis_points,
               COALESCE((SELECT SUM(cnl.quantity * cnl.unit_price_paise) FROM credit_note_lines cnl WHERE cnl.credit_note_id = cn.id), 0) AS subtotal_paise
          FROM credit_notes cn JOIN invoices i ON i.id = cn.invoice_id
          ${where}
@@ -2726,6 +2882,7 @@ export class AccountingRepository {
     ).all(...params) as Array<{
       id: string; invoice_id: string; invoice_number: string; number: string; reason: string;
       status: CreditNote["status"]; created_at: string; tax_rate_basis_points: number | null; subtotal_paise: number;
+      before_opening: number;
     }>;
     return rows.map((row) => {
       const taxPaise = Math.round(row.subtotal_paise * (row.tax_rate_basis_points ?? 0) / 10000);
@@ -2737,6 +2894,7 @@ export class AccountingRepository {
         reason: row.reason,
         status: row.status,
         createdAt: row.created_at,
+        beforeOpening: row.before_opening === 1,
         subtotalPaise: row.subtotal_paise,
         taxPaise,
         totalPaise: row.subtotal_paise + taxPaise,
@@ -2745,16 +2903,24 @@ export class AccountingRepository {
   }
 
   public getCreditNote(creditNoteId: string): CreditNote {
-    const row = this.db.prepare("SELECT id, invoice_id, number, reason, status, note_date FROM credit_notes WHERE id = ?")
-      .get(creditNoteId) as { id: string; invoice_id: string; number: string; reason: string; status: CreditNote["status"]; note_date: string | null } | undefined;
+    const row = this.db.prepare("SELECT id, invoice_id, number, reason, status, note_date, before_opening FROM credit_notes WHERE id = ?")
+      .get(creditNoteId) as { id: string; invoice_id: string; number: string; reason: string; status: CreditNote["status"]; note_date: string | null; before_opening: number } | undefined;
     if (row === undefined) throw new Error(`Credit note ${creditNoteId} was not found.`);
     const lines = this.db.prepare("SELECT item_id, description, quantity, unit_price_paise FROM credit_note_lines WHERE credit_note_id = ? ORDER BY id")
       .all(creditNoteId) as Array<{ item_id: string | null; description: string; quantity: number; unit_price_paise: number }>;
     return {
       id: row.id, invoiceId: row.invoice_id, number: row.number, reason: row.reason,
       ...(row.note_date === null ? {} : { noteDate: row.note_date }), status: row.status,
+      beforeOpening: row.before_opening === 1,
       lines: lines.map((line) => ({ ...(line.item_id === null ? {} : { itemId: line.item_id }), description: line.description, quantity: line.quantity, unitPricePaise: line.unit_price_paise })),
     };
+  }
+
+  /** S17-8: the invoices made from a quotation (those whose source_quotation_id is it), oldest first. */
+  private convertedInvoiceIdsOf(quotationId: string): string[] {
+    return (this.db
+      .prepare("SELECT id FROM invoices WHERE source_quotation_id = ? ORDER BY created_at, rowid")
+      .all(quotationId) as Array<{ id: string }>).map((r) => r.id);
   }
 
   public getInvoice(invoiceId: string): Invoice & MoneyFields {
@@ -2784,6 +2950,8 @@ export class AccountingRepository {
       taxType: row.tax_type ?? "NONE",
       taxRateBasisPoints: row.tax_rate_basis_points,
       ...(row.converted_invoice_id === null ? {} : { convertedInvoiceId: row.converted_invoice_id }),
+      sourceQuotationId: row.source_quotation_id ?? null,
+      ...(row.status === "QUOTATION" ? { convertedInvoiceIds: this.convertedInvoiceIdsOf(row.id) } : {}),
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
       ...(row.buyer_name === null ? {} : { buyerName: row.buyer_name }),
       ...(row.buyer_contact === null ? {} : { buyerContact: row.buyer_contact }),
@@ -2792,6 +2960,7 @@ export class AccountingRepository {
       paymentMode: row.payment_mode,
       paymentReference: row.payment_reference,
       status: row.status,
+      beforeOpening: row.before_opening === 1,
       lines: lines.map((line): InvoiceLine => ({
         ...(line.item_id === null ? {} : { itemId: line.item_id }),
         description: line.description,
@@ -2801,11 +2970,68 @@ export class AccountingRepository {
     };
   }
 
-  public finalizeInvoice(invoiceId: string): JournalEntry {
+  // ===========================================================================================
+  // F (rulings S16-2(c), Q13, S17-12): HISTORY. A document or payment dated on or before the
+  // business's opening date is kept - visible, linked to its party, flagged "Before opening" - but
+  // NEVER journalled, never moves stock and is left out of every total. The opening balances stay
+  // the books' only figure for that period. `openingDateOf` is the ONE place that decides the date.
+  // ===========================================================================================
+
+  /** The latest as-at over the business's live (un-reversed) opening sets: general, customer, supplier. */
+  public openingDateOf(businessId: string): string | undefined {
+    const dates = [
+      ...this.getOpeningBalances(businessId).filter((s) => s.reversedAt === null).map((s) => s.asAt),
+      ...this.listOpeningCustomerBalances(businessId).filter((s) => s.reversedAt === null).map((s) => s.asAt),
+      ...this.listOpeningSupplierBalances(businessId).filter((s) => s.reversedAt === null).map((s) => s.asAt),
+    ];
+    return dates.reduce<string | undefined>((latest, d) => (latest === undefined || d > latest ? d : latest), undefined);
+  }
+
+  /** True when `date` is on or before the business's opening date. No live opening set: no rule applies. */
+  public isBeforeOpening(businessId: string, date: string): boolean {
+    const opening = this.openingDateOf(businessId);
+    return opening !== undefined && date.slice(0, 10) <= opening;
+  }
+
+  /**
+   * Decides whether something dated `date` is HISTORY. Not history: false. History without the
+   * caller's confirmation: refused with the same wording everywhere. History and confirmed: true.
+   */
+  private assertHistoryConfirmed(businessId: string, date: string, confirmed: boolean | undefined): boolean {
+    const opening = this.openingDateOf(businessId);
+    if (opening === undefined || date.slice(0, 10) > opening) return false;
+    if (confirmed !== true) {
+      throw new RepositoryValidationError(
+        `This is dated on or before your opening date (${opening}). It will be kept as history and not posted. Send it again with confirmBeforeOpening to continue.`,
+      );
+    }
+    return true;
+  }
+
+  /**
+   * What a history finalize / cancel hands back where a door normally returns its journal entry:
+   * an entry with NO lines, never stored. There is nothing on the books to show.
+   */
+  private historyNoEntry(documentId: string, description: string, isReversal: boolean): JournalEntry {
+    return { id: `history-${documentId}${isReversal ? "-cancelled" : ""}`, sourceId: documentId, description, isReversal, lines: [] };
+  }
+
+  private isHistoryRow(table: "invoices" | "purchase_bills" | "expenses" | "credit_notes" | "purchase_returns" | "payments" | "supplier_payments", id: string): boolean {
+    const row = this.db.prepare(`SELECT before_opening AS b FROM ${table} WHERE id = ?`).get(id) as { b: number } | undefined;
+    return row?.b === 1;
+  }
+
+  public finalizeInvoice(invoiceId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
     const finalized = this.db.transaction(() => {
       const invoice = this.getInvoice(invoiceId);
       if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number, invoice.id); // safety net (D11)
       const result = finalizeInvoice(invoice);
+      // F: dated on or before the opening date, the invoice is kept as history - no entry, no stock.
+      if (this.assertHistoryConfirmed(invoice.businessId, this.invoiceEntryDate(invoiceId), options.confirmBeforeOpening)) {
+        this.db.prepare("UPDATE invoices SET status = ?, before_opening = 1 WHERE id = ?").run(result.invoice.status, invoiceId);
+        this.insertAuditEvent({ action: "invoice.recorded_as_history", entityId: invoiceId, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(invoiceId, `Invoice ${invoice.number} kept as history`, false);
+      }
       // R12b. A document paid at once debits the cash/bank account it was paid into. The engine
       // posts the settlement line to `paymentAccount` ('CASH' = paid at once), so that one line is
       // pointed at the chosen account here. The default (CASH) is the identical entry as before.
@@ -2835,6 +3061,15 @@ export class AccountingRepository {
   public cancelInvoice(invoiceId: string): JournalEntry {
     const cancelled = this.db.transaction(() => {
       const invoice = this.getInvoice(invoiceId);
+      // F / S17-12: a history invoice can be cancelled, but there is no entry to reverse.
+      if (invoice.beforeOpening === true) {
+        if (invoice.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized invoices can be cancelled.");
+        const standing = this.db.prepare("SELECT COUNT(*) AS n FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL").get(invoiceId) as { n: number };
+        if (standing.n > 0) throw new RepositoryValidationError("An invoice with recorded payments or applied credits cannot be cancelled.");
+        this.db.prepare("UPDATE invoices SET status = 'CANCELLED' WHERE id = ?").run(invoiceId);
+        this.insertAuditEvent({ action: "invoice.cancelled", entityId: invoiceId, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(invoiceId, `Cancellation of invoice ${invoice.number} (history)`, true);
+      }
       // Symmetry with bills and expenses: a document with money against it cannot be
       // cancelled. Reversing the whole invoice while the receipt stands would drive
       // RECEIVABLES negative and leave the cash with nowhere to go (there is no refund
@@ -2902,7 +3137,10 @@ export class AccountingRepository {
     return new Date(`${paidOn}T12:00:00+05:30`).toISOString();
   }
 
-  public recordPayment(invoiceId: string, amountPaise: number, paidOn?: string, moneyInput: MoneyFieldsInput = {}): Payment & MoneyFields {
+  public recordPayment(
+    invoiceId: string, amountPaise: number, paidOn?: string, moneyInput: MoneyFieldsInput = {},
+    options: { readonly confirmBeforeOpening?: boolean } = {},
+  ): Payment & MoneyFields {
     const payment = this.db.transaction(() => {
       const paidAt = this.paymentInstant(paidOn);
       const invoice = this.getInvoice(invoiceId);
@@ -2916,6 +3154,36 @@ export class AccountingRepository {
         throw new RepositoryValidationError("Payment amount must be a positive whole number of paise.");
       }
       const money = resolveMoneyFields(this.db, this.requireBusinessCompany(invoice.businessId).companyId, moneyInput);
+      // F / S17-12: a payment dated on or before the opening date is history; against a history
+      // invoice a LATER payment is refused (the money belongs on the opening balance instead).
+      const paymentIsHistory = this.isBeforeOpening(invoice.businessId, istDateOf(paidAt));
+      if (invoice.beforeOpening === true && !paymentIsHistory) {
+        throw new RepositoryValidationError(
+          "This invoice is dated before your opening date and is kept as history. Record this money as a receipt against the customer's opening balance instead.",
+        );
+      }
+      if (paymentIsHistory && invoice.beforeOpening !== true) {
+        throw new RepositoryValidationError(
+          `This payment is dated on or before your opening date (${this.openingDateOf(invoice.businessId)}), but the invoice it is for was posted to the books. Date the payment after the opening date.`,
+        );
+      }
+      if (paymentIsHistory) {
+        this.assertHistoryConfirmed(invoice.businessId, istDateOf(paidAt), options.confirmBeforeOpening);
+        const standing = this.db.prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL").get(invoiceId) as { total: number };
+        const room = this.invoiceTotal(invoice) - standing.total;
+        if (amountPaise > room) {
+          throw new RepositoryValidationError(`Payment cannot exceed the invoice outstanding balance of ${room} paise.`);
+        }
+        const historyPayment: Payment & MoneyFields = {
+          id: randomUUID(), invoiceId, amountPaise, paymentAccount: "CASH", paidAt,
+          cancelledAt: null, cancellationReason: null, beforeOpening: true, ...money,
+        };
+        this.db
+          .prepare("INSERT INTO payments (id, invoice_id, amount_paise, payment_account, paid_at, money_account, payment_mode, payment_reference, before_opening) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)")
+          .run(historyPayment.id, invoiceId, amountPaise, "CASH", paidAt, money.moneyAccount, money.paymentMode, money.paymentReference);
+        this.insertAuditEvent({ action: "payment.recorded_as_history", entityId: invoiceId, occurredAt: new Date().toISOString() });
+        return historyPayment;
+      }
       // DEFECT FIXED: this capped against the ORIGINAL invoice total and counted only the
       // `payments` table, so a credit note did not reduce what the customer could still pay.
       // On a credited invoice they could overpay, driving RECEIVABLES NEGATIVE with no error
@@ -2934,6 +3202,7 @@ export class AccountingRepository {
         paidAt,
         cancelledAt: null,
         cancellationReason: null,
+        beforeOpening: false,
         ...money,
       };
       this.db
@@ -3006,11 +3275,18 @@ export class AccountingRepository {
   public cancelPayment(paymentId: string, reason?: string): JournalEntry {
     return this.db.transaction(() => {
       const row = this.db
-        .prepare("SELECT id, invoice_id, amount_paise, paid_at, cancelled_at FROM payments WHERE id = ?")
-        .get(paymentId) as { id: string; invoice_id: string; amount_paise: number; paid_at: string; cancelled_at: string | null } | undefined;
+        .prepare("SELECT id, invoice_id, amount_paise, paid_at, cancelled_at, before_opening FROM payments WHERE id = ?")
+        .get(paymentId) as { id: string; invoice_id: string; amount_paise: number; paid_at: string; cancelled_at: string | null; before_opening: number } | undefined;
       if (row === undefined) throw new RepositoryValidationError(`Payment ${paymentId} was not found.`);
       if (row.cancelled_at !== null) {
         throw new RepositoryValidationError("This payment has already been cancelled.");
+      }
+      // F / S17-12: a history payment was never journalled, so there is nothing to reverse.
+      if (row.before_opening === 1) {
+        this.db.prepare("UPDATE payments SET cancelled_at = ?, cancellation_reason = ? WHERE id = ?")
+          .run(new Date().toISOString(), reason ?? null, row.id);
+        this.insertAuditEvent({ action: "invoice.payment_cancelled", entityId: row.invoice_id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(row.id, "Cancellation of a payment kept as history", true);
       }
       assertNotOnBankLine(this.db, `je-payment-${row.id}`, "This payment");
       const invoice = this.getInvoice(row.invoice_id);
@@ -3050,6 +3326,13 @@ export class AccountingRepository {
       if (row.cancelled_at !== null) {
         throw new RepositoryValidationError("This supplier payment has already been cancelled.");
       }
+      // F / S17-12: a history payment was never journalled, so there is nothing to reverse.
+      if (this.isHistoryRow("supplier_payments", row.id)) {
+        this.db.prepare("UPDATE supplier_payments SET cancelled_at = ?, cancellation_reason = ? WHERE id = ?")
+          .run(new Date().toISOString(), reason ?? null, row.id);
+        this.insertAuditEvent({ action: "supplier.payment_cancelled", entityId: (row.bill_id ?? row.expense_id) as string, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(row.id, "Cancellation of a supplier payment kept as history", true);
+      }
       assertNotOnBankLine(this.db, `je-supplier-payment-${row.id}`, "This supplier payment");
       const document = row.bill_id !== null
         ? (() => { const bill = this.getPurchaseBill(row.bill_id as string); return { id: bill.id, businessId: bill.businessId, fairId: bill.fairId, number: bill.number }; })()
@@ -3081,8 +3364,8 @@ export class AccountingRepository {
 
   public listPayments(invoiceId: string): ReadonlyArray<Payment & MoneyFields> {
     const rows = this.db
-      .prepare("SELECT id, invoice_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason, money_account, payment_mode, payment_reference FROM payments WHERE invoice_id = ? ORDER BY paid_at, id")
-      .all(invoiceId) as Array<{ id: string; invoice_id: string; amount_paise: number; payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null; money_account: string; payment_mode: string | null; payment_reference: string | null }>;
+      .prepare("SELECT id, invoice_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason, money_account, payment_mode, payment_reference, before_opening FROM payments WHERE invoice_id = ? ORDER BY paid_at, id")
+      .all(invoiceId) as Array<{ id: string; invoice_id: string; amount_paise: number; payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null; money_account: string; payment_mode: string | null; payment_reference: string | null; before_opening: number }>;
     return rows.map((row) => ({
       id: row.id,
       invoiceId: row.invoice_id,
@@ -3091,6 +3374,7 @@ export class AccountingRepository {
       paidAt: row.paid_at,
       cancelledAt: row.cancelled_at,
       cancellationReason: row.cancellation_reason,
+      beforeOpening: row.before_opening === 1,
       moneyAccount: row.money_account,
       paymentMode: row.payment_mode,
       paymentReference: row.payment_reference,
@@ -3518,8 +3802,11 @@ export class AccountingRepository {
     // ruling S16-7(3), replacing S8-1): it was cash on its own date and stays recognised there, and
     // `cancelledOn` - the date of its reversal journal entry - takes it back, so a closed month never
     // changes and the correction lands in the month the cancellation was made.
-    const paymentsOf = new Map<string, Array<{ id?: string; amountPaise: number; paidAt: string; cancelledOn?: string }>>();
-    const addPayment = (key: string, amountPaise: number, paidAt: string, extra: { id?: string; cancelledOn?: string } = {}): void => {
+    // S17-7: `discountPaise` is a supplier settlement discount that rode along with the payment.
+    // `amountPaise` already includes it (it settles the bill like cash), and the discount income
+    // itself is recognised separately, on the payment's date, below.
+    const paymentsOf = new Map<string, Array<{ id?: string; amountPaise: number; paidAt: string; cancelledOn?: string; discountPaise?: number }>>();
+    const addPayment = (key: string, amountPaise: number, paidAt: string, extra: { id?: string; cancelledOn?: string; discountPaise?: number } = {}): void => {
       const entry = { amountPaise, paidAt, ...extra };
       const list = paymentsOf.get(key);
       if (list === undefined) paymentsOf.set(key, [entry]); else list.push(entry);
@@ -3528,14 +3815,15 @@ export class AccountingRepository {
       const found = this.db.prepare("SELECT COALESCE(entry_date, date(created_at, '+330 minutes')) AS d FROM journal_entries WHERE id = ?").get(entryId) as { d: string } | undefined;
       return found?.d ?? istDateOf(cancelledAt);
     };
-    for (const p of this.db.prepare("SELECT id, invoice_id, amount_paise, paid_at, cancelled_at FROM payments ORDER BY paid_at, rowid").all() as Array<{ id: string; invoice_id: string; amount_paise: number; paid_at: string; cancelled_at: string | null }>) {
+    for (const p of this.db.prepare("SELECT id, invoice_id, amount_paise, paid_at, cancelled_at FROM payments WHERE before_opening = 0 ORDER BY paid_at, rowid").all() as Array<{ id: string; invoice_id: string; amount_paise: number; paid_at: string; cancelled_at: string | null }>) {
       addPayment(`INVOICE|${p.invoice_id}`, p.amount_paise, p.paid_at, {
         id: p.id, ...(p.cancelled_at === null ? {} : { cancelledOn: reversalDate(`je-payment-${p.id}-reversal`, p.cancelled_at) }),
       });
     }
-    for (const p of this.db.prepare("SELECT id, bill_id, expense_id, amount_paise, paid_at, cancelled_at FROM supplier_payments ORDER BY paid_at, rowid").all() as Array<{ id: string; bill_id: string | null; expense_id: string | null; amount_paise: number; paid_at: string; cancelled_at: string | null }>) {
-      addPayment(p.bill_id !== null ? `PURCHASE_BILL|${p.bill_id}` : `EXPENSE|${p.expense_id}`, p.amount_paise, p.paid_at, {
-        id: p.id, ...(p.cancelled_at === null ? {} : { cancelledOn: reversalDate(`je-supplier-payment-${p.id}-reversal`, p.cancelled_at) }),
+    for (const p of this.db.prepare("SELECT id, bill_id, expense_id, amount_paise, paid_at, cancelled_at FROM supplier_payments WHERE before_opening = 0 ORDER BY paid_at, rowid").all() as Array<{ id: string; bill_id: string | null; expense_id: string | null; amount_paise: number; paid_at: string; cancelled_at: string | null }>) {
+      const discountPaise = this.settlementDiscountOfPayment(p.id);
+      addPayment(p.bill_id !== null ? `PURCHASE_BILL|${p.bill_id}` : `EXPENSE|${p.expense_id}`, p.amount_paise + discountPaise, p.paid_at, {
+        id: p.id, ...(discountPaise > 0 ? { discountPaise } : {}), ...(p.cancelled_at === null ? {} : { cancelledOn: reversalDate(`je-supplier-payment-${p.id}-reversal`, p.cancelled_at) }),
       });
     }
 
@@ -3549,7 +3837,7 @@ export class AccountingRepository {
     // the invoice from day one and re-measure months already reported - the S3-5 defect.
     const notesOf = new Map<string, Array<{ id: string; refundablePaise: number }>>();
     for (const n of this.db.prepare(
-      "SELECT id, invoice_id, refundable_paise FROM credit_notes WHERE status IN ('FINALIZED', 'CANCELLED') ORDER BY created_at, rowid",
+      "SELECT id, invoice_id, refundable_paise FROM credit_notes WHERE status IN ('FINALIZED', 'CANCELLED') AND before_opening = 0 ORDER BY created_at, rowid",
     ).all() as Array<{ id: string; invoice_id: string; refundable_paise: number }>) {
       const entry = { id: n.id, refundablePaise: n.refundable_paise };
       const list = notesOf.get(n.invoice_id);
@@ -3574,7 +3862,7 @@ export class AccountingRepository {
       supplierCreditOf.set(r.entry_id, r.credit);
     }
     for (const r of this.db.prepare(
-      "SELECT id, bill_id FROM purchase_returns WHERE status IN ('FINALIZED', 'CANCELLED') ORDER BY created_at, rowid",
+      "SELECT id, bill_id FROM purchase_returns WHERE status IN ('FINALIZED', 'CANCELLED') AND before_opening = 0 ORDER BY created_at, rowid",
     ).all() as Array<{ id: string; bill_id: string }>) {
       const entry = { id: r.id, refundablePaise: supplierCreditOf.get(`je-purchase-return-${r.id}`) ?? 0 };
       const list = returnsOf.get(r.bill_id);
@@ -3617,13 +3905,13 @@ export class AccountingRepository {
     const businessClause = (filter.businessId === undefined ? "" : " AND business_id = ?") + (filter.fairId === undefined ? "" : " AND fair_id = ?");
     const businessParams = [...(filter.businessId === undefined ? [] : [filter.businessId]), ...(filter.fairId === undefined ? [] : [filter.fairId])];
     const documents: Array<{ type: "INVOICE" | "PURCHASE_BILL" | "EXPENSE"; id: string; paidAtOnce: boolean; totalPaise: () => number }> = [];
-    for (const row of this.db.prepare(`SELECT id, payment_account FROM invoices WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
+    for (const row of this.db.prepare(`SELECT id, payment_account FROM invoices WHERE status IN ('FINALIZED', 'CANCELLED') AND before_opening = 0${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
       documents.push({ type: "INVOICE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.invoiceTotal(this.getInvoice(row.id)) });
     }
-    for (const row of this.db.prepare(`SELECT id, payment_account FROM purchase_bills WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
+    for (const row of this.db.prepare(`SELECT id, payment_account FROM purchase_bills WHERE status IN ('FINALIZED', 'CANCELLED') AND before_opening = 0${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
       documents.push({ type: "PURCHASE_BILL", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.getPurchaseBill(row.id).totalPaise });
     }
-    for (const row of this.db.prepare(`SELECT id, payment_account FROM expenses WHERE status IN ('FINALIZED', 'CANCELLED')${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
+    for (const row of this.db.prepare(`SELECT id, payment_account FROM expenses WHERE status IN ('FINALIZED', 'CANCELLED') AND before_opening = 0${businessClause} ORDER BY created_at, rowid`).all(...businessParams) as Array<{ id: string; payment_account: string }>) {
       documents.push({ type: "EXPENSE", id: row.id, paidAtOnce: row.payment_account === "CASH", totalPaise: () => this.getExpense(row.id).totalPaise });
     }
 
@@ -3793,6 +4081,19 @@ export class AccountingRepository {
       for (const payment of docPayments) {
         const paidOn = istDateOf(payment.paidAt);
         events.push({ kind: "PAYMENT", date: paidOn, amountPaise: payment.amountPaise, ...(payment.id === undefined ? {} : { paymentId: payment.id }) });
+        // S17-7: "Discount received" is income the day the discount is taken, and is taken back on
+        // the day the payment is cancelled (never rewriting the month it was first recognised).
+        if (payment.discountPaise !== undefined && payment.discountPaise > 0) {
+          if (inPeriod(paidOn)) {
+            recognitions.push({ date: paidOn, account: "PURCHASE_DISCOUNT", amountPaise: payment.discountPaise, documentType: doc.type, documentId: doc.id });
+          }
+          if (payment.cancelledOn !== undefined) {
+            const takenBackOn = payment.cancelledOn < paidOn ? paidOn : payment.cancelledOn;
+            if (inPeriod(takenBackOn)) {
+              recognitions.push({ date: takenBackOn, account: "PURCHASE_DISCOUNT", amountPaise: -payment.discountPaise, documentType: doc.type, documentId: doc.id });
+            }
+          }
+        }
         if (payment.cancelledOn !== undefined && payment.id !== undefined) {
           // Never earlier than the payment itself, so the take-back can always find what it undoes.
           events.push({ kind: "UNPAY", date: payment.cancelledOn < paidOn ? paidOn : payment.cancelledOn, paymentId: payment.id });
@@ -4414,7 +4715,7 @@ export class AccountingRepository {
       .prepare(
         `SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS taxable
            FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id
-          WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'`,
+          WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED' AND cn.before_opening = 0`,
       )
       .get(invoiceId) as { taxable: number };
     return row.taxable;
@@ -4461,7 +4762,7 @@ export class AccountingRepository {
       if (line.itemId !== undefined) sold.set(line.itemId, (sold.get(line.itemId) ?? 0) + line.quantity);
     }
     const returned = this.db.prepare(
-      "SELECT cnl.item_id, SUM(cnl.quantity) AS quantity FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED' GROUP BY cnl.item_id",
+      "SELECT cnl.item_id, SUM(cnl.quantity) AS quantity FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED' AND cn.before_opening = 0 GROUP BY cnl.item_id",
     ).all(invoice.id) as Array<{ item_id: string | null; quantity: number }>;
     const alreadyReturned = new Map(returned.filter((row) => row.item_id !== null).map((row) => [row.item_id as string, row.quantity]));
     for (const line of lines) {
@@ -4477,7 +4778,7 @@ export class AccountingRepository {
     }
     const creditTotal = lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
     const alreadyCredited = this.db.prepare(
-      "SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS total FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED'",
+      "SELECT COALESCE(SUM(cnl.quantity * cnl.unit_price_paise), 0) AS total FROM credit_note_lines cnl JOIN credit_notes cn ON cn.id = cnl.credit_note_id WHERE cn.invoice_id = ? AND cn.status = 'FINALIZED' AND cn.before_opening = 0",
     ).get(invoice.id) as { total: number };
     // DEFECT FIXED: this compared a TAXABLE credit sum against the TAX-INCLUSIVE invoice total,
     // so an 18% invoice could be over-credited by a further 18% - and the note's own GST was then
@@ -4515,7 +4816,7 @@ export class AccountingRepository {
       let skip = (this.db.prepare(
         `SELECT COALESCE(SUM(l.quantity), 0) AS n
            FROM credit_note_lines l JOIN credit_notes c ON c.id = l.credit_note_id
-          WHERE c.invoice_id = ? AND c.status = 'FINALIZED' AND c.id <> ? AND l.item_id = ?`,
+          WHERE c.invoice_id = ? AND c.status = 'FINALIZED' AND c.before_opening = 0 AND c.id <> ? AND l.item_id = ?`,
       ).get(note.invoiceId, note.id, itemId) as { n: number }).n;
       const segments: Array<{ quantity: number; unitCostPaise: number }> = [];
       for (const row of soldRows) {
@@ -4639,6 +4940,38 @@ export class AccountingRepository {
     };
   }
 
+  /**
+   * S17-10: a bill discount applies to STOCK items only, so it is refused when it is more than the
+   * value of the stock lines (quantity x unit cost, before tax: the base spreadBillDiscount spreads
+   * over) and refused outright on a bill with no stock lines. Equal is allowed (stock at nil cost).
+   */
+  private assertBillDiscountFitsStock(
+    lines: ReadonlyArray<{ itemId?: string | undefined; quantity: number; unitPricePaise: number }>,
+    discountPaise: number,
+  ): void {
+    if (discountPaise <= 0) return;
+    const rupees = (paise: number): string => `Rs ${Math.floor(paise / 100)}.${String(paise % 100).padStart(2, "0")}`;
+    let stockValuePaise = 0;
+    let stockLines = 0;
+    for (const line of lines) {
+      if (line.itemId !== undefined && this.isTrackedItem(line.itemId)) {
+        stockLines += 1;
+        stockValuePaise += line.quantity * line.unitPricePaise;
+      }
+    }
+    if (stockLines === 0) {
+      throw new RepositoryValidationError(
+        "This bill has no stock items, so it cannot carry a bill discount. A bill discount applies to stock items only.",
+      );
+    }
+    if (discountPaise > stockValuePaise) {
+      throw new RepositoryValidationError(
+        `The bill discount (${rupees(discountPaise)}) is more than the value of the stock items on this bill (${rupees(stockValuePaise)}). ` +
+          "A bill discount applies to stock items only — lower the discount or check the lines.",
+      );
+    }
+  }
+
   private isTrackedItem(itemId: string): boolean {
     const row = this.db.prepare("SELECT track_stock FROM items WHERE id = ?").get(itemId) as { track_stock: number } | undefined;
     return row?.track_stock === 1;
@@ -4676,7 +5009,7 @@ export class AccountingRepository {
    */
   private invoiceSettledPaise(invoiceId: string): number {
     const paid = this.db
-      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL")
+      .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM payments WHERE invoice_id = ? AND cancelled_at IS NULL AND before_opening = 0")
       .get(invoiceId) as { total: number };
     const applied = this.db
       .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS total FROM credit_note_applications WHERE invoice_id = ?")
@@ -4944,10 +5277,9 @@ export class AccountingRepository {
     let runDate = template.nextRunDate;
     let active = template.active;
     while (active && runDate <= asOfDate && created.length < MAX_DRAFTS_PER_TEMPLATE_PER_RUN) {
-      const invoice: Invoice = {
+      const invoice: NewInvoice = {
         id: randomUUID(),
-        // S16-9: a taken number is refused by saveDraft (reported as this template's failure), never renumbered.
-        number: `REC-${template.id.slice(0, 8)}-${runDate}`,
+        // S17-4: no number given, so saveDraft assigns the next INV number (by the run date's financial year).
         businessId: template.businessId,
         customerId: template.customerId,
         invoiceDate: runDate,
@@ -5308,6 +5640,7 @@ export class AccountingRepository {
       if (!Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
         throw new RepositoryValidationError("Bill extra charges must be a non-negative whole number of paise.");
       }
+      this.assertBillDiscountFitsStock(input.lines, discountPaise);
       if (discountPaise > subtotal) {
         throw new RepositoryValidationError("A bill discount cannot exceed the bill subtotal.");
       }
@@ -5341,7 +5674,7 @@ export class AccountingRepository {
       bill_date: string; due_date: string | null; notes: string | null; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
       fair_id: string | null; discount_paise: number; extra_charge_paise: number;
-      money_account: string; payment_mode: string | null; payment_reference: string | null;
+      money_account: string; payment_mode: string | null; payment_reference: string | null; before_opening: number;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Purchase bill ${billId} was not found.`);
     const lineRows = this.db
@@ -5364,6 +5697,8 @@ export class AccountingRepository {
     const paid = this.db
       .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE bill_id = ? AND cancelled_at IS NULL")
       .get(billId) as { paid: number };
+    // S17-7: a settlement discount settles the bill exactly as cash does, so paidPaise is "settled".
+    paid.paid += this.liveSettlementDiscountPaise("bill_id", billId);
     return {
       id: row.id, businessId: row.business_id, supplierId: row.supplier_id, number: row.number,
       supplierInvoiceNumber: row.supplier_invoice_number, billDate: row.bill_date, dueDate: row.due_date,
@@ -5373,6 +5708,7 @@ export class AccountingRepository {
       subtotalPaise, discountPaise, extraChargePaise, taxablePaise, taxPaise,
       totalPaise: taxablePaise + taxPaise, paidPaise: paid.paid,
       moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
+      beforeOpening: row.before_opening === 1,
     };
   }
 
@@ -5388,25 +5724,41 @@ export class AccountingRepository {
     return ids.map((row) => this.getPurchaseBill(row.id));
   }
 
-  public finalizePurchaseBill(billId: string): JournalEntry {
+  public finalizePurchaseBill(billId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const bill = this.getPurchaseBill(billId);
       if (bill.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase bills can be finalized.");
       this.requireBusinessCompany(bill.businessId);
-      let inventoryPaise = 0;
-      let expensePaise = 0;
-      for (const line of bill.lines) {
-        const amount = line.quantity * line.unitPricePaise;
-        if (line.itemId !== undefined && this.isTrackedItem(line.itemId)) {
-          inventoryPaise += amount;
-          this.insertStockMovement({
-            itemId: line.itemId, sourceId: bill.id, movementType: "PURCHASE",
-            quantityDelta: line.quantity, unitCostPaise: line.unitPricePaise, ...fairDim(bill.fairId),
-          });
-        } else {
-          expensePaise += amount;
-        }
+      // F: dated on or before the opening date: kept as history - no entry, no stock lots.
+      if (this.assertHistoryConfirmed(bill.businessId, bill.billDate, options.confirmBeforeOpening)) {
+        this.db.prepare("UPDATE purchase_bills SET status = 'FINALIZED', before_opening = 1 WHERE id = ?").run(bill.id);
+        this.insertAuditEvent({ action: "purchase_bill.recorded_as_history", entityId: bill.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(bill.id, `Purchase bill ${bill.number} kept as history`, false);
       }
+      this.assertBillDiscountFitsStock(bill.lines, bill.discountPaise);
+      let expensePaise = 0;
+      // S17-7 (owner ruling Q1): the header discount is on stock items only, so it is spread into
+      // the stock lots; non-stock lines keep their full price.
+      const spread = spreadBillDiscount(
+        bill.lines.map((line) => ({
+          quantity: line.quantity, unitPricePaise: line.unitPricePaise,
+          stock: line.itemId !== undefined && this.isTrackedItem(line.itemId),
+        })),
+        bill.discountPaise,
+      );
+      bill.lines.forEach((line, index) => {
+        if (line.itemId !== undefined && this.isTrackedItem(line.itemId)) {
+          for (const lot of spread.lots[index] as readonly DiscountedLot[]) {
+            this.insertStockMovement({
+              itemId: line.itemId, sourceId: bill.id, movementType: "PURCHASE",
+              quantityDelta: lot.quantity, unitCostPaise: lot.unitCostPaise, ...fairDim(bill.fairId),
+            });
+          }
+        } else {
+          expensePaise += line.quantity * line.unitPricePaise;
+        }
+      });
+      const inventoryPaise = spread.stockCostPaise;
       const result = this.guard(() => purchaseEntry({
         entryId: `je-bill-${bill.id}`,
         sourceId: bill.id,
@@ -5414,10 +5766,10 @@ export class AccountingRepository {
         description: `Purchase bill ${bill.number}`,
         inventoryPaise,
         expensePaise,
-        // R8. INVENTORY above is the FULL line cost of the tracked lines; the discount is NOT
-        // spread into it, so the INVENTORY debit still equals what insertStockMovement just
-        // layered in. That equality is asserted in bill-discount.test.ts.
+        // S17-7. INVENTORY above is the NET stock cost (discount spread in), so the INVENTORY debit
+        // equals what insertStockMovement just layered in. Asserted in bill-discount.test.ts.
         discountPaise: bill.discountPaise,
+        spreadDiscountPaise: spread.spreadPaise,
         extraChargePaise: bill.extraChargePaise,
         taxType: bill.taxType,
         taxRateBasisPoints: bill.taxRateBasisPoints,
@@ -5437,6 +5789,12 @@ export class AccountingRepository {
       if (bill.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized purchase bills can be cancelled.");
       if (bill.paidPaise > 0) {
         throw new RepositoryValidationError("A purchase bill with recorded supplier payments cannot be cancelled.");
+      }
+      // F / S17-12: a history bill was never journalled and moved no stock, so nothing is reversed.
+      if (bill.beforeOpening) {
+        this.db.prepare("UPDATE purchase_bills SET status = 'CANCELLED' WHERE id = ?").run(bill.id);
+        this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(bill.id, `Cancellation of purchase bill ${bill.number} (history)`, true);
       }
       // A finalized bill always has its accrual finalize entry to reverse.
       const original = this.getSourceJournalEntry(bill.id, "PURCHASE_BILL");
@@ -5486,6 +5844,15 @@ export class AccountingRepository {
   // bill stands exactly as posted.
   // ===========================================================================================
 
+  /** F / S17-12: a history bill was never posted, so it cannot take a return. */
+  private assertBillTakesReturn(bill: PurchaseBillRecord): void {
+    if (bill.beforeOpening) {
+      throw new RepositoryValidationError(
+        "This bill is kept as history (dated before your opening date), so it cannot take a return. Adjust the supplier's opening balance instead.",
+      );
+    }
+  }
+
   public createPurchaseReturn(input: PurchaseReturnInput): PurchaseReturnRecord {
     return this.db.transaction(() => {
       const bill = this.getPurchaseBill(input.billId);
@@ -5493,6 +5860,7 @@ export class AccountingRepository {
       if (bill.status !== "FINALIZED") {
         throw new RepositoryValidationError("Only a finalized purchase bill can be returned against.");
       }
+      this.assertBillTakesReturn(bill);
       if (input.lines.length === 0) throw new RepositoryValidationError("A purchase return needs at least one line.");
       const returnDate = input.returnDate ?? istDateOf();
       this.assertIsoDate("Return date", returnDate);
@@ -5502,11 +5870,12 @@ export class AccountingRepository {
       this.validatePurchaseReturnLines(bill, input.lines);
 
       const id = input.id ?? randomUUID();
+      const number = input.number ?? this.nextBusinessNumber("PR", bill.businessId, returnDate);
       this.db
         .prepare(
           "INSERT INTO purchase_returns (id, bill_id, number, reason, return_date, status, created_at) VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)",
         )
-        .run(id, bill.id, input.number, input.reason, returnDate, new Date().toISOString());
+        .run(id, bill.id, number, input.reason, returnDate, new Date().toISOString());
       const insertLine = this.db.prepare(
         "INSERT INTO purchase_return_lines (purchase_return_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)",
       );
@@ -5521,7 +5890,7 @@ export class AccountingRepository {
   public getPurchaseReturn(returnId: string): PurchaseReturnRecord {
     const row = this.db.prepare("SELECT * FROM purchase_returns WHERE id = ?").get(returnId) as {
       id: string; bill_id: string; number: string; reason: string; return_date: string;
-      status: PurchaseDocumentStatus;
+      status: PurchaseDocumentStatus; before_opening: number;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`No purchase return ${returnId}.`);
     const lines = (this.db
@@ -5535,6 +5904,7 @@ export class AccountingRepository {
       id: row.id, billId: row.bill_id, number: row.number, reason: row.reason,
       returnDate: row.return_date, status: row.status, lines,
       valuePaise: lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0),
+      beforeOpening: row.before_opening === 1,
     };
   }
 
@@ -5555,7 +5925,7 @@ export class AccountingRepository {
    *   Cr EXPENSE     for everything else
    *   Cr INPUT_CGST/SGST/IGST  - the input tax credit reversed
    */
-  public finalizePurchaseReturn(returnId: string): JournalEntry {
+  public finalizePurchaseReturn(returnId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const ret = this.getPurchaseReturn(returnId);
       if (ret.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase returns can be finalized.");
@@ -5565,24 +5935,39 @@ export class AccountingRepository {
       if (bill.status !== "FINALIZED") {
         throw new RepositoryValidationError(`Purchase bill ${bill.number} is ${bill.status}, so a return cannot be finalized against it.`);
       }
+      this.assertBillTakesReturn(bill);
       this.validatePurchaseReturnLines(bill, ret.lines, ret.id);
+      // F: dated on or before the opening date: kept as history - no entry, no stock leaving.
+      if (this.assertHistoryConfirmed(bill.businessId, ret.returnDate, options.confirmBeforeOpening)) {
+        this.db.prepare("UPDATE purchase_returns SET status = 'FINALIZED', before_opening = 1 WHERE id = ?").run(ret.id);
+        this.insertAuditEvent({ action: "purchase_return.recorded_as_history", entityId: ret.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(ret.id, `Purchase return ${ret.number} kept as history`, false);
+      }
 
       // The goods go back first: this both writes the PURCHASE_REVERSAL movements and tells us
       // how much of the value was stock, so INVENTORY is credited with exactly what left the
       // layers and the two can never drift.
-      const inventoryPaise = this.removeReturnedStock(ret, bill);
-      const expensePaise = ret.valuePaise - inventoryPaise;
+      //
+      // S17-7: the stock goes back at the bill's OWN (discounted) lot cost, so the supplier is
+      // credited the discounted unit cost and payables and inventory agree. Non-stock lines go
+      // back at their full price.
+      const removed = this.removeReturnedStock(ret, bill);
+      const inventoryPaise = removed.inventoryPaise;
+      const expensePaise = ret.valuePaise - removed.grossPaise;
 
-      // The header discount is clawed back in proportion, so returning the WHOLE bill gives back
-      // exactly what was paid for it and no more. Without this, a bill discounted by Rs 150 and
-      // then fully returned would credit the supplier Rs 150 they were never given.
-      const discountPaise = this.purchaseReturnDiscountShare(bill, ret.valuePaise, ret.id);
+      // The header discount that could NOT be spread into stock (a bill with no stock lines) is
+      // clawed back in proportion, so returning the WHOLE bill gives back exactly what was paid for
+      // it and no more. The part spread into the stock lots is already inside inventoryPaise above.
+      const discountPaise = this.purchaseReturnDiscountShare(
+        bill, ret.valuePaise, ret.id, bill.discountPaise - this.billSpreadDiscountPaise(bill),
+      );
       // The extra charge is deliberately NOT clawed back: freight on the inward journey was
       // incurred and is not refunded because the goods later went back. OWNER DECISION if he
       // disagrees - recorded in context, not silently reversed here.
-      const taxLines = this.purchaseReturnTaxLines(bill, ret.valuePaise - discountPaise);
+      const netValuePaise = inventoryPaise + expensePaise - discountPaise;
+      const taxLines = this.purchaseReturnTaxLines(bill, netValuePaise);
       const postedTaxPaise = taxLines.reduce((sum, line) => sum + line.creditPaise, 0);
-      const owedBackPaise = ret.valuePaise - discountPaise + postedTaxPaise;
+      const owedBackPaise = netValuePaise + postedTaxPaise;
 
       // The settlement debit SPLITS, exactly as a credit note's credit does (S4-1). As far as the
       // bill is still open, the return reduces what we owe. Anything beyond that is money the
@@ -5629,6 +6014,12 @@ export class AccountingRepository {
       if (ret.status !== "FINALIZED") throw new RepositoryValidationError("Only a finalized purchase return can be cancelled.");
       const bill = this.getPurchaseBill(ret.billId);
       if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
+      // F / S17-12: a history return was never journalled and moved no stock, so nothing is reversed.
+      if (ret.beforeOpening) {
+        this.db.prepare("UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?").run(ret.id);
+        this.insertAuditEvent({ action: "purchase_return.cancelled", entityId: ret.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(ret.id, `Cancellation of purchase return ${ret.number} (history)`, true);
+      }
       const balance = this.getPurchaseReturnBalance(returnId);
       if (balance.refundedPaise > 0) {
         throw new RepositoryValidationError(
@@ -5646,12 +6037,35 @@ export class AccountingRepository {
       // The restored layer goes on the end of the queue rather than back into its old position,
       // so a later FIFO sale could draw on it in a different order. cancelPurchaseBill has the
       // same property, and it only shows where two lots of one item differ in cost.
-      for (const line of ret.lines) {
-        if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
-        this.insertStockMovement({
-          itemId: line.itemId, sourceId: ret.billId, movementType: "PURCHASE",
-          quantityDelta: line.quantity, unitCostPaise: line.unitPricePaise, ...fairDim(bill.fairId),
-        });
+      //
+      // S17-7: the lots come back at the DISCOUNTED costs they left at. Which units this return
+      // took is recomputed (the next units of the run after the earlier returns); should a
+      // since-cancelled earlier return make that differ by a paisa from what INVENTORY was credited,
+      // the last restored unit absorbs the difference so layers always equal the ledger.
+      const restorePlan = this.planReturnLots(ret, bill, true);
+      const creditedInventory = original.lines
+        .filter((line) => line.account === "INVENTORY")
+        .reduce((total, line) => total + line.creditPaise - line.debitPaise, 0);
+      const plannedInventory = restorePlan.reduce(
+        (total, entry) => total + entry.chunks.reduce((sub, chunk) => sub + chunk.quantity * chunk.unitCostPaise, 0), 0,
+      );
+      const delta = creditedInventory - plannedInventory;
+      const lastPlan = restorePlan[restorePlan.length - 1];
+      if (delta !== 0 && lastPlan !== undefined) {
+        const last = lastPlan.chunks.pop() as DiscountedLot;
+        if (last.quantity > 1) lastPlan.chunks.push({ quantity: last.quantity - 1, unitCostPaise: last.unitCostPaise });
+        if (last.unitCostPaise + delta < 0) {
+          throw new RepositoryValidationError("Cannot restore the returned stock: its recorded cost no longer adds up.");
+        }
+        lastPlan.chunks.push({ quantity: 1, unitCostPaise: last.unitCostPaise + delta });
+      }
+      for (const { line, chunks } of restorePlan) {
+        for (const chunk of chunks) {
+          this.insertStockMovement({
+            itemId: line.itemId as string, sourceId: ret.billId, movementType: "PURCHASE",
+            quantityDelta: chunk.quantity, unitCostPaise: chunk.unitCostPaise, ...fairDim(bill.fairId),
+          });
+        }
       }
       this.db.prepare("UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?").run(ret.id);
       this.insertAuditEvent({ action: "purchase_return.cancelled", entityId: ret.id, occurredAt: new Date().toISOString() });
@@ -5720,7 +6134,13 @@ export class AccountingRepository {
       }
       const bill = this.getPurchaseBill(ret.billId);
       if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
-      const money = resolveMoneyFields(this.db, this.requireBusinessCompany(bill.businessId).companyId, input, input.paymentAccount);
+      const refundDefault = input.moneyAccount === undefined && input.paymentAccount === undefined
+        ? this.defaultRefundAccount("purchase_bills", "supplier_payments", "bill_id", bill.id, bill.paymentAccount)
+        : undefined;
+      const money = resolveMoneyFields(
+        this.db, this.requireBusinessCompany(bill.businessId).companyId,
+        refundDefault === undefined ? input : { ...input, moneyAccount: refundDefault }, input.paymentAccount,
+      );
       const id = input.id ?? randomUUID();
       const entry: JournalEntry = {
         // Deliberately NOT the `je-purchase-return-` prefix: that belongs to the return's own
@@ -5762,18 +6182,90 @@ export class AccountingRepository {
    * same reason: rounding each document's share separately strands a paisa or two, so a bill
    * returned in full would not come back to exactly zero.
    */
-  private purchaseReturnDiscountShare(bill: PurchaseBillRecord, valuePaise: number, excludeReturnId?: string): number {
-    if (bill.discountPaise === 0 || bill.subtotalPaise === 0) return 0;
+  private purchaseReturnDiscountShare(bill: PurchaseBillRecord, valuePaise: number, excludeReturnId: string | undefined, unspreadDiscountPaise: number): number {
+    if (unspreadDiscountPaise <= 0 || bill.subtotalPaise === 0) return 0;
     const alreadyReturned = this.returnedValuePaise(bill.id, excludeReturnId);
     const alreadyClawedBack = this.db.prepare(
       `SELECT COALESCE(SUM(jl.debit_paise), 0) - COALESCE(SUM(jl.credit_paise), 0) AS total
          FROM journal_lines jl JOIN journal_entries je ON je.id = jl.journal_entry_id
         WHERE je.source_id = ? AND je.id LIKE 'je-purchase-return-%' AND jl.account = 'PURCHASE_DISCOUNT'`,
     ).get(bill.id) as { total: number };
-    const room = Math.max(0, bill.discountPaise - alreadyClawedBack.total);
+    const room = Math.max(0, unspreadDiscountPaise - alreadyClawedBack.total);
     const completesBill = alreadyReturned + valuePaise >= bill.subtotalPaise;
     if (completesBill) return room;
-    return Math.min(room, Math.round(bill.discountPaise * valuePaise / bill.subtotalPaise));
+    return Math.min(room, Math.round(unspreadDiscountPaise * valuePaise / bill.subtotalPaise));
+  }
+
+  /**
+   * S17-7. The part of the bill's header discount that was spread into its stock lots, read off the
+   * bill's POSTED entry (discount less what it credited to PURCHASE_DISCOUNT) so that a bill
+   * finalized under the earlier rule (whole discount credited, lots at full price) still reads 0.
+   */
+  private billSpreadDiscountPaise(bill: PurchaseBillRecord): number {
+    if (bill.discountPaise === 0) return 0;
+    const entry = this.getJournalEntryById(`je-bill-${bill.id}`);
+    const credited = entry.lines
+      .filter((line) => line.account === "PURCHASE_DISCOUNT")
+      .reduce((total, line) => total + line.creditPaise - line.debitPaise, 0);
+    return Math.max(0, bill.discountPaise - credited);
+  }
+
+  /**
+   * S17-7. The bill's stock lots per (item, billed unit price) key, as a flat run of units in bill
+   * order, exactly as finalizePurchaseBill layered them (same spread, recomputed - never stored).
+   */
+  private billLotsByKey(bill: PurchaseBillRecord): Map<string, DiscountedLot[]> {
+    const lines = bill.lines.map((line) => ({
+      quantity: line.quantity, unitPricePaise: line.unitPricePaise,
+      stock: line.itemId !== undefined && this.isTrackedItem(line.itemId),
+    }));
+    const spread = spreadBillDiscount(lines, this.billSpreadDiscountPaise(bill));
+    const byKey = new Map<string, DiscountedLot[]>();
+    bill.lines.forEach((line, index) => {
+      if (line.itemId === undefined || !lines[index]?.stock) return;
+      const key = `${line.itemId}|${line.unitPricePaise}`;
+      byKey.set(key, [...(byKey.get(key) ?? []), ...(spread.lots[index] as readonly DiscountedLot[])]);
+    });
+    return byKey;
+  }
+
+  /**
+   * S17-7. For each STOCK line of a return, the lots (quantity at cost) its units come out of: the
+   * next unreturned units of that (item, price) run, in bill order. `priorOnly` = this return is
+   * being UNDONE, so only returns made before it count as already gone.
+   */
+  private planReturnLots(ret: PurchaseReturnRecord, bill: PurchaseBillRecord, priorOnly: boolean): Array<{ line: PurchaseReturnLine; chunks: DiscountedLot[] }> {
+    const lotsByKey = this.billLotsByKey(bill);
+    const rows = this.db.prepare(
+      `SELECT prl.item_id, prl.unit_price_paise, SUM(prl.quantity) AS quantity
+         FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
+        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0 AND pr.id <> ?
+              ${priorOnly ? "AND pr.rowid < (SELECT rowid FROM purchase_returns WHERE id = ?)" : ""}
+        GROUP BY prl.item_id, prl.unit_price_paise`,
+    ).all(...(priorOnly ? [bill.id, ret.id, ret.id] : [bill.id, ret.id])) as Array<{ item_id: string | null; unit_price_paise: number; quantity: number }>;
+    const taken = new Map<string, number>();
+    for (const row of rows) if (row.item_id !== null) taken.set(`${row.item_id}|${row.unit_price_paise}`, row.quantity);
+    const plan: Array<{ line: PurchaseReturnLine; chunks: DiscountedLot[] }> = [];
+    for (const line of ret.lines) {
+      if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
+      const key = `${line.itemId}|${line.unitPricePaise}`;
+      let skip = taken.get(key) ?? 0;
+      let need = line.quantity;
+      taken.set(key, skip + need);
+      const chunks: DiscountedLot[] = [];
+      for (const lot of lotsByKey.get(key) ?? []) {
+        if (need === 0) break;
+        const skipped = Math.min(skip, lot.quantity);
+        skip -= skipped;
+        const take = Math.min(lot.quantity - skipped, need);
+        if (take > 0) { chunks.push({ quantity: take, unitCostPaise: lot.unitCostPaise }); need -= take; }
+      }
+      if (need > 0) {
+        throw new RepositoryValidationError(`Bill ${bill.number} has no more units of item ${line.itemId} at ${line.unitPricePaise} paise to return.`);
+      }
+      plan.push({ line, chunks });
+    }
+    return plan;
   }
 
   /**
@@ -5814,7 +6306,7 @@ export class AccountingRepository {
     const row = this.db.prepare(
       `SELECT COALESCE(SUM(prl.quantity * prl.unit_price_paise), 0) AS total
          FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
-        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED'
+        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0
               ${excludeReturnId === undefined ? "" : "AND pr.id <> ?"}`,
     ).get(...(excludeReturnId === undefined ? [billId] : [billId, excludeReturnId])) as { total: number };
     return row.total;
@@ -5846,7 +6338,7 @@ export class AccountingRepository {
     const returnedRows = this.db.prepare(
       `SELECT prl.item_id, prl.unit_price_paise, SUM(prl.quantity) AS quantity
          FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.purchase_return_id
-        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED'
+        WHERE pr.bill_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0
               ${excludeReturnId === undefined ? "" : "AND pr.id <> ?"}
         GROUP BY prl.item_id, prl.unit_price_paise`,
     ).all(...(excludeReturnId === undefined ? [bill.id] : [bill.id, excludeReturnId])) as Array<{ item_id: string | null; unit_price_paise: number; quantity: number }>;
@@ -5896,38 +6388,54 @@ export class AccountingRepository {
    * Guarded against returning stock that has since been SOLD, the same guard cancelPurchaseBill
    * uses - otherwise the layers would go negative and the INVENTORY credit would be fiction.
    */
-  private removeReturnedStock(ret: PurchaseReturnRecord, bill: PurchaseBillRecord): number {
+  private removeReturnedStock(ret: PurchaseReturnRecord, bill: PurchaseBillRecord): { inventoryPaise: number; grossPaise: number } {
     let totalCost = 0;
-    for (const line of ret.lines) {
-      if (line.itemId === undefined || !this.isTrackedItem(line.itemId)) continue;
-      const itemId = line.itemId;
-      const remainingOfLot = this.getStockLayers(itemId)
-        .filter((layer) => layer.sourceId === bill.id && layer.unitCostPaise === line.unitPricePaise)
+    let grossPaise = 0;
+    const plan = this.planReturnLots(ret, bill, false);
+    // Guard first, per (item, cost): the bill's own lot at that cost must still hold the units.
+    const needed = new Map<string, { itemId: string; unitCostPaise: number; quantity: number }>();
+    for (const { line, chunks } of plan) {
+      for (const chunk of chunks) {
+        const key = `${line.itemId as string}|${chunk.unitCostPaise}`;
+        const entry = needed.get(key) ?? { itemId: line.itemId as string, unitCostPaise: chunk.unitCostPaise, quantity: 0 };
+        entry.quantity += chunk.quantity;
+        needed.set(key, entry);
+      }
+    }
+    for (const need of needed.values()) {
+      const remainingOfLot = this.getStockLayers(need.itemId)
+        .filter((layer) => layer.sourceId === bill.id && layer.unitCostPaise === need.unitCostPaise)
         .reduce((total, layer) => total + layer.quantity, 0);
-      if (remainingOfLot < line.quantity) {
+      if (remainingOfLot < need.quantity) {
         throw new RepositoryValidationError(
-          `Only ${remainingOfLot} of item ${itemId} from bill ${bill.number} is still in stock; the rest has been sold, so it cannot be returned to the supplier.`,
+          `Only ${remainingOfLot} of item ${need.itemId} from bill ${bill.number} is still in stock; the rest has been sold, so it cannot be returned to the supplier.`,
         );
       }
-      this.insertStockMovement({
-        itemId,
-        // The BILL's id, not the return's. getStockLayers finds the lot to take the goods out of
-        // by matching source_id AND unit cost against the layer, and the layer carries the bill.
-        // Stamping the return's id here matches nothing, and the movement silently removes no
-        // stock while the ledger credits INVENTORY anyway - which is how this was first written,
-        // and what the stock-equals-ledger assertions caught.
-        sourceId: bill.id,
-        movementType: "PURCHASE_REVERSAL",
-        quantityDelta: -line.quantity,
-        unitCostPaise: line.unitPricePaise,
-        ...fairDim(bill.fairId),
-      });
-      totalCost += line.quantity * line.unitPricePaise;
     }
-    if (totalCost > 0) {
+    for (const { line, chunks } of plan) {
+      grossPaise += line.quantity * line.unitPricePaise;
+      for (const chunk of chunks) {
+        this.insertStockMovement({
+          itemId: line.itemId as string,
+          // The BILL's id, not the return's. getStockLayers finds the lot to take the goods out of
+          // by matching source_id AND unit cost against the layer, and the layer carries the bill.
+          // Stamping the return's id here matches nothing, and the movement silently removes no
+          // stock while the ledger credits INVENTORY anyway - which is how this was first written,
+          // and what the stock-equals-ledger assertions caught.
+          sourceId: bill.id,
+          movementType: "PURCHASE_REVERSAL",
+          quantityDelta: -chunk.quantity,
+          // The lot's OWN (discounted) cost, so what leaves the layers is what INVENTORY is credited.
+          unitCostPaise: chunk.unitCostPaise,
+          ...fairDim(bill.fairId),
+        });
+        totalCost += chunk.quantity * chunk.unitCostPaise;
+      }
+    }
+    if (plan.length > 0) {
       this.insertAuditEvent({ action: "stock.purchase_returned", entityId: ret.id, occurredAt: new Date().toISOString() });
     }
-    return totalCost;
+    return { inventoryPaise: totalCost, grossPaise };
   }
 
   /**
@@ -6020,12 +6528,14 @@ export class AccountingRepository {
       expense_date: string; description: string; amount_paise: number; tax_type: InvoiceTaxType;
       tax_rate_basis_points: number; payment_account: PurchasePaymentAccount; status: PurchaseDocumentStatus;
       fair_id: string | null; money_account: string; payment_mode: string | null; payment_reference: string | null;
+      before_opening: number;
     } | undefined;
     if (row === undefined) throw new RepositoryValidationError(`Expense ${expenseId} was not found.`);
     const taxPaise = row.tax_type === "NONE" ? 0 : Math.round(row.amount_paise * row.tax_rate_basis_points / 10000);
     const paid = this.db
       .prepare("SELECT COALESCE(SUM(amount_paise), 0) AS paid FROM supplier_payments WHERE expense_id = ? AND cancelled_at IS NULL")
       .get(expenseId) as { paid: number };
+    paid.paid += this.liveSettlementDiscountPaise("expense_id", expenseId);
     return {
       id: row.id, businessId: row.business_id, supplierId: row.supplier_id, categoryId: row.category_id,
       number: row.number, expenseDate: row.expense_date, description: row.description, amountPaise: row.amount_paise,
@@ -6033,6 +6543,7 @@ export class AccountingRepository {
       status: row.status, taxPaise, totalPaise: row.amount_paise + taxPaise, paidPaise: paid.paid,
       ...(row.fair_id === null ? {} : { fairId: row.fair_id }),
       moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
+      beforeOpening: row.before_opening === 1,
     };
   }
 
@@ -6048,10 +6559,16 @@ export class AccountingRepository {
     return ids.map((row) => this.getExpense(row.id));
   }
 
-  public finalizeExpense(expenseId: string): JournalEntry {
+  public finalizeExpense(expenseId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const expense = this.getExpense(expenseId);
       if (expense.status !== "DRAFT") throw new RepositoryValidationError("Only draft expenses can be finalized.");
+      // F: dated on or before the opening date: kept as history - no entry.
+      if (this.assertHistoryConfirmed(expense.businessId, expense.expenseDate, options.confirmBeforeOpening)) {
+        this.db.prepare("UPDATE expenses SET status = 'FINALIZED', before_opening = 1 WHERE id = ?").run(expense.id);
+        this.insertAuditEvent({ action: "expense.recorded_as_history", entityId: expense.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(expense.id, `Expense ${expense.number} kept as history`, false);
+      }
       const result = this.guard(() => purchaseEntry({
         entryId: `je-expense-${expense.id}`,
         sourceId: expense.id,
@@ -6078,6 +6595,12 @@ export class AccountingRepository {
       if (expense.paidPaise > 0) {
         throw new RepositoryValidationError("An expense with recorded supplier payments cannot be cancelled.");
       }
+      // F / S17-12: a history expense was never journalled, so nothing is reversed.
+      if (expense.beforeOpening) {
+        this.db.prepare("UPDATE expenses SET status = 'CANCELLED' WHERE id = ?").run(expense.id);
+        this.insertAuditEvent({ action: "expense.cancelled", entityId: expense.id, occurredAt: new Date().toISOString() });
+        return this.historyNoEntry(expense.id, `Cancellation of expense ${expense.number} (history)`, true);
+      }
       const original = this.getSourceJournalEntry(expense.id, "EXPENSE");
       const reversal = this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
       this.insertJournalEntry(reversal, { businessId: expense.businessId, entryDate: istDateOf(), ...fairDim(expense.fairId) });
@@ -6089,6 +6612,28 @@ export class AccountingRepository {
 
   // ---- supplier payments
 
+  /**
+   * S17-7. The settlement discount (Cr PURCHASE_DISCOUNT on the payment's own entry) of every
+   * LIVE (not cancelled) supplier payment against one document. The payments table has no column
+   * for it, so it is read off the posted entry, which is the figure on the books.
+   */
+  private liveSettlementDiscountPaise(column: "bill_id" | "expense_id", documentId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(jl.credit_paise), 0) AS total
+         FROM supplier_payments sp
+         JOIN journal_lines jl ON jl.journal_entry_id = 'je-supplier-payment-' || sp.id
+        WHERE sp.${column} = ? AND sp.cancelled_at IS NULL AND jl.account = 'PURCHASE_DISCOUNT'`,
+    ).get(documentId) as { total: number };
+    return row.total;
+  }
+
+  private settlementDiscountOfPayment(paymentId: string): number {
+    const row = this.db.prepare(
+      "SELECT COALESCE(SUM(credit_paise), 0) AS total FROM journal_lines WHERE journal_entry_id = ? AND account = 'PURCHASE_DISCOUNT'",
+    ).get(`je-supplier-payment-${paymentId}`) as { total: number };
+    return row.total;
+  }
+
   public recordSupplierPayment(input: SupplierPaymentInput & MoneyFieldsInput): SupplierPayment & MoneyFields {
     return this.db.transaction(() => {
       const paidAt = this.paymentInstant(input.paidOn);
@@ -6098,39 +6643,69 @@ export class AccountingRepository {
       if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0) {
         throw new RepositoryValidationError("Payment amount must be a positive whole number of paise.");
       }
+      const settlementDiscountPaise = input.settlementDiscountPaise ?? 0;
+      if (!Number.isInteger(settlementDiscountPaise) || settlementDiscountPaise < 0) {
+        throw new RepositoryValidationError("A settlement discount must be a non-negative whole number of paise.");
+      }
       const doc = input.billId !== undefined
         ? (() => {
             const bill = this.getPurchaseBill(input.billId);
-            return { businessId: bill.businessId, fairId: bill.fairId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, returnedPaise: this.billReturnedPaise(bill), subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
+            return { beforeOpening: bill.beforeOpening, businessId: bill.businessId, fairId: bill.fairId, number: bill.number, supplierId: bill.supplierId as string | null, status: bill.status, paymentAccount: bill.paymentAccount, totalPaise: bill.totalPaise, paidPaise: bill.paidPaise, returnedPaise: this.billReturnedPaise(bill), subtotalPaise: bill.subtotalPaise, taxType: bill.taxType, taxRateBasisPoints: bill.taxRateBasisPoints };
           })()
         : (() => {
             const expense = this.getExpense(input.expenseId as string);
-            return { businessId: expense.businessId, fairId: expense.fairId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, returnedPaise: 0, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
+            return { beforeOpening: expense.beforeOpening, businessId: expense.businessId, fairId: expense.fairId, number: expense.number, supplierId: expense.supplierId, status: expense.status, paymentAccount: expense.paymentAccount, totalPaise: expense.totalPaise, paidPaise: expense.paidPaise, returnedPaise: 0, subtotalPaise: expense.amountPaise, taxType: expense.taxType, taxRateBasisPoints: expense.taxRateBasisPoints };
           })();
       if (doc.status !== "FINALIZED") throw new RepositoryValidationError("Only finalized documents can receive supplier payments.");
       if (doc.paymentAccount !== "PAYABLES") throw new RepositoryValidationError("Only documents payable later can receive supplier payments.");
       if (doc.supplierId === null) throw new RepositoryValidationError("The document has no supplier to pay.");
       // D1: finalized purchase returns took part of the bill off what is owed (billReturnedPaise).
-      if (input.amountPaise > doc.totalPaise - doc.returnedPaise - doc.paidPaise) {
+      // S17-7: the cap counts the discount too, as it settles the document just as the cash does.
+      if (input.amountPaise + settlementDiscountPaise > doc.totalPaise - doc.returnedPaise - doc.paidPaise) {
         throw new RepositoryValidationError("Payment cannot exceed the outstanding balance.");
       }
       const money = resolveMoneyFields(this.db, this.requireBusinessCompany(doc.businessId).companyId, input);
       const sourceId = (input.billId ?? input.expenseId) as string;
+      // F / S17-12: a payment dated on or before the opening date is history; against a history
+      // document a LATER payment is refused (the money belongs on the opening balance instead).
+      const paymentIsHistory = this.isBeforeOpening(doc.businessId, istDateOf(paidAt));
+      if (doc.beforeOpening && !paymentIsHistory) {
+        throw new RepositoryValidationError(
+          `This ${input.billId !== undefined ? "bill" : "expense"} is dated before your opening date and is kept as history. Record this money as a settlement against the supplier's opening balance instead.`,
+        );
+      }
+      if (paymentIsHistory && !doc.beforeOpening) {
+        throw new RepositoryValidationError(
+          `This payment is dated on or before your opening date (${this.openingDateOf(doc.businessId)}), but the document it is for was posted to the books. Date the payment after the opening date.`,
+        );
+      }
+      if (paymentIsHistory) {
+        this.assertHistoryConfirmed(doc.businessId, istDateOf(paidAt), input.confirmBeforeOpening);
+        if (settlementDiscountPaise > 0) {
+          throw new RepositoryValidationError("A payment kept as history (dated on or before your opening date) cannot carry a settlement discount: nothing is posted for it.");
+        }
+      }
       const payment: SupplierPayment & MoneyFields = {
         id: randomUUID(),
         supplierId: doc.supplierId,
         billId: input.billId ?? null,
         expenseId: input.expenseId ?? null,
         amountPaise: input.amountPaise,
+        settlementDiscountPaise,
         paymentAccount: "CASH",
         paidAt,
         cancelledAt: null,
         cancellationReason: null,
+        beforeOpening: paymentIsHistory,
         ...money,
       };
       this.db
-        .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, money_account, payment_mode, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(payment.id, payment.supplierId, payment.billId, payment.expenseId, payment.amountPaise, payment.paymentAccount, payment.paidAt, money.moneyAccount, money.paymentMode, money.paymentReference);
+        .prepare("INSERT INTO supplier_payments (id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, money_account, payment_mode, payment_reference, before_opening) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(payment.id, payment.supplierId, payment.billId, payment.expenseId, payment.amountPaise, payment.paymentAccount, payment.paidAt, money.moneyAccount, money.paymentMode, money.paymentReference, paymentIsHistory ? 1 : 0);
+      if (paymentIsHistory) {
+        this.insertAuditEvent({ action: "supplier_payment.recorded_as_history", entityId: sourceId, occurredAt: new Date().toISOString() });
+        return payment;
+      }
       // Payments only move PAYABLES -> CASH; a finalized document always has its accrual entry.
       this.getSourceJournalEntry(sourceId, input.billId !== undefined ? "PURCHASE_BILL" : "EXPENSE");
       const paymentEntry = this.guard(() => supplierPaymentEntry({
@@ -6138,6 +6713,7 @@ export class AccountingRepository {
         sourceId,
         description: `Supplier payment for ${doc.number}`,
         amountPaise: payment.amountPaise,
+        settlementDiscountPaise,
       }));
       // R12b. The engine credits CASH; point that one line at the account the money left from.
       this.insertJournalEntry(
@@ -6160,18 +6736,20 @@ export class AccountingRepository {
     const rows = this.db
       .prepare(
         `SELECT id, supplier_id, bill_id, expense_id, amount_paise, payment_account, paid_at, cancelled_at, cancellation_reason,
-                money_account, payment_mode, payment_reference FROM supplier_payments
+                money_account, payment_mode, payment_reference, before_opening FROM supplier_payments
          ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`} ORDER BY paid_at, rowid`,
       )
       .all(...params) as Array<{
       id: string; supplier_id: string; bill_id: string | null; expense_id: string | null; amount_paise: number;
       payment_account: "CASH"; paid_at: string; cancelled_at: string | null; cancellation_reason: string | null;
-      money_account: string; payment_mode: string | null; payment_reference: string | null;
+      money_account: string; payment_mode: string | null; payment_reference: string | null; before_opening: number;
     }>;
     return rows.map((row) => ({
       id: row.id, supplierId: row.supplier_id, billId: row.bill_id, expenseId: row.expense_id,
-      amountPaise: row.amount_paise, paymentAccount: row.payment_account, paidAt: row.paid_at,
+      amountPaise: row.amount_paise, settlementDiscountPaise: this.settlementDiscountOfPayment(row.id),
+      paymentAccount: row.payment_account, paidAt: row.paid_at,
       cancelledAt: row.cancelled_at, cancellationReason: row.cancellation_reason,
+      beforeOpening: row.before_opening === 1,
       moneyAccount: row.money_account, paymentMode: row.payment_mode, paymentReference: row.payment_reference,
     }));
   }
@@ -6203,22 +6781,24 @@ export class AccountingRepository {
   public getSupplierStatement(supplierId: string): SupplierStatement {
     const supplier = this.requireSupplier(supplierId);
     const items: Array<Omit<SupplierStatementRow, "balancePaise"> & { order: number }> = [];
+    // F: history (dated on or before the opening date) is kept but never on the statement: the
+    // opening balance is the books' only figure for that period.
     for (const bill of this.listPurchaseBills({ supplierId, status: "FINALIZED" })) {
-      if (bill.paymentAccount !== "PAYABLES") continue;
+      if (bill.paymentAccount !== "PAYABLES" || bill.beforeOpening) continue;
       items.push({ date: bill.billDate, type: "BILL", documentId: bill.id, reference: bill.number, amountPaise: bill.totalPaise, order: 0 });
     }
     for (const expense of this.listExpenses({ supplierId, status: "FINALIZED" })) {
-      if (expense.paymentAccount !== "PAYABLES") continue;
+      if (expense.paymentAccount !== "PAYABLES" || expense.beforeOpening) continue;
       items.push({ date: expense.expenseDate, type: "EXPENSE", documentId: expense.id, reference: expense.number, amountPaise: expense.totalPaise, order: 0 });
     }
     for (const payment of this.listSupplierPayments({ supplierId })) {
       // R8: a CANCELLED payment never settled anything. listSupplierPayments returns it (the row
       // is kept, never deleted), so the statement has to skip it here -- otherwise it would go
       // on reducing the closing balance and the statement would disagree with getPayables.
-      if (payment.cancelledAt !== null) continue;
+      if (payment.cancelledAt !== null || payment.beforeOpening === true) continue;
       const documentId = (payment.billId ?? payment.expenseId) as string;
       const reference = payment.billId !== null ? this.getPurchaseBill(payment.billId).number : this.getExpense(documentId).number;
-      items.push({ date: payment.paidAt, type: "PAYMENT", documentId, reference, amountPaise: -payment.amountPaise, order: 1 });
+      items.push({ date: payment.paidAt, type: "PAYMENT", documentId, reference, amountPaise: -(payment.amountPaise + (payment.settlementDiscountPaise ?? 0)), order: 1 });
     }
     // D2: one RETURN row per FINALIZED return on this supplier's PAYABLES bills - the PAYABLES debit
     // of its journal (the part that went to SUPPLIER_CREDITS does not lower what is owed).
@@ -6227,7 +6807,7 @@ export class AccountingRepository {
               COALESCE((SELECT SUM(jl.debit_paise) - SUM(jl.credit_paise) FROM journal_lines jl
                          WHERE jl.journal_entry_id = 'je-purchase-return-' || pr.id AND jl.account = 'PAYABLES'), 0) AS payables_paise
          FROM purchase_returns pr JOIN purchase_bills b ON b.id = pr.bill_id
-        WHERE b.supplier_id = ? AND pr.status = 'FINALIZED' AND b.payment_account = 'PAYABLES'
+        WHERE b.supplier_id = ? AND pr.status = 'FINALIZED' AND pr.before_opening = 0 AND b.payment_account = 'PAYABLES'
         ORDER BY pr.return_date, pr.rowid`,
     ).all(supplierId) as Array<{ id: string; number: string; return_date: string; bill_id: string; payables_paise: number }>;
     for (const r of returnRows) {
@@ -7020,8 +7600,8 @@ export class AccountingRepository {
       }
       const money = resolveMoneyFields(this.db, this.requireBusinessCompany(balance.business_id).companyId, input, input.paymentAccount);
       this.assertIsoDate("The receipt date", input.receivedOn);
-      if (input.receivedOn < balance.as_at) {
-        throw new RepositoryValidationError(`A receipt cannot predate the opening balance (${balance.as_at}).`);
+      if (input.receivedOn <= balance.as_at) {
+        throw new RepositoryValidationError(`This receipt is dated on or before the opening date (${balance.as_at}), so it is already included in the opening balance.`);
       }
       if (this.db.prepare("SELECT 1 FROM opening_balance_receipts WHERE id = ?").get(input.id) !== undefined) {
         throw new RepositoryValidationError(`Receipt ${input.id} already exists.`);
@@ -7195,8 +7775,8 @@ export class AccountingRepository {
       }
       const money = resolveMoneyFields(this.db, this.requireBusinessCompany(balance.business_id).companyId, input, input.paymentAccount);
       this.assertIsoDate("The payment date", input.paidOn);
-      if (input.paidOn < balance.as_at) {
-        throw new RepositoryValidationError(`A settlement cannot predate the opening balance (${balance.as_at}).`);
+      if (input.paidOn <= balance.as_at) {
+        throw new RepositoryValidationError(`This settlement is dated on or before the opening date (${balance.as_at}), so it is already included in the opening balance.`);
       }
       if (this.db.prepare("SELECT 1 FROM opening_balance_settlements WHERE id = ?").get(input.id) !== undefined) {
         throw new RepositoryValidationError(`Settlement ${input.id} already exists.`);
@@ -7286,7 +7866,7 @@ export class AccountingRepository {
   private openSupplierItemRows(filter: { businessId?: string; supplierId?: string }): Array<OpenSupplierItem & { readonly number: string }> {
     const items: Array<OpenSupplierItem & { readonly number: string }> = [];
     for (const bill of this.listPurchaseBills({ status: "FINALIZED" })) {
-      if (bill.paymentAccount !== "PAYABLES") continue;
+      if (bill.paymentAccount !== "PAYABLES" || bill.beforeOpening) continue; // F: history is never owed
       const returnedPaise = this.billReturnedPaise(bill); // D2: purchase returns lower what is still owed
       items.push({
         documentId: bill.id, kind: "BILL", date: bill.billDate, totalPaise: bill.totalPaise, settledPaise: bill.paidPaise + returnedPaise,
@@ -7294,7 +7874,7 @@ export class AccountingRepository {
       });
     }
     for (const expense of this.listExpenses({ status: "FINALIZED" })) {
-      if (expense.paymentAccount !== "PAYABLES" || expense.supplierId === null) continue;
+      if (expense.paymentAccount !== "PAYABLES" || expense.supplierId === null || expense.beforeOpening) continue; // F
       items.push({
         documentId: expense.id, kind: "EXPENSE", date: expense.expenseDate, totalPaise: expense.totalPaise, settledPaise: expense.paidPaise,
         outstandingPaise: expense.totalPaise - expense.paidPaise, supplierId: expense.supplierId, businessId: expense.businessId, number: expense.number,

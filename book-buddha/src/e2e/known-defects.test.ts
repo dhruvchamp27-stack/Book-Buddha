@@ -58,7 +58,7 @@ async function world(): Promise<W> {
 async function billAndReturn(w: W): Promise<string> {
   const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-1", billDate: "2025-04-10", paymentAccount: "PAYABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
   await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
-  const ret = await must("POST", "/purchase-returns", { billId: bill.id, number: "PR-1", reason: "Short supply", returnDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
+  const ret = await must("POST", "/purchase-returns", { billId: bill.id, reason: "Short supply", returnDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
   await must("POST", `/purchase-returns/${ret.id}/finalize`, {});
   return bill.id as string;
 }
@@ -70,11 +70,12 @@ async function purchase(w: W, quantity: number, unitPricePaise: number, number: 
   await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
 }
 async function sellFinal(w: W, id: string, quantity: number, unitPricePaise: number): Promise<void> {
-  await must("POST", "/invoices", { id, number: id, businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise }] });
+  await must("POST", "/invoices", { id, businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise }] });
   await must("POST", `/invoices/${id}/finalize`, {});
 }
-async function creditNote(w: W, invoiceId: string, number: string, quantity: number, unitPricePaise: number): Promise<string> {
-  const cn = await must("POST", "/credit-notes", { invoiceId, number, reason: "Return", noteDate: "2025-04-15", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise }] });
+/** The app numbers the note (S17-4); `_label` is only for the reader of the test. */
+async function creditNote(w: W, invoiceId: string, _label: string, quantity: number, unitPricePaise: number): Promise<string> {
+  const cn = await must("POST", "/credit-notes", { invoiceId, reason: "Return", noteDate: "2025-04-15", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise }] });
   await must("POST", `/credit-notes/${cn.id}/finalize`, { confirmBackdatedMonth: true });
   return cn.id as string;
 }
@@ -146,9 +147,9 @@ describe("known defects (each asserts the correct behaviour; passes while the de
   // check the invoice status, so a draft note can be finalized against a CANCELLED invoice.
   it("FIXED D6: a draft credit note can be finalized after its invoice is cancelled (P7a)", async () => {
     const w = await world();
-    await must("POST", "/invoices", { id: "inv-7", number: "INV-7", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
+    await must("POST", "/invoices", { id: "inv-7", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-7/finalize", {});
-    const cn = await must("POST", "/credit-notes", { invoiceId: "inv-7", number: "CN-7", reason: "x", noteDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
+    const cn = await must("POST", "/credit-notes", { invoiceId: "inv-7", reason: "x", noteDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
     await must("POST", "/invoices/inv-7/cancel", {});
     const fin = await req("POST", `/credit-notes/${cn.id}/finalize`, { confirmBackdatedMonth: true });
     expect(fin.status, "finalize against a cancelled invoice must be refused").toBeGreaterThanOrEqual(400);
@@ -160,7 +161,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
     const w = await world();
     const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-7", billDate: "2025-04-10", paymentAccount: "PAYABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
-    const ret = await must("POST", "/purchase-returns", { billId: bill.id, number: "PR-7", reason: "x", returnDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
+    const ret = await must("POST", "/purchase-returns", { billId: bill.id, reason: "x", returnDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
     await must("POST", `/purchase-bills/${bill.id}/cancel`, {});
     const fin = await req("POST", `/purchase-returns/${ret.id}/finalize`, {});
     expect(fin.status, "finalize against a cancelled bill must be refused").toBeGreaterThanOrEqual(400);
@@ -177,7 +178,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
     await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
     const invBefore = ledger("INVENTORY");
     const valBefore = valuation();
-    const create = await req("POST", "/purchase-returns", { billId: bill.id, number: "PR-12", reason: "Damaged", returnDate: "2025-04-15", lines: [{ itemId: w.itemId, description: "Atlas", quantity: 1, unitPricePaise: 10000 }] });
+    const create = await req("POST", "/purchase-returns", { billId: bill.id, reason: "Damaged", returnDate: "2025-04-15", lines: [{ itemId: w.itemId, description: "Atlas", quantity: 1, unitPricePaise: 10000 }] });
     expect(create.status, "return of one unit at the 100 price must be accepted").toBe(201);
     const fin = await req("POST", `/purchase-returns/${create.body.id}/finalize`, {});
     expect(fin.status).toBe(200);
@@ -196,7 +197,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
     const april = `/reports/profit-and-loss?businessId=${w.businessId}&basis=CASH&fromDate=2025-04-01&toDate=2025-04-30`;
     const aprMay = `/reports/profit-and-loss?businessId=${w.businessId}&basis=CASH&fromDate=2025-04-01&toDate=2025-05-31`;
     const aprBefore = await req("GET", april);
-    const ret = await must("POST", "/purchase-returns", { billId: bill.id, number: "PR-14", reason: "Short", returnDate: "2025-05-05", lines: [{ description: "Service", quantity: 1, unitPricePaise: 2000 }] });
+    const ret = await must("POST", "/purchase-returns", { billId: bill.id, reason: "Short", returnDate: "2025-05-05", lines: [{ description: "Service", quantity: 1, unitPricePaise: 2000 }] });
     await must("POST", `/purchase-returns/${ret.id}/finalize`, {});
     const aprAfter = await req("GET", april);
     const both = await req("GET", aprMay);
@@ -209,7 +210,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
   // payment voucher (Dr OUTPUT_CGST/SGST) is read as a sales reversal and lowers it from 18 to 0.
   it("FIXED D10: a GST payment voucher reduces GST on sales on the P&L (P10)", async () => {
     const w = await world();
-    await must("POST", "/invoices", { id: "inv-10", number: "INV-10", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-05", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
+    await must("POST", "/invoices", { id: "inv-10", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-05", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-10/finalize", {});
     const q = `/reports/profit-and-loss?businessId=${w.businessId}&fromDate=2025-04-01&toDate=2025-04-30`;
     await must("POST", "/vouchers", { kind: "PAYMENT", businessId: w.businessId, date: "2025-04-20", moneyAccount: "CASH", narration: "GST remittance", lines: [{ account: "OUTPUT_CGST", amountPaise: 900 }, { account: "OUTPUT_SGST", amountPaise: 900 }] });
@@ -219,14 +220,20 @@ describe("known defects (each asserts the correct behaviour; passes while the de
 
   // Root cause: invoice numbers are not unique per business (no index/check in create or finalize),
   // so a second invoice with the same number is accepted and finalized.
+  // S17-4: the app now numbers invoices itself, so a duplicate cannot be asked for over HTTP: a number
+  // in the body is refused, and two invoices get two different numbers.
   it("FIXED D11: two invoices with the same number in one business (P8)", async () => {
     const w = await world();
-    const mk = (id: string): object => ({ id, number: "INV-DUP", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
-    await must("POST", "/invoices", mk("dup-a"));
+    const mk = (id: string): object => ({ id, businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
+    const a = await must("POST", "/invoices", mk("dup-a"));
     await must("POST", "/invoices/dup-a/finalize", {});
+    const asked = await req("POST", "/invoices", { ...mk("dup-x"), number: a.number });
     const b = await req("POST", "/invoices", mk("dup-b"));
-    const bf = b.status < 300 ? await req("POST", "/invoices/dup-b/finalize", {}) : { status: -1, body: null };
-    expect(b.status >= 400 || bf.status >= 400, "duplicate number must be refused").toBe(true);
+    expect(asked.status, "a number sent in the body is refused").toBe(400);
+    expect(b.status).toBeLessThan(300);
+    expect(b.body.number, "the second invoice gets its own number").not.toBe(a.number);
+    const bf = await req("POST", "/invoices/dup-b/finalize", {});
+    expect(bf.status).toBeLessThan(300);
   });
 
   // Root cause: POST /accounts/:code/active toggles the chart row directly and, unlike
@@ -272,7 +279,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
     vi.setSystemTime(new Date("2099-06-15T06:00:00Z"));
     let created: R;
     try {
-      created = await req("POST", "/invoices", { id: "inv-14", number: "INV-14", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
+      created = await req("POST", "/invoices", { id: "inv-14", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     } finally {
       vi.useRealTimers();
     }
@@ -285,7 +292,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
   // does not tie to the total / journal balances for a 3-paise sale, and finalize throws (500).
   it("FIXED D15: a tiny sale (3 paise at 18% CGST_SGST) fails to finalize (P15)", async () => {
     const w = await world();
-    await must("POST", "/invoices", { id: "inv-15", number: "INV-15", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Pencil", quantity: 1, unitPricePaise: 3 }] });
+    await must("POST", "/invoices", { id: "inv-15", businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Pencil", quantity: 1, unitPricePaise: 3 }] });
     const fin = await req("POST", "/invoices/inv-15/finalize", {});
     expect(fin.status, `finalize body: ${JSON.stringify(fin.body).slice(0, 200)}`).toBe(200);
   });
@@ -294,7 +301,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
   // but the cash-basis P&L removes the income from the original (January) month instead.
   it("FIXED D16 (ruling S16-7 replaces S8-1): a receipt cancelled in a later month removes the earlier month's cash income (P16)", async () => {
     const w = await world();
-    await must("POST", "/invoices", { id: "inv-16", number: "INV-16", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-01-10", lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
+    await must("POST", "/invoices", { id: "inv-16", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-01-10", lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-16/finalize", {});
     await must("POST", "/invoices/inv-16/payments", { amountPaise: 10000, paidOn: "2025-01-20" });
     const paymentId = ((await must("GET", "/invoices/inv-16/payments")) as any[])[0].id as string;

@@ -245,13 +245,16 @@ describe("S10-4 reversal (ADJUSTMENT_REVERSAL)", () => {
     const r = w.repository;
     try {
       const opening = r.addStockMovement({ itemId: w.itemId, movementType: "OPENING", quantity: 10, unitCostPaise: 10_000 });
-      const barePurchase = r.addStockMovement({ itemId: w.itemId, movementType: "PURCHASE", quantity: 2, unitCostPaise: 10_000 });
+      // S17: the door refuses a bare PURCHASE. An old source-less row is built by hand instead.
+      expect(() => r.addStockMovement({ itemId: w.itemId, movementType: "PURCHASE", quantity: 2, unitCostPaise: 10_000 }))
+        .toThrow("Stock comes in through a purchase bill, opening stock, or a stock adjustment.");
       sell(w, "I1", 1);
       const rows = r.listStockMovements(w.itemId);
       const saleRow = rows.find((m) => m.movementType === "SALE")!;
       const raw = (id: string, type: string, source: string | null, quantity: number) =>
         r.db.prepare("INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES (?, ?, ?, ?, ?, 10000, ?)")
           .run(id, w.itemId, source, type, quantity, new Date().toISOString());
+      raw("bare", "PURCHASE", null, 2);
       raw("billed", "PURCHASE", "some-bill", 1);
       raw("bill-rev", "PURCHASE_REVERSAL", "some-bill", -1);
       raw("sale-rev", "SALE_REVERSAL", "some-note", 1);
@@ -260,7 +263,7 @@ describe("S10-4 reversal (ADJUSTMENT_REVERSAL)", () => {
       refused(() => r.reverseStockMovement("sale-rev"), /Cancel the document/);
       refused(() => r.reverseStockMovement("bill-rev"), /cancelled bill or a purchase return/);
       refused(() => r.reverseStockMovement("billed"), /Cancel the bill/);
-      refused(() => r.reverseStockMovement(barePurchase.id), /posted nothing/);
+      refused(() => r.reverseStockMovement("bare"), /posted nothing/);
       refused(() => r.reverseStockMovement("no-such-id"), /not found/);
       refused(() => r.reverseStockMovement(opening.id), /already gone out/); // 1 of its 10 was sold
     } finally { r.close(); }
@@ -289,6 +292,19 @@ describe("S10-4 reversal (ADJUSTMENT_REVERSAL)", () => {
       refused(() => r.reverseStockMovement(opening.id), /locked/);
       expect([movementCount(r), journalCount(r)]).toEqual(before);
       expectTies(w);
+    } finally { r.close(); }
+  });
+
+  it("S17: a zero-cost write-down and a zero-value movement also respect a locked financial year", () => {
+    const w = world();
+    const r = w.repository;
+    try {
+      r.addStockMovement({ itemId: w.itemId, movementType: "OPENING", quantity: 4, unitCostPaise: 0 }); // a free sample
+      lockCurrentYear(w);
+      const before = [movementCount(r), journalCount(r)];
+      refused(() => r.writeDownStock({ itemId: w.itemId, quantity: 1 }), /locked/);
+      refused(() => r.addStockMovement({ itemId: w.itemId, movementType: "OPENING", quantity: 1, unitCostPaise: 0 }), /locked/);
+      expect([movementCount(r), journalCount(r)]).toEqual(before);
     } finally { r.close(); }
   });
 

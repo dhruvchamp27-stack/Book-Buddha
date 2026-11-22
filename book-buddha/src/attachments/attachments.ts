@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { appendAuditEvent } from "../database/audit-log.js";
 
 export const ATTACHMENT_ENTITY_TYPES = [
   "INVOICE",
@@ -66,6 +67,10 @@ interface AttachmentRow {
   sha256: string;
   created_by: string | null;
   created_at: string;
+}
+
+function auditValues(r: { entity_type: string; entity_id: string; original_filename: string; sha256: string }) {
+  return { entityType: r.entity_type, entityId: r.entity_id, filename: r.original_filename, sha256: r.sha256 };
 }
 
 function toAttachment(row: AttachmentRow): Attachment {
@@ -227,6 +232,13 @@ export function storeAttachment(
        VALUES
         (@id, @entity_type, @entity_id, @original_filename, @stored_filename, @mime_type, @size_bytes, @sha256, @created_by, @created_at)`,
     ).run(row);
+    appendAuditEvent(db, {
+      action: "attachment.uploaded",
+      entityId: row.id,
+      entityType: "attachment",
+      occurredAt: row.created_at,
+      afterValues: auditValues(row),
+    });
   } catch (error) {
     fs.rmSync(finalPath, { force: true });
     throw error;
@@ -262,6 +274,20 @@ export function deleteAttachment(db: Database.Database, storageRoot: string, id:
     throw new Error(`Attachment ${id} was not found.`);
   }
   const filePath = getAttachmentPath(storageRoot, attachment);
-  db.prepare(`DELETE FROM attachments WHERE id = ?`).run(id);
+  db.transaction(() => {
+    db.prepare(`DELETE FROM attachments WHERE id = ?`).run(id);
+    appendAuditEvent(db, {
+      action: "attachment.deleted",
+      entityId: id,
+      entityType: "attachment",
+      occurredAt: new Date().toISOString(),
+      beforeValues: auditValues({
+        entity_type: attachment.entityType,
+        entity_id: attachment.entityId,
+        original_filename: attachment.originalFilename,
+        sha256: attachment.sha256,
+      }),
+    });
+  })();
   fs.rmSync(filePath, { force: true });
 }

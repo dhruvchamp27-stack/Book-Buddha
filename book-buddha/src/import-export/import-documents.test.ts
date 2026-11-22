@@ -111,7 +111,7 @@ const invoiceCount = (w: World): number => w.repository.listInvoices(w.businessI
 
 describe("document import kinds: shape", () => {
   it("offers invoices, purchase-bills, credit-notes, payments and supplier-payments, all BUSINESS scope", () => {
-    expect(DOCUMENT_IMPORT_KINDS.map((k) => k.kind)).toEqual(["invoices", "purchase-bills", "credit-notes", "payments", "supplier-payments"]);
+    expect(DOCUMENT_IMPORT_KINDS.map((k) => k.kind)).toEqual(["invoices", "purchase-bills", "credit-notes", "payments", "supplier-payments", "expenses"]);
     for (const k of DOCUMENT_IMPORT_KINDS) expect(k.scope).toBe("BUSINESS");
     expect(kindOf("invoices").groupBy).toBe("number");
     expect(kindOf("purchase-bills").groupBy).toBe("number");
@@ -124,10 +124,10 @@ describe("document import kinds: shape", () => {
     const labels = kindOf("invoices").fields.map((f) => f.label);
     expect(labels).toEqual([
       "Number", "Invoice date", "Due date", "Customer", "Status", "Item", "Description", "Quantity", "Unit price",
-      "Discount", "Extra charge", "Tax type", "Tax rate", "Fair", "Notes",
+      "Discount", "Extra charge", "Tax type", "Tax rate", "Fair", "Notes", "Before opening", // F: accepted, ignored
     ]);
     expect(kindOf("credit-notes").fields.map((f) => f.label)).toEqual([
-      "Number", "Invoice number", "Note date", "Reason", "Status", "Item", "Description", "Quantity", "Unit price",
+      "Number", "Invoice number", "Note date", "Reason", "Status", "Item", "Description", "Quantity", "Unit price", "Before opening",
     ]);
     expect(kindOf("payments").fields.filter((f) => f.required).map((f) => f.label)).toEqual(["Invoice number", "Amount", "Paid on"]);
   });
@@ -216,34 +216,41 @@ describe("invoices", () => {
     expect(trial(w, "RECEIVABLES")).toBe(20_000);
   });
 
-  it("a document dated on or before the general opening balances fails with the reason, and the day after posts", () => {
+  it("a document dated on or before the general opening balances is kept as history (F), and the day after posts", () => {
     const w = world();
     w.repository.saveOpeningBalances({
       id: "ob1", businessId: w.businessId, asAt: "2026-03-31",
       lines: [{ account: "CASH", debitPaise: 1_000_000, creditPaise: 0 }, { account: "CAPITAL", debitPaise: 0, creditPaise: 1_000_000 }],
     });
     const line = { description: "Book", quantity: "1", unitPrice: "100" };
-    const on = failureOf(() => post(w, "invoices", [row(2, { ...head("INV-ON", { invoiceDate: "2026-03-31" }), ...line })]));
-    expect(on).toContain("dated on or before the opening balances of 2026-03-31");
-    expect(on).toContain("would count twice");
-    expect(failureOf(() => post(w, "invoices", [row(2, { ...head("INV-BEFORE", { invoiceDate: "2025-12-01" }), ...line })]))).toContain("opening balances of 2026-03-31");
-    expect(invoiceCount(w)).toBe(0);
-    expect(post(w, "invoices", [row(2, { ...head("INV-AFTER", { invoiceDate: "2026-04-01" }), ...line })]).status).toBe("CREATED");
+    const on = post(w, "invoices", [row(2, { ...head("INV-ON", { invoiceDate: "2026-03-31" }), ...line })]);
+    expect(on).toEqual({ status: "CREATED", reference: "INV-ON", message: "kept as history (before opening date)" });
+    expect(post(w, "invoices", [row(2, { ...head("INV-BEFORE", { invoiceDate: "2025-12-01" }), ...line })]).message).toContain("kept as history");
+    // Kept and flagged, but never journalled: nothing is owed on the books for them.
+    expect(invoiceCount(w)).toBe(2);
+    expect(w.repository.listInvoices(w.businessId).every((i) => i.beforeOpening)).toBe(true);
+    expect(trial(w, "RECEIVABLES")).toBe(0);
+    expect(post(w, "invoices", [row(2, { ...head("INV-AFTER", { invoiceDate: "2026-04-01" }), ...line })])).toEqual({ status: "CREATED", reference: "INV-AFTER" });
+    expect(trial(w, "RECEIVABLES")).toBeGreaterThan(0);
   });
 
-  it("a customer opening balance date and a supplier opening balance date also block documents", () => {
+  it("a customer opening balance date and a supplier opening balance date also make documents history (F)", () => {
     const w = world();
     const customerId = w.repository.listCustomers(w.companyId)[0]?.id ?? "";
     w.repository.saveOpeningCustomerBalance({ id: "ocb1", businessId: w.businessId, customerId, asAt: "2026-06-30", amountPaise: 500_000, incomePaise: 0 });
     const line = { description: "Book", quantity: "1", unitPrice: "100" };
-    expect(failureOf(() => post(w, "invoices", [row(2, { ...head("INV-1", { invoiceDate: "2026-06-30" }), ...line })]))).toContain("opening balances of 2026-06-30");
-    expect(post(w, "invoices", [row(2, { ...head("INV-2", { invoiceDate: "2026-07-01" }), ...line })]).status).toBe("CREATED");
+    expect(post(w, "invoices", [row(2, { ...head("INV-1", { invoiceDate: "2026-06-30" }), ...line })]).message).toBe("kept as history (before opening date)");
+    expect(post(w, "invoices", [row(2, { ...head("INV-2", { invoiceDate: "2026-07-01" }), ...line })])).toEqual({ status: "CREATED", reference: "INV-2" });
 
     const w2 = world();
     w2.repository.saveOpeningSupplierBalance({ id: "osb1", businessId: w2.businessId, supplierId: w2.supplierId, asAt: "2026-08-31", amountPaise: 300_000 });
     const bill = { supplier: "Paper House", description: "Paper", quantity: "1", unitPrice: "100" };
-    expect(failureOf(() => post(w2, "purchase-bills", [row(2, { number: "PB-1", billDate: "2026-08-31", ...bill })]))).toContain("opening balances of 2026-08-31");
-    expect(post(w2, "purchase-bills", [row(2, { number: "PB-2", billDate: "2026-09-01", ...bill })]).status).toBe("CREATED");
+    expect(post(w2, "purchase-bills", [row(2, { number: "PB-1", billDate: "2026-08-31", ...bill })]).message).toBe("kept as history (before opening date)");
+    expect(post(w2, "purchase-bills", [row(2, { number: "PB-2", billDate: "2026-09-01", ...bill })])).toEqual({ status: "CREATED", reference: "PB-2" });
+
+    const exp = { description: "Tape", amount: "50", paymentAccount: "CASH" };
+    expect(post(w2, "expenses", [row(2, { number: "EXP-1", expenseDate: "2026-08-31", ...exp })]).message).toBe("kept as history (before opening date)");
+    expect(post(w2, "expenses", [row(2, { number: "EXP-2", expenseDate: "2026-09-01", ...exp })])).toEqual({ status: "CREATED", reference: "EXP-2" });
   });
 
   it("short stock fails the unit and leaves no draft behind", () => {
@@ -372,7 +379,7 @@ describe("credit notes and customer payments", () => {
     expect(w.repository.listCreditNotes()).toHaveLength(1);
   });
 
-  it("a credit note dated before the opening balances fails; an unknown invoice fails naming it", () => {
+  it("a credit note dated on or before the opening balances is kept as history (F); an unknown invoice fails naming it", () => {
     const w = world();
     post(w, "invoices", THREE_LINES("INV-1"));
     w.repository.saveOpeningBalances({
@@ -380,9 +387,11 @@ describe("credit notes and customer payments", () => {
       lines: [{ account: "CASH", debitPaise: 1_000_000, creditPaise: 0 }, { account: "CAPITAL", debitPaise: 0, creditPaise: 1_000_000 }],
     });
     const base = { reason: "Return", description: "Binding", quantity: "1", unitPrice: "100" };
-    expect(failureOf(() => post(w, "credit-notes", [row(2, { number: "CN-1", invoiceNumber: "INV-1", noteDate: "2026-11-03", ...base })]))).toContain("opening balances of 2026-11-03");
+    expect(post(w, "credit-notes", [row(2, { number: "CN-1", invoiceNumber: "INV-1", noteDate: "2026-11-03", ...base })]).message).toBe("kept as history (before opening date)");
     expect(failureOf(() => post(w, "credit-notes", [row(2, { number: "CN-2", invoiceNumber: "INV-NOPE", noteDate: "2026-11-05", ...base })]))).toContain("INV-NOPE");
-    expect(w.repository.listCreditNotes()).toHaveLength(0);
+    // Kept (visible, flagged), but it posted nothing: receivables still stand at the whole invoice.
+    expect(w.repository.listCreditNotes().map((n) => n.beforeOpening)).toEqual([true]);
+    expect(trial(w, "RECEIVABLES")).toBe(THREE_LINE_TOTAL);
   });
 
   it("a payment is recorded against the invoice on its date, and re-importing it is skipped", () => {
@@ -414,7 +423,48 @@ describe("credit notes and customer payments", () => {
     expect(w.repository.listPayments(invoice?.id ?? "").filter((p) => p.cancelledAt === null)).toHaveLength(1);
   });
 
-  it("a payment over the balance, to an unknown invoice, or dated on or before the opening balances fails", () => {
+  it("equal payments within one file all import; the same file again imports none (S16-3, count-based)", () => {
+    const w = world();
+    post(w, "invoices", THREE_LINES("INV-1"));
+    const pay = (n: number): MappedRow => row(n, { invoiceNumber: "INV-1", amount: "1000", paidOn: "2026-11-10" });
+    const run = (): string[] => {
+      const shared = ctx(w); // one context = one run, as the engine does
+      return [pay(2), pay(3)].map((r) => post(w, "payments", [r], shared).status);
+    };
+    expect(run()).toEqual(["CREATED", "CREATED"]);
+    const [invoice] = w.repository.listInvoices(w.businessId);
+    expect(w.repository.listPayments(invoice?.id ?? "").filter((p) => p.cancelledAt === null)).toHaveLength(2);
+    expect(run()).toEqual(["SKIPPED", "SKIPPED"]);
+    expect(w.repository.listPayments(invoice?.id ?? "").filter((p) => p.cancelledAt === null)).toHaveLength(2);
+  });
+
+  it("a file with two equal rows imports one when one equal payment is already in the books", () => {
+    const w = world();
+    post(w, "invoices", THREE_LINES("INV-1"));
+    const pay = (n: number): MappedRow => row(n, { invoiceNumber: "INV-1", amount: "1000", paidOn: "2026-11-10" });
+    post(w, "payments", [pay(2)]); // an earlier import or a hand-entered payment
+    const shared = ctx(w);
+    expect([pay(2), pay(3)].map((r) => post(w, "payments", [r], shared).status)).toEqual(["SKIPPED", "CREATED"]);
+    const [invoice] = w.repository.listInvoices(w.businessId);
+    expect(w.repository.listPayments(invoice?.id ?? "").filter((p) => p.cancelledAt === null)).toHaveLength(2);
+  });
+
+  it("supplier payments follow the same count-based rule", () => {
+    const w = world();
+    post(w, "purchase-bills", [
+      row(2, { number: "PB-1", billDate: "2026-11-02", supplier: "Paper House", item: "Atlas", quantity: "5", unitPrice: "400" }),
+      row(3, { number: "PB-1", billDate: "2026-11-02", supplier: "Paper House", item: "Freight", quantity: "1", unitPrice: "100" }),
+    ]);
+    const pay = (n: number): MappedRow => row(n, { billNumber: "PB-1", amount: "100", paidOn: "2026-11-10" });
+    const run = (): string[] => {
+      const shared = ctx(w);
+      return [pay(2), pay(3)].map((r) => post(w, "supplier-payments", [r], shared).status);
+    };
+    expect(run()).toEqual(["CREATED", "CREATED"]);
+    expect(run()).toEqual(["SKIPPED", "SKIPPED"]);
+  });
+
+  it("a payment over the balance, to an unknown invoice, or dated on or before the opening of a posted invoice fails (F)", () => {
     const w = world();
     post(w, "invoices", THREE_LINES("INV-1"));
     expect(failureOf(() => post(w, "payments", [row(2, { invoiceNumber: "INV-1", amount: "99999", paidOn: "2026-11-10" })]))).toMatch(/exceed/i);
@@ -423,7 +473,7 @@ describe("credit notes and customer payments", () => {
       id: "ob1", businessId: w.businessId, asAt: "2026-11-10",
       lines: [{ account: "CASH", debitPaise: 1_000_000, creditPaise: 0 }, { account: "CAPITAL", debitPaise: 0, creditPaise: 1_000_000 }],
     });
-    expect(failureOf(() => post(w, "payments", [row(2, { invoiceNumber: "INV-1", amount: "10", paidOn: "2026-11-10" })]))).toContain("opening balances of 2026-11-10");
+    expect(failureOf(() => post(w, "payments", [row(2, { invoiceNumber: "INV-1", amount: "10", paidOn: "2026-11-10" })]))).toContain("on or before your opening date (2026-11-10)");
     const [invoice] = w.repository.listInvoices(w.businessId);
     expect(w.repository.listPayments(invoice?.id ?? "")).toHaveLength(0);
   });

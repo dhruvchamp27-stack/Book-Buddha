@@ -89,14 +89,16 @@ export function openCustomerItemRows(
               i.tax_rate_basis_points,
               (SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise)
                 + ROUND((SUM(il.quantity * il.unit_price_paise) - i.discount_paise + i.extra_charge_paise) * i.tax_rate_basis_points / 10000.0) AS total_paise,
-              COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id AND p.cancelled_at IS NULL), 0)
+              COALESCE((SELECT SUM(p.amount_paise) FROM payments p WHERE p.invoice_id = i.id AND p.cancelled_at IS NULL AND p.before_opening = 0), 0)
                 + COALESCE((SELECT SUM(a.amount_paise) FROM credit_note_applications a WHERE a.invoice_id = i.id), 0) AS paid_paise
          FROM invoices i
          JOIN invoice_lines il ON il.invoice_id = i.id
          -- Every FINALIZED invoice has this entry; LEFT so a missing one cannot silently
          -- drop the invoice from what the customer owes.
          LEFT JOIN journal_entries je ON je.id = 'je-' || i.id
-         WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES'${invoiceWhere.sql}
+         -- F: a document kept as HISTORY (dated on or before the opening date) is never owed: the
+         -- opening balance is the books' only figure for that period.
+         WHERE i.status = 'FINALIZED' AND i.payment_account = 'RECEIVABLES' AND i.before_opening = 0${invoiceWhere.sql}
          GROUP BY i.id
          ORDER BY i.created_at`,
     )

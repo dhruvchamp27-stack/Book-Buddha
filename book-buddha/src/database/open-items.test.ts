@@ -134,7 +134,7 @@ describe("the shared open-items query: the fair filter", () => {
       // A receipt against the opening balance reduces what is being left out.
       w.repository.recordOpeningBalanceReceipt({
         id: "RC-1", openingCustomerBalanceId: "OCB-1", amountPaise: 10_000,
-        receivedOn: AS_AT, paymentAccount: "CASH",
+        receivedOn: "2026-04-02", paymentAccount: "CASH", // F: ON the opening date is already in the opening balance
       });
       expect(excludedOpeningBalances(w.repository.db, { fairId: w.kochi })).toBe(15_000);
     } finally {

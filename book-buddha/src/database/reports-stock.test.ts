@@ -60,7 +60,11 @@ function stockTheWorld(w: World): void {
   });
   r.finalizePurchaseBill(bill.id);
   r.addStockMovement({ itemId: w.atlas, movementType: "ADJUSTMENT", quantity: 5, unitCostPaise: 7000, occurredOn: "2026-05-31" });
-  r.addStockMovement({ itemId: w.globe, movementType: "PURCHASE", quantity: 8, unitCostPaise: 1000 });
+  // S17: the door refuses a bare PURCHASE; this old-database shape (source-less, posts nothing) is
+  // inserted by hand so the ageing and valuation figures stay as they were.
+  r.db
+    .prepare("INSERT INTO stock_movements (id, item_id, source_id, movement_type, quantity_delta, unit_cost_paise, occurred_at) VALUES ('legacy-purchase', ?, NULL, 'PURCHASE', 8, 1000, ?)")
+    .run(w.globe, new Date().toISOString());
   w.sell("INV-1", w.atlas, 4, 9000); // FIFO: 4 off the oldest (opening) lot.
 }
 
@@ -189,8 +193,8 @@ describe("stock ageing and inventory valuation detail", () => {
       const w = world();
       try {
         const r = w.repository;
-        // The source-less purchase goes in FIRST (so it is first in FIFO) at Rs 1.
-        r.addStockMovement({ itemId: w.atlas, movementType: "PURCHASE", quantity: 5, unitCostPaise: 100 });
+        // The first layer goes in FIRST (so it is first in FIFO) at Rs 1. (S17: OPENING, not a bare PURCHASE.)
+        r.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 5, unitCostPaise: 100 });
         vi.setSystemTime(new Date("2026-07-01T07:00:00.000Z"));
         // The opening layer goes in LATER, optionally dated months earlier, at Rs 3.
         r.addStockMovement({

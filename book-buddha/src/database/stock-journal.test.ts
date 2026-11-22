@@ -236,10 +236,11 @@ describe("R4c - opening stock and stock adjustments post to the ledger", () => {
     const w = world();
     const r = w.repository;
     try {
-      // A bare PURCHASE through this door: real purchases post their GL on the BILL, so posting
-      // here as well would double-count the stock. It is the one remaining uncovered path.
-      const purchase = r.addStockMovement({ itemId: w.itemId, movementType: "PURCHASE", quantity: 5, unitCostPaise: 30_000 });
-      expect(purchase.journalEntryId).toBeUndefined();
+      // S17: the door now REFUSES a bare PURCHASE. A source-less one can still exist in an old
+      // database, so it is built by hand here; it remains the one uncovered path the plan reports.
+      expect(() => r.addStockMovement({ itemId: w.itemId, movementType: "PURCHASE", quantity: 5, unitCostPaise: 30_000 }))
+        .toThrow("Stock comes in through a purchase bill, opening stock, or a stock adjustment.");
+      insertGlLessMovement(r, { itemId: w.itemId, movementType: "PURCHASE", quantity: 5, unitCostPaise: 30_000, occurredAt: new Date().toISOString() });
       // A free sample: nothing to post, because a journal line needs an amount above zero.
       const free = r.addStockMovement({ itemId: w.itemId, movementType: "OPENING", quantity: 2, unitCostPaise: 0 });
       expect(free.journalEntryId).toBeUndefined();

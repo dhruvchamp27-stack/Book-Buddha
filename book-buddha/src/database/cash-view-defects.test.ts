@@ -301,7 +301,7 @@ describe("D10: paying the GST over is not a sales reversal (both bases)", () => 
       const companyId = (await post("/companies", { name: "Co", accountingBasis: "ACCRUAL" })).id;
       const businessId = (await post("/businesses", { companyId, name: "Books" })).id;
       const customerId = (await post("/customers", { companyId, name: "Cust" })).id;
-      await post("/invoices", { id: "inv-10", number: "INV-10", businessId, customerId, paymentAccount: "CASH", invoiceDate: "2025-04-05", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
+      await post("/invoices", { id: "inv-10",businessId, customerId, paymentAccount: "CASH", invoiceDate: "2025-04-05", taxType: "CGST_SGST", taxRateBasisPoints: 1800, lines: [{ description: "Books", quantity: 1, unitPricePaise: 10000 }] });
       await post("/invoices/inv-10/finalize", {});
       await post("/vouchers", { kind: "PAYMENT", businessId, date: "2025-04-20", moneyAccount: "CASH", narration: "GST remittance", lines: [{ account: "OUTPUT_CGST", amountPaise: 900 }, { account: "OUTPUT_SGST", amountPaise: 900 }] });
       for (const basis of ["ACCRUAL", "CASH"]) {

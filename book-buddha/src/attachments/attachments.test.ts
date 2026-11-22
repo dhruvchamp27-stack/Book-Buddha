@@ -5,6 +5,8 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyAttachmentsSchema } from "../database/attachments-schema.js";
+import { AUDIT_NEW_COLUMNS } from "../database/audit-chain-schema.js";
+import { verifyAuditChain } from "../database/audit-log.js";
 import {
   deleteAttachment,
   getAttachment,
@@ -40,6 +42,9 @@ function pdf(originalFilename: string, extra: Partial<StoreAttachmentInput> = {}
 beforeEach(() => {
   db = new Database(":memory:");
   applyAttachmentsSchema(db);
+  // Attachment writes are audited, so the audit log (legacy table + the hash-chain columns, without the journal triggers) must exist, as in the real database.
+  db.exec("CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, entity_id TEXT NOT NULL, occurred_at TEXT NOT NULL)");
+  for (const [name, type] of AUDIT_NEW_COLUMNS) db.exec(`ALTER TABLE audit_events ADD COLUMN ${name} ${type}`);
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "bb-attach-"));
   root = path.join(sandbox, "store");
 });
@@ -66,6 +71,19 @@ describe("attachments", () => {
     expect(getAttachment(db, saved.id)).toBeNull();
     expect(fs.existsSync(onDisk)).toBe(false);
     expect(snapshot(root)).toEqual([]);
+  });
+
+  it("audits an upload and a delete, and the audit chain still verifies", () => {
+    const saved = storeAttachment(db, root, pdf("Invoice 001.pdf"));
+    deleteAttachment(db, root, saved.id);
+    const events = db.prepare("SELECT action, entity_type, entity_id, before_values, after_values FROM audit_events ORDER BY id").all() as Array<{
+      action: string; entity_type: string; entity_id: string; before_values: string | null; after_values: string | null;
+    }>;
+    expect(events.map((e) => e.action)).toEqual(["attachment.uploaded", "attachment.deleted"]);
+    expect(events.every((e) => e.entity_type === "attachment" && e.entity_id === saved.id)).toBe(true);
+    expect(JSON.parse(events[0]?.after_values ?? "{}")).toEqual({ entityType: "INVOICE", entityId: "inv-1", filename: "Invoice 001.pdf", sha256: saved.sha256 });
+    expect(JSON.parse(events[1]?.before_values ?? "{}")).toMatchObject({ filename: "Invoice 001.pdf", sha256: saved.sha256 });
+    expect(verifyAuditChain(db).ok).toBe(true);
   });
 
   it("computes the correct sha256", () => {

@@ -71,19 +71,18 @@ describe("recurring invoice templates", () => {
     }
   });
 
-  it("refuses (as this template's failure) when its invoice number is already taken, never renumbering (S16-9)", () => {
+  it("a recurring run takes the next INV number, never a REC- one and never a repeat (S17-4)", () => {
     const { repository, template } = setup();
     try {
       const created = repository.createRecurringInvoiceTemplate(template());
-      expect(repository.generateDueInvoices("2026-01-31").invoices).toHaveLength(1);
-      // Wind the template back so the same run date - and so the same number - comes round again.
+      const first = repository.generateDueInvoices("2026-01-31");
+      expect(first.invoices.map((i) => i.number)).toEqual(["INV-001/25-26"]);
+      // Wind the template back so the same run date comes round again: the number moves on.
       repository.db.prepare("UPDATE recurring_invoice_templates SET next_run_date = '2026-01-31' WHERE id = ?").run(created.id);
       const again = repository.generateDueInvoices("2026-01-31");
-      expect(again.invoices).toHaveLength(0);
-      expect(again.failures).toHaveLength(1);
-      expect(again.failures[0]?.error).toContain("REC-tmpl-000-2026-01-31 is already used");
-      expect(repository.listInvoices()).toHaveLength(1);
-      expect(repository.getRecurringInvoiceTemplate(created.id).nextRunDate).toBe("2026-01-31");
+      expect(again.failures).toEqual([]);
+      expect(again.invoices.map((i) => i.number)).toEqual(["INV-002/25-26"]);
+      expect(repository.listInvoices()).toHaveLength(2);
     } finally {
       repository.close();
     }
@@ -99,7 +98,7 @@ describe("recurring invoice templates", () => {
       expect(result.invoices).toHaveLength(1);
       const draft = result.invoices[0]!;
       expect(draft).toMatchObject({
-        status: "DRAFT", invoiceDate: "2026-01-31", number: "REC-tmpl-000-2026-01-31",
+        status: "DRAFT", invoiceDate: "2026-01-31", number: "INV-001/25-26",
         taxType: "CGST_SGST", taxRateBasisPoints: 1200, discountPaise: 1000, paymentAccount: "RECEIVABLES",
       });
       expect(draft.lines).toEqual(created.lines);

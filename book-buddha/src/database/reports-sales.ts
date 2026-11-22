@@ -319,7 +319,8 @@ interface NoteRow {
  * with several of each never fans out into duplicate rows.
  */
 export function creditNoteReport(db: Database.Database, filter: CreditNoteReportFilter = {}): CreditNoteReport {
-  const extras: Array<{ sql: string; param?: string }> = [];
+  // F: a credit note kept as history has no entry and is never reported (the inner join drops it too).
+  const extras: Array<{ sql: string; param?: string }> = [{ sql: "cn.before_opening = 0" }];
   if (filter.customerId !== undefined) extras.push({ sql: "i.customer_id = ?", param: filter.customerId });
   if (filter.itemId !== undefined) {
     extras.push({ sql: "EXISTS (SELECT 1 FROM credit_note_lines l WHERE l.credit_note_id = cn.id AND l.item_id = ?)", param: filter.itemId });
@@ -383,7 +384,7 @@ export function creditNoteReport(db: Database.Database, filter: CreditNoteReport
  * own lines carry it). Lines with no item stay in, named by their description.
  */
 export function salesReturnReport(db: Database.Database, filter: CreditNoteReportFilter = {}): SalesReturnReport {
-  const extras: Array<{ sql: string; param?: string }> = [{ sql: "cn.status = 'FINALIZED'" }];
+  const extras: Array<{ sql: string; param?: string }> = [{ sql: "cn.status = 'FINALIZED'" }, { sql: "cn.before_opening = 0" }];
   if (filter.customerId !== undefined) extras.push({ sql: "i.customer_id = ?", param: filter.customerId });
   if (filter.itemId !== undefined) extras.push({ sql: "l.item_id = ?", param: filter.itemId });
   const { where, params } = withConditions(db, filter, extras);
@@ -477,7 +478,7 @@ export interface SalesByItemRow {
  * January and a return in February.
  */
 export function salesByItem(db: Database.Database, filter: CreditNoteReportFilter = {}): readonly SalesByItemRow[] {
-  const extras: Array<{ sql: string; param?: string }> = [{ sql: "inv.status = 'FINALIZED'" }];
+  const extras: Array<{ sql: string; param?: string }> = [{ sql: "inv.status = 'FINALIZED'" }, { sql: "inv.before_opening = 0" }]; // F: history is never reported
   if (filter.customerId !== undefined) extras.push({ sql: "inv.customer_id = ?", param: filter.customerId });
   if (filter.itemId !== undefined) extras.push({ sql: "il.item_id = ?", param: filter.itemId });
   const { where, params } = withConditions(db, filter, extras);

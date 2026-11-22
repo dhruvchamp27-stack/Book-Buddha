@@ -178,15 +178,16 @@ describe("inventory reports (read-only; the OPENING movements themselves now pos
       const noThreshold = repository.createItem({ companyId, name: "Pen", unit: "each", trackStock: true });
       const plain = repository.createItem({ companyId, name: "Service", unit: "each" });
       repository.addStockMovement({ itemId: tracked, movementType: "OPENING", quantity: 10, unitCostPaise: 100 });
-      repository.addStockMovement({ itemId: tracked, movementType: "PURCHASE", quantity: 5, unitCostPaise: 120 });
+      // S17: a bare PURCHASE through the door is refused now, so the second layer comes in as OPENING.
+      repository.addStockMovement({ itemId: tracked, movementType: "OPENING", quantity: 5, unitCostPaise: 120 });
       repository.addStockMovement({ itemId: noThreshold, movementType: "OPENING", quantity: 1, unitCostPaise: 10 });
       // CHANGED BY R4c, DELIBERATELY. This used to assert 0: hand-entered stock moved inventory
       // with no GL effect at all, which is the carry-over R4c retires (owner ruling S5-3). The two
-      // OPENING movements now post Dr INVENTORY / Cr OPENING_BALANCE_EQUITY; the bare PURCHASE
-      // still posts nothing, because a real purchase posts its GL on the bill.
-      expect(journalCount(repository)).toBe(2);
+      // OPENING movements now post Dr INVENTORY / Cr OPENING_BALANCE_EQUITY (S17: three of them
+      // here, the Rs 6.00 layer being the one that used to be a bare PURCHASE posting nothing).
+      expect(journalCount(repository)).toBe(3);
       expect(repository.getTrialBalance({ businessId }).find((r) => r.account === "OPENING_BALANCE_EQUITY"))
-        .toMatchObject({ debitPaise: 0, creditPaise: 1000 + 10 });
+        .toMatchObject({ debitPaise: 0, creditPaise: 1000 + 10 + 600 });
 
       const before = repository.getInventoryValuation();
       expect(before).toEqual([
@@ -195,7 +196,7 @@ describe("inventory reports (read-only; the OPENING movements themselves now pos
       ]);
       expect(repository.getLowStockItems()).toEqual([]);
       // The REPORTS still post nothing of their own: reading never writes.
-      expect(journalCount(repository)).toBe(2);
+      expect(journalCount(repository)).toBe(3);
 
       repository.saveDraft({
         id: "inv-1", number: "INV-1", businessId, customerId, paymentAccount: "CASH", status: "DRAFT",

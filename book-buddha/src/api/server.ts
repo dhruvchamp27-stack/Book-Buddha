@@ -13,9 +13,9 @@ import { registerReconciliationRoutes } from "./reconciliation-routes.js";
 import { registerStatementImportRoutes } from "./statement-import-routes.js";
 import { registerBankRuleRoutes } from "./bank-rules-routes.js";
 import { registerReviewQueueRoutes } from "./review-queue-routes.js";
+import { registerCashFlowRoutes } from "./cash-flow-routes.js";
 import { suggestFor } from "../banking/bank-rules.js";
-import type { Invoice } from "../accounting/types.js";
-import type { CreditNote } from "../accounting/types.js";
+import type { NewCreditNote, NewInvoice } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
 import { auditActor } from "../database/audit-log.js";
 import { istDateOf } from "../database/ist-date.js";
@@ -139,7 +139,6 @@ const activeOnlyQuery = (value: string | undefined): boolean => value === "true"
 const invoiceInput = z.object({
   id: id.optional(),
   status: z.enum(["DRAFT", "QUOTATION"]).default("DRAFT"),
-  number: name,
   businessId: id,
   customerId: id,
   paymentAccount: z.enum(["CASH", "RECEIVABLES"]),
@@ -229,18 +228,9 @@ const purchaseBillInput = z.object({
   extraChargePaise: z.number().int().nonnegative().default(0),
   ...purchaseTaxFields,
   lines: z.array(invoiceLine).min(1),
-}).superRefine((input, context) => {
-  // Mirrors the invoice rule above. The repository and the engine both re-check this; the schema
-  // catches it first so the caller gets a 400 naming the field, not a 500.
-  const subtotal = input.lines.reduce((total, line) => total + line.quantity * line.unitPricePaise, 0);
-  if (input.discountPaise > subtotal) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["discountPaise"],
-      message: "Discount cannot exceed the bill subtotal.",
-    });
-  }
 });
+// S17-10: the bill-discount rules (not more than the stock value, none without stock lines) live in
+// the repository, which owns the exact plain-English messages; it answers 400 through the same path.
 const expenseCategoryInput = z.object({ companyId: id, name });
 const expenseInput = z.object({
   id: id.optional(),
@@ -261,9 +251,15 @@ const supplierPaymentInput = z.object({
   billId: id.optional(),
   expenseId: id.optional(),
   amountPaise: z.number().int().positive(),
+  settlementDiscountPaise: z.number().int().min(0).optional(),
   paidOn,
+  confirmBeforeOpening: z.boolean().optional(),
   ...moneyFields,
 });
+// F: finalize bodies for the documents that can be dated on or before the opening date (kept as history).
+const finalizeHistoryInput = z.object({ confirmBeforeOpening: z.boolean().optional() }).optional();
+const historyOptions = (input: { confirmBeforeOpening?: boolean | undefined } | undefined): { confirmBeforeOpening?: boolean } =>
+  input?.confirmBeforeOpening === true ? { confirmBeforeOpening: true } : {};
 const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CANCELLED" | undefined => {
   if (value === undefined) return undefined;
   if (value !== "DRAFT" && value !== "FINALIZED" && value !== "CANCELLED") {
@@ -274,6 +270,7 @@ const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CAN
 const paymentInput = z.object({
   amountPaise: z.number().int().positive(),
   paidOn,
+  confirmBeforeOpening: z.boolean().optional(),
   ...moneyFields,
 });
 const fairInput = z.object({
@@ -287,7 +284,7 @@ const stockMovementInput = z.object({
   itemId: id,
   quantity: z.number().int().positive(),
   unitCostPaise: z.number().int().nonnegative(),
-  movementType: z.enum(["OPENING", "PURCHASE", "ADJUSTMENT"]),
+  movementType: z.enum(["OPENING", "ADJUSTMENT"]),
   fairId: id.optional(),
   /** R4c: whose ledger an OPENING/ADJUSTMENT movement posts to. Optional only when there is one. */
   businessId: id.optional(),
@@ -315,7 +312,6 @@ const stockBackfillInput = z.object({
 });
 const creditNoteInput = z.object({
   invoiceId: id,
-  number: name,
   reason: name,
   noteDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date written as YYYY-MM-DD.").optional(),
   lines: z.array(invoiceLine).min(1),
@@ -332,7 +328,6 @@ const creditNoteInput = z.object({
  */
 const purchaseReturnInput = z.object({
   billId: id,
-  number: name,
   reason: z.string().trim().min(1),
   returnDate: z.string().date("Use a real date written as YYYY-MM-DD.").optional(),
   lines: z.array(invoiceLine).min(1),
@@ -528,6 +523,16 @@ const stockMovementQuery = z.object({
 /** Drops keys whose value is undefined (keeps null, which means "clear"). */
 function definedOnly<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K], undefined> } {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as { [K in keyof T]?: Exclude<T[K], undefined> };
+}
+
+/**
+ * S17-4: the app numbers every document it originates (invoice, quotation, credit note, purchase
+ * return). A client that sends a `number` is refused, not silently ignored.
+ */
+function refuseNumber(body: unknown): void {
+  if (typeof body === "object" && body !== null && "number" in body) {
+    throw new RepositoryValidationError("The app numbers this document; leave the number out.");
+  }
 }
 
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
@@ -1112,10 +1117,10 @@ export function buildApi(
   app.get("/inventory/stock", async () => repository.getStockBalances());
 
   app.post("/invoices", async (request, reply) => {
+    refuseNumber(request.body);
     const input = parseBody(invoiceInput, request.body);
-    const invoice: Invoice = {
+    const invoice: NewInvoice = {
       id: input.id ?? randomUUID(),
-      number: input.number,
       businessId: input.businessId,
       customerId: input.customerId,
       invoiceDate: input.invoiceDate,
@@ -1139,17 +1144,17 @@ export function buildApi(
         unitPricePaise: line.unitPricePaise,
       })),
     };
-    repository.saveDraft(invoice);
+    const number = repository.saveDraft(invoice);
     const saved = repository.getInvoice(invoice.id);
-    return reply.code(201).send({ ...invoice, moneyAccount: saved.moneyAccount, paymentMode: saved.paymentMode, paymentReference: saved.paymentReference });
+    return reply.code(201).send({ ...invoice, number, moneyAccount: saved.moneyAccount, paymentMode: saved.paymentMode, paymentReference: saved.paymentReference });
   });
 
   app.post("/credit-notes", async (request, reply) => {
+    refuseNumber(request.body);
     const input = parseBody(creditNoteInput, request.body);
-    const note: CreditNote = {
+    const note: NewCreditNote = {
       id: randomUUID(),
       invoiceId: input.invoiceId,
-      number: input.number,
       reason: input.reason,
       ...(input.noteDate === undefined ? {} : { noteDate: input.noteDate }),
       status: "DRAFT",
@@ -1160,8 +1165,8 @@ export function buildApi(
         unitPricePaise: line.unitPricePaise,
       })),
     };
-    repository.saveCreditNote(note);
-    return reply.code(201).send(note);
+    const number = repository.saveCreditNote(note);
+    return reply.code(201).send({ ...note, number });
   });
 
   app.get<{ Querystring: { invoiceId?: string; status?: string } }>("/credit-notes", async (request) => {
@@ -1179,13 +1184,13 @@ export function buildApi(
     repository.getCreditNote(request.params.creditNoteId));
 
   // S11-21: a note dated in an earlier month is refused until the caller confirms it.
-  const finalizeCreditNoteInput = z.object({ confirmBackdatedMonth: z.boolean().optional() }).optional();
+  const finalizeCreditNoteInput = z.object({ confirmBackdatedMonth: z.boolean().optional(), confirmBeforeOpening: z.boolean().optional() }).optional();
   app.post<{ Params: { creditNoteId: string } }>("/credit-notes/:creditNoteId/finalize", async (request) => {
     const input = parseBody(finalizeCreditNoteInput, request.body);
     return {
       journalEntry: repository.finalizeCreditNote(
         request.params.creditNoteId,
-        input?.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {},
+        { ...(input?.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}), ...historyOptions(input) },
       ),
     };
   });
@@ -1225,10 +1230,10 @@ export function buildApi(
     ({ journalEntry: repository.cancelCreditNote(request.params.creditNoteId) }));
 
   app.post("/quotations", async (request, reply) => {
+    refuseNumber(request.body);
     const input = parseBody(invoiceInput, request.body);
-    const quotation: Invoice = {
+    const quotation: NewInvoice = {
       id: input.id ?? randomUUID(),
-      number: input.number,
       businessId: input.businessId,
       customerId: input.customerId,
       invoiceDate: input.invoiceDate,
@@ -1252,9 +1257,9 @@ export function buildApi(
         unitPricePaise: line.unitPricePaise,
       })),
     };
-    repository.saveDraft(quotation);
+    const number = repository.saveDraft(quotation);
     const saved = repository.getInvoice(quotation.id);
-    return reply.code(201).send({ ...quotation, moneyAccount: saved.moneyAccount, paymentMode: saved.paymentMode, paymentReference: saved.paymentReference });
+    return reply.code(201).send({ ...quotation, number, moneyAccount: saved.moneyAccount, paymentMode: saved.paymentMode, paymentReference: saved.paymentReference });
   });
 
   app.get<{ Querystring: { businessId?: string } }>(
@@ -1265,10 +1270,10 @@ export function buildApi(
   app.put<{ Params: { invoiceId: string } }>(
     "/invoices/:invoiceId",
     async (request) => {
+      refuseNumber(request.body);
       const input = parseBody(invoiceInput, request.body);
-      const invoice: Invoice = {
+      const invoice: NewInvoice = {
         id: request.params.invoiceId,
-        number: input.number,
         businessId: input.businessId,
         customerId: input.customerId,
         invoiceDate: input.invoiceDate,
@@ -1301,18 +1306,16 @@ export function buildApi(
     return repository.getInvoice(request.params.invoiceId);
   });
 
-  // S16-9: an optional `number` for the new invoice; a taken number is refused, never renumbered.
-  const convertQuotationInput = z.object({ number: name.optional() });
+  // S17-4: the converted invoice gets the app's next INV number; the route takes no number.
   app.post<{ Params: { quotationId: string } }>(
     "/quotations/:quotationId/convert",
-    async (request) =>
-      repository.convertQuotation(request.params.quotationId, parseBody(convertQuotationInput, request.body ?? {}).number),
+    async (request) => repository.convertQuotation(request.params.quotationId),
   );
 
   app.post<{ Params: { invoiceId: string } }>(
     "/invoices/:invoiceId/finalize",
     async (request) => ({
-      journalEntry: repository.finalizeInvoice(request.params.invoiceId),
+      journalEntry: repository.finalizeInvoice(request.params.invoiceId, historyOptions(parseBody(finalizeHistoryInput, request.body))),
     }),
   );
 
@@ -1323,6 +1326,7 @@ export function buildApi(
       return reply.code(201).send(repository.recordPayment(
         request.params.invoiceId, input.amountPaise, input.paidOn,
         definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
+        historyOptions(input),
       ));
     },
   );
@@ -1478,10 +1482,10 @@ export function buildApi(
   // ---- R8 purchase returns: goods going BACK to a supplier, the mirror of a credit note. ----
 
   app.post("/purchase-returns", async (request, reply) => {
+    refuseNumber(request.body);
     const input = parseBody(purchaseReturnInput, request.body);
     return reply.code(201).send(repository.createPurchaseReturn({
       billId: input.billId,
-      number: input.number,
       reason: input.reason,
       ...(input.returnDate === undefined ? {} : { returnDate: input.returnDate }),
       lines: input.lines.map((line) => ({
@@ -1500,7 +1504,7 @@ export function buildApi(
     repository.getPurchaseReturn(request.params.returnId));
 
   app.post<{ Params: { returnId: string } }>("/purchase-returns/:returnId/finalize", async (request) =>
-    ({ journalEntry: repository.finalizePurchaseReturn(request.params.returnId) }));
+    ({ journalEntry: repository.finalizePurchaseReturn(request.params.returnId, historyOptions(parseBody(finalizeHistoryInput, request.body))) }));
 
   app.post<{ Params: { returnId: string } }>("/purchase-returns/:returnId/cancel", async (request) =>
     ({ journalEntry: repository.cancelPurchaseReturn(request.params.returnId) }));
@@ -1534,7 +1538,7 @@ export function buildApi(
     repository.getPurchaseBill(request.params.id));
 
   app.post<{ Params: { id: string } }>("/purchase-bills/:id/finalize", async (request) =>
-    ({ journalEntry: repository.finalizePurchaseBill(request.params.id) }));
+    ({ journalEntry: repository.finalizePurchaseBill(request.params.id, historyOptions(parseBody(finalizeHistoryInput, request.body))) }));
 
   app.post<{ Params: { id: string } }>("/purchase-bills/:id/cancel", async (request) =>
     ({ reversalEntry: repository.cancelPurchaseBill(request.params.id) }));
@@ -1564,7 +1568,7 @@ export function buildApi(
   app.get<{ Params: { id: string } }>("/expenses/:id", async (request) => repository.getExpense(request.params.id));
 
   app.post<{ Params: { id: string } }>("/expenses/:id/finalize", async (request) =>
-    ({ journalEntry: repository.finalizeExpense(request.params.id) }));
+    ({ journalEntry: repository.finalizeExpense(request.params.id, historyOptions(parseBody(finalizeHistoryInput, request.body))) }));
 
   app.post<{ Params: { id: string } }>("/expenses/:id/cancel", async (request) =>
     ({ reversalEntry: repository.cancelExpense(request.params.id) }));
@@ -1573,9 +1577,11 @@ export function buildApi(
     const input = parseBody(supplierPaymentInput, request.body);
     return reply.code(201).send(repository.recordSupplierPayment({
       amountPaise: input.amountPaise,
+      ...(input.settlementDiscountPaise === undefined ? {} : { settlementDiscountPaise: input.settlementDiscountPaise }),
       ...(input.billId === undefined ? {} : { billId: input.billId }),
       ...(input.expenseId === undefined ? {} : { expenseId: input.expenseId }),
       ...(input.paidOn === undefined ? {} : { paidOn: input.paidOn }),
+      ...(input.confirmBeforeOpening === true ? { confirmBeforeOpening: true } : {}),
       ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
     }));
   });
@@ -1695,6 +1701,8 @@ export function buildApi(
   registerStatementImportRoutes(app, { repository });
   registerBankRuleRoutes(app, { repository });
   registerReviewQueueRoutes(app, { repository, suggest: (line) => suggestFor(repository.db, line) });
+  // R13 (S17-6): direct-method Cash Flow Statement + per-account cash-flow section.
+  registerCashFlowRoutes(app, { repository });
 
   return app;
 }

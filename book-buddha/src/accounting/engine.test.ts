@@ -111,6 +111,13 @@ describe("allocateProportionally (cash-basis cumulative target)", () => {
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
     const int = (min: number, max: number): number => min + Math.floor(random() * (max - min + 1));
+    // The checks are plain comparisons that RECORD a failure, asserted once at the end. Calling vitest's
+    // expect() ~200,000 times is what made this test cost seconds (and time out under load): the
+    // coverage is identical, the run is ~10x faster, and a failure still names its round and line.
+    const problems: string[] = [];
+    const check = (ok: boolean, what: string): void => {
+      if (!ok && problems.length < 10) problems.push(what);
+    };
 
     for (let round = 0; round < 3000; round += 1) {
       const total = int(1, round % 3 === 0 ? 5_000_000_000 : 20_000);
@@ -125,17 +132,17 @@ describe("allocateProportionally (cash-basis cumulative target)", () => {
         if (after === before) continue;
         const share = allocateProportionally({ lineAmountsPaise: lines, totalPaise: total, paidBeforePaise: before, paidAfterPaise: after });
         share.forEach((value, index) => {
-          expect(value).toBeGreaterThanOrEqual(0);
+          check(value >= 0, `round ${round} line ${index}: negative share ${value}`);
           recognised[index] = (recognised[index] ?? 0) + value;
-          expect(recognised[index]).toBeLessThanOrEqual(lines[index] as number);
+          check((recognised[index] as number) <= (lines[index] as number), `round ${round} line ${index}: over the line`);
           // Cumulative target: exactly round(line x paid / total), computed independently in BigInt.
           const exact = (2n * BigInt(lines[index] as number) * BigInt(after) + BigInt(total)) / (2n * BigInt(total));
-          expect(BigInt(recognised[index] as number)).toBe(exact);
+          check(BigInt(recognised[index] as number) === exact, `round ${round} line ${index}: cumulative ${recognised[index]} is not ${exact}`);
         });
       }
-      expect(recognised).toEqual(lines);
+      check(recognised.length === lines.length && recognised.every((v, i) => v === lines[i]), `round ${round}: lines do not land exactly at full payment`);
     }
-  }, 30_000); // Deterministic (fixed seed 20261115) but CPU-heavy: 2.1s alone, 5.3s against
-  // vitest's 5s default when the other 47 files compete for the machine. Not flakiness — the same
-  // cause and the same fix as the purchasing fuzz test in 49c31f9.
+    expect(problems).toEqual([]);
+  }, 30_000); // Deterministic (fixed seed 20261115). Was 2.9s (5.3s under load) because of ~200,000 expect()
+  // calls; with plain checks it runs in a few hundred ms, far inside the timeout, with the same coverage.
 });

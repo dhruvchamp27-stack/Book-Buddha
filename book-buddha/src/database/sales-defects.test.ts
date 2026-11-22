@@ -48,12 +48,13 @@ async function twoLayers(w: W): Promise<void> {
   const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-1", billDate: "2025-04-05", paymentAccount: "PAYABLES", lines: [{ itemId: w.itemId, description: "Atlas", quantity: 1, unitPricePaise: 30000 }] });
   await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
 }
-async function sell(w: W, id: string, quantity: number, number = id): Promise<void> {
-  await must("POST", "/invoices", { id, number, businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise: 50000 }] });
+async function sell(w: W, id: string, quantity: number): Promise<void> {
+  await must("POST", "/invoices", { id, businessId: w.businessId, customerId: w.customerId, paymentAccount: "CASH", invoiceDate: "2025-04-10", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise: 50000 }] });
   await must("POST", `/invoices/${id}/finalize`, {});
 }
-async function creditNote(w: W, invoiceId: string, number: string, quantity: number): Promise<string> {
-  const cn = await must("POST", "/credit-notes", { invoiceId, number, reason: "Return", noteDate: "2025-04-15", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise: 50000 }] });
+/** The app numbers the note (S17-4), so the label argument is only for the reader of the test. */
+async function creditNote(w: W, invoiceId: string, _label: string, quantity: number): Promise<string> {
+  const cn = await must("POST", "/credit-notes", { invoiceId, reason: "Return", noteDate: "2025-04-15", lines: [{ itemId: w.itemId, description: "Atlas", quantity, unitPricePaise: 50000 }] });
   await must("POST", `/credit-notes/${cn.id}/finalize`, { confirmBackdatedMonth: true });
   return cn.id as string;
 }
@@ -75,7 +76,7 @@ describe("credit-note stock costing (D4, D5)", () => {
     const w = await world();
     await twoLayers(w);
     await sell(w, "inv-a", 2);
-    const cn = await must("POST", "/credit-notes", { invoiceId: "inv-a", number: "CN-x", reason: "Return", noteDate: "2025-04-15", lines: [
+    const cn = await must("POST", "/credit-notes", { invoiceId: "inv-a", reason: "Return", noteDate: "2025-04-15", lines: [
       { itemId: w.itemId, description: "Atlas", quantity: 1, unitPricePaise: 50000 },
       { itemId: w.itemId, description: "Atlas", quantity: 1, unitPricePaise: 50000 },
     ] });
@@ -132,9 +133,9 @@ describe("credit-note stock costing (D4, D5)", () => {
 describe("credit note against a cancelled invoice (D6)", () => {
   it("refuses to finalize a draft note once its invoice is cancelled, and leaves no journal entry", async () => {
     const w = await world();
-    await must("POST", "/invoices", { id: "inv-7", number: "INV-7", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
+    await must("POST", "/invoices", { id: "inv-7", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
     await must("POST", "/invoices/inv-7/finalize", {});
-    const cn = await must("POST", "/credit-notes", { invoiceId: "inv-7", number: "CN-7", reason: "x", noteDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
+    const cn = await must("POST", "/credit-notes", { invoiceId: "inv-7", reason: "x", noteDate: "2025-04-15", lines: [{ description: "Service", quantity: 1, unitPricePaise: 4000 }] });
     await must("POST", "/invoices/inv-7/cancel", {});
     const fin = await req("POST", `/credit-notes/${cn.id}/finalize`, { confirmBackdatedMonth: true });
     expect(fin.status).toBeGreaterThanOrEqual(400);
@@ -143,65 +144,158 @@ describe("credit note against a cancelled invoice (D6)", () => {
   });
 });
 
-describe("invoice numbers are unique per business (D11)", () => {
-  const draft = (w: W, id: string, number: string, status = "DRAFT"): object => ({ id, number, businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate: "2025-04-10", status, lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
+// S17-4: the app numbers every invoice, quotation, credit note and purchase return it originates,
+// at first save: INV-001/25-26, one series per business, prefix and financial year. A number sent
+// over HTTP is refused. Only the import path (repository methods called with a number) supplies one.
+describe("document numbers are the app's: per business, per financial year (S17-4, was D11)", () => {
+  const draft = (w: W, id: string, status = "DRAFT", invoiceDate = "2025-04-10"): any => ({ id, businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", invoiceDate, status, lines: [{ description: "Service", quantity: 1, unitPricePaise: 10000 }] });
+  const numberOf = async (id: string): Promise<string> => (await must("GET", `/invoices/${id}`)).number as string;
 
-  it("refuses a second invoice with the same number, even as a draft", async () => {
-    const w = await world();
-    await must("POST", "/invoices", draft(w, "a", "INV-1"));
-    expect((await req("POST", "/invoices", draft(w, "b", "INV-1"))).status).toBeGreaterThanOrEqual(400);
-  });
-
-  it("a cancelled invoice keeps its number", async () => {
-    const w = await world();
-    await must("POST", "/invoices", draft(w, "a", "INV-1"));
-    await must("POST", "/invoices/a/finalize", {});
-    await must("POST", "/invoices/a/cancel", {});
-    expect((await req("POST", "/invoices", draft(w, "b", "INV-1"))).status).toBeGreaterThanOrEqual(400);
-  });
-
-  it("another business may use the same number", async () => {
+  it("numbers invoices in order, and a second business starts again at 001", async () => {
     const w = await world();
     const other = (await must("POST", "/businesses", { companyId: w.companyId, name: "Stationery" })).id;
-    await must("POST", "/invoices", draft(w, "a", "INV-1"));
-    await must("POST", "/invoices", { ...draft(w, "b", "INV-1"), businessId: other });
+    for (const id of ["a", "b", "c", "d"]) await must("POST", "/invoices", draft(w, id));
+    expect(await Promise.all(["a", "b", "c", "d"].map(numberOf))).toEqual(["INV-001/25-26", "INV-002/25-26", "INV-003/25-26", "INV-004/25-26"]);
+    await must("POST", "/invoices", { ...draft(w, "x"), businessId: other });
+    expect(await numberOf("x")).toBe("INV-001/25-26");
+    expect((await must("POST", "/invoices", draft(w, "e"))).number).toBe("INV-005/25-26");
   });
 
-  it("quotations are a separate series: a quotation and an invoice may share a number", async () => {
+  it("a new financial year starts again at 001, by the document's own date", async () => {
     const w = await world();
-    await must("POST", "/invoices", draft(w, "a", "N-1"));
-    await must("POST", "/quotations", draft(w, "q", "N-1", "QUOTATION"));
+    await must("POST", "/invoices", draft(w, "a"));
+    await must("POST", "/invoices", draft(w, "b", "DRAFT", "2026-04-02"));
+    await must("POST", "/invoices", draft(w, "c", "DRAFT", "2026-03-31"));
+    expect([await numberOf("a"), await numberOf("b"), await numberOf("c")]).toEqual(["INV-001/25-26", "INV-001/26-27", "INV-002/25-26"]);
   });
 
-  it("editing a draft into a taken number is refused; saving it under its own number is fine", async () => {
+  it("a cancelled invoice keeps its number, so the next one does not reuse it", async () => {
     const w = await world();
-    await must("POST", "/invoices", draft(w, "a", "INV-1"));
-    await must("POST", "/invoices", draft(w, "b", "INV-2"));
-    await must("PUT", "/invoices/b", draft(w, "b", "INV-2"));
-    expect((await req("PUT", "/invoices/b", draft(w, "b", "INV-1"))).status).toBeGreaterThanOrEqual(400);
+    await must("POST", "/invoices", draft(w, "a"));
+    await must("POST", "/invoices/a/finalize", {});
+    await must("POST", "/invoices/a/cancel", {});
+    await must("POST", "/invoices", draft(w, "b"));
+    expect(await numberOf("a")).toBe("INV-001/25-26");
+    expect(await numberOf("b")).toBe("INV-002/25-26");
+  });
+
+  it("continues after the highest, including an imported number (import path keeps the file's number)", async () => {
+    const w = await world();
+    repository.saveDraft({ id: "old", number: "INV-007/25-26", businessId: w.businessId, customerId: w.customerId, invoiceDate: "2025-05-01", paymentAccount: "RECEIVABLES", status: "DRAFT", lines: [{ description: "Old", quantity: 1, unitPricePaise: 100 }] });
+    expect((await must("POST", "/invoices", draft(w, "n"))).number).toBe("INV-008/25-26");
+    // An imported number is still checked: the same one again is refused.
+    expect(() => repository.saveDraft({ id: "old2", number: "INV-007/25-26", businessId: w.businessId, customerId: w.customerId, invoiceDate: "2025-05-01", paymentAccount: "RECEIVABLES", status: "DRAFT", lines: [{ description: "Old", quantity: 1, unitPricePaise: 100 }] })).toThrow(/already used/);
+  });
+
+  it("quotations are their own QUO series, apart from invoices", async () => {
+    const w = await world();
+    await must("POST", "/invoices", draft(w, "a"));
+    const q1 = await must("POST", "/quotations", draft(w, "q1", "QUOTATION"));
+    const q2 = await must("POST", "/quotations", draft(w, "q2", "QUOTATION"));
+    expect([q1.number, q2.number]).toEqual(["QUO-001/25-26", "QUO-002/25-26"]);
+    expect((await must("POST", "/invoices", draft(w, "b"))).number).toBe("INV-002/25-26");
+  });
+
+  it("editing a draft never changes its number; sending a number is refused", async () => {
+    const w = await world();
+    await must("POST", "/invoices", draft(w, "a"));
+    await must("POST", "/invoices", draft(w, "b"));
+    await must("PUT", "/invoices/b", draft(w, "b"));
+    expect(await numberOf("b")).toBe("INV-002/25-26");
+    const refused = await req("PUT", "/invoices/b", { ...draft(w, "b"), number: "INV-001/25-26" });
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe("The app numbers this document; leave the number out.");
+    expect(await numberOf("b")).toBe("INV-002/25-26");
+  });
+
+  it("an edit never turns a quotation into an invoice or an invoice into a quotation", async () => {
+    const w = await world();
+    await must("POST", "/invoices", draft(w, "d"));
+    await must("POST", "/quotations", draft(w, "q", "QUOTATION"));
+    const statusOf = async (id: string): Promise<string> => (await must("GET", `/invoices/${id}`)).status as string;
+
+    const q2d = await req("PUT", "/invoices/q", draft(w, "q", "DRAFT"));
+    expect(q2d.status).toBe(400);
+    expect(q2d.body.error).toBe("Use Convert to turn a quotation into an invoice; editing cannot change a quotation into an invoice.");
+    expect(() => repository.updateDraft({ ...draft(w, "q", "DRAFT") })).toThrow(/Use Convert to turn a quotation/);
+    expect([await statusOf("q"), await numberOf("q")]).toEqual(["QUOTATION", "QUO-001/25-26"]);
+
+    const d2q = await req("PUT", "/invoices/d", draft(w, "d", "QUOTATION"));
+    expect(d2q.status).toBe(400);
+    expect(d2q.body.error).toBe("An invoice cannot be changed into a quotation by editing. Create a new quotation instead.");
+    expect(() => repository.updateDraft({ ...draft(w, "d", "QUOTATION") })).toThrow(/cannot be changed into a quotation/);
+    expect([await statusOf("d"), await numberOf("d")]).toEqual(["DRAFT", "INV-001/25-26"]);
+
+    // Same-kind edits still work and keep the number.
+    await must("PUT", "/invoices/q", { ...draft(w, "q", "QUOTATION"), notes: "edited" });
+    await must("PUT", "/invoices/d", { ...draft(w, "d", "DRAFT"), notes: "edited" });
+    expect([await statusOf("q"), await numberOf("q")]).toEqual(["QUOTATION", "QUO-001/25-26"]);
+    expect([await statusOf("d"), await numberOf("d")]).toEqual(["DRAFT", "INV-001/25-26"]);
+
+    // Conversion still gives the next INV number and both links.
+    const converted = await must("POST", "/quotations/q/convert", {});
+    expect(converted.number).toBe("INV-002/25-26");
+    expect(converted.sourceQuotationId).toBe("q");
+    expect((await must("GET", "/invoices/q")).convertedInvoiceId).toBe(converted.id);
+  });
+
+  it("every create route refuses a number in the body with a 400", async () => {
+    const w = await world();
+    const expected = "The app numbers this document; leave the number out.";
+    const inv = await req("POST", "/invoices", { ...draft(w, "a"), number: "INV-9" });
+    const quo = await req("POST", "/quotations", { ...draft(w, "q", "QUOTATION"), number: "Q-9" });
+    await must("POST", "/invoices", draft(w, "i1"));
+    await must("POST", "/invoices/i1/finalize", {});
+    const cn = await req("POST", "/credit-notes", { invoiceId: "i1", number: "CN-9", reason: "x", lines: [{ description: "Service", quantity: 1, unitPricePaise: 100 }] });
+    const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-9", billDate: "2025-04-05", paymentAccount: "PAYABLES", lines: [{ description: "Service", quantity: 1, unitPricePaise: 1000 }] });
+    await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
+    const pr = await req("POST", "/purchase-returns", { billId: bill.id, number: "PR-9", reason: "x", lines: [{ description: "Service", quantity: 1, unitPricePaise: 100 }] });
+    for (const r of [inv, quo, cn, pr]) {
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe(expected);
+    }
+    // Nothing was written by the refused calls.
+    expect(repository.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE id IN ('a', 'q')").get()).toEqual({ n: 0 });
+  });
+
+  it("credit notes and purchase returns are numbered CN / PR per business and year", async () => {
+    const w = await world();
+    await must("POST", "/invoices", draft(w, "i1"));
+    await must("POST", "/invoices/i1/finalize", {});
+    const lines = [{ description: "Service", quantity: 1, unitPricePaise: 1000 }];
+    const cn1 = await must("POST", "/credit-notes", { invoiceId: "i1", reason: "x", noteDate: "2025-04-15", lines });
+    const cn2 = await must("POST", "/credit-notes", { invoiceId: "i1", reason: "y", noteDate: "2025-04-16", lines });
+    expect([cn1.number, cn2.number]).toEqual(["CN-001/25-26", "CN-002/25-26"]);
+    const bill = await must("POST", "/purchase-bills", { businessId: w.businessId, supplierId: w.supplierId, number: "PB-9", billDate: "2025-04-05", paymentAccount: "PAYABLES", lines: [{ description: "Service", quantity: 2, unitPricePaise: 1000 }] });
+    await must("POST", `/purchase-bills/${bill.id}/finalize`, {});
+    const pr1 = await must("POST", "/purchase-returns", { billId: bill.id, reason: "x", returnDate: "2025-04-15", lines });
+    expect(pr1.number).toBe("PR-001/25-26");
   });
 
   it("finalize re-checks the number (safety net for a duplicate that got in underneath)", async () => {
     const w = await world();
-    await must("POST", "/invoices", draft(w, "a", "INV-1"));
-    await must("POST", "/invoices", draft(w, "b", "INV-2"));
-    repository.db.prepare("UPDATE invoices SET number = 'INV-1' WHERE id = 'b'").run();
+    await must("POST", "/invoices", draft(w, "a"));
+    await must("POST", "/invoices", draft(w, "b"));
+    repository.db.prepare("UPDATE invoices SET number = 'INV-001/25-26' WHERE id = 'b'").run();
     expect((await req("POST", "/invoices/b/finalize", {})).status).toBeGreaterThanOrEqual(400);
   });
 
-  it("converting a quotation REFUSES a taken number and takes the number he gives (S16-9)", async () => {
+  it("converting a quotation gives the next INV number and links both ways; a second conversion is refused", async () => {
     const w = await world();
-    await must("POST", "/invoices", draft(w, "a", "INV-Q1"));
-    await must("POST", "/quotations", draft(w, "q", "Q1", "QUOTATION"));
-    const refused = await req("POST", "/quotations/q/convert", {});
-    expect(refused.status).toBe(400);
-    expect(JSON.stringify(refused.body)).toContain("INV-Q1 is already used");
-    expect(repository.db.prepare("SELECT COUNT(*) AS n FROM invoices WHERE number LIKE 'INV-Q1%'").get()).toEqual({ n: 1 });
-    const converted = await must("POST", "/quotations/q/convert", { number: "INV-7" });
-    expect(converted.number).toBe("INV-7");
-    // With no clash and no number given, the default is still INV-<quotation number>.
-    await must("POST", "/quotations", draft(w, "q2", "Q2", "QUOTATION"));
-    expect((await must("POST", "/quotations/q2/convert", {})).number).toBe("INV-Q2");
+    await must("POST", "/invoices", draft(w, "a"));
+    const quote = await must("POST", "/quotations", draft(w, "q", "QUOTATION"));
+    expect(quote.number).toBe("QUO-001/25-26");
+    const converted = await must("POST", "/quotations/q/convert", {});
+    expect(converted.number).toBe("INV-002/25-26");
+    expect(converted.status).toBe("DRAFT");
+    expect(converted.sourceQuotationId).toBe("q");
+    const invoice = await must("GET", `/invoices/${converted.id}`);
+    expect(invoice.sourceQuotationId).toBe("q");
+    const quotation = await must("GET", "/invoices/q");
+    expect(quotation.convertedInvoiceIds).toEqual([converted.id]);
+    expect(quotation.sourceQuotationId).toBeNull();
+    expect((await must("GET", "/invoices/a")).sourceQuotationId).toBeNull();
+    expect((await req("POST", "/quotations/q/convert", {})).status).toBe(400);
   });
 });
 

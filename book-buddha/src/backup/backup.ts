@@ -34,6 +34,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { z } from "zod";
+import { appendAuditEvent } from "../database/audit-log.js";
 import { AccountingRepository } from "../database/repository.js";
 import { istDateOf } from "../database/ist-date.js";
 
@@ -560,6 +561,16 @@ export async function restoreBackup(input: RestoreBackupInput): Promise<RestoreR
       const old = wantsPreserve && sourcePath !== null ? new Database(sourcePath, { readonly: true, fileMustExist: true }) : null;
       try {
         repo.db.transaction(() => {
+          // Ruling S16-1(c): the restore itself is recorded INSIDE the restored database (the old one is
+          // moved aside; this is the only audit log that survives).
+          appendAuditEvent(repo.db, {
+            action: "backup.restored",
+            entityId: manifest.id,
+            entityType: "backup",
+            occurredAt: now.toISOString(),
+            ...(manifest.label === undefined || manifest.label === null || manifest.label === "" ? {} : { reason: String(manifest.label) }),
+            afterValues: { manifestId: manifest.id, backupFolder: path.basename(path.resolve(input.folder)), backupDate: manifest.istDate },
+          });
           if (options.preserveUsers === true && old !== null) {
             repo.db.prepare("DELETE FROM auth_sessions").run();
             repo.db.prepare("DELETE FROM auth_users").run();

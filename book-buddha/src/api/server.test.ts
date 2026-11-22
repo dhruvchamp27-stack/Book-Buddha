@@ -39,7 +39,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-001/26-27",
           businessId,
           customerId,
           paymentAccount: "CASH",
@@ -148,7 +147,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-CROSS-COMPANY",
           businessId,
           customerId,
           paymentAccount: "CASH",
@@ -165,7 +163,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-CROSS-ITEM",
           businessId,
           customerId: customerAId,
           paymentAccount: "CASH",
@@ -195,7 +192,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-EDIT",
           businessId,
           customerId,
           paymentAccount: "CASH",
@@ -207,7 +203,6 @@ describe("local API", () => {
         method: "PUT",
         url: `/invoices/${invoiceId}`,
         payload: {
-          number: "INV-EDIT",
           businessId,
           customerId,
           paymentAccount: "CASH",
@@ -222,7 +217,6 @@ describe("local API", () => {
         method: "PUT",
         url: `/invoices/${invoiceId}`,
         payload: {
-          number: "INV-EDIT",
           businessId,
           customerId,
           paymentAccount: "CASH",
@@ -247,7 +241,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-PAY",
           businessId,
           customerId,
           paymentAccount: "RECEIVABLES",
@@ -287,7 +280,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-FAIR-API",
           businessId,
           customerId,
           fairId,
@@ -328,7 +320,6 @@ describe("local API", () => {
         method: "POST",
         url: "/invoices",
         payload: {
-          number: "INV-STOCK-API",
           businessId,
           customerId,
           paymentAccount: "CASH",
@@ -357,32 +348,32 @@ describe("local API", () => {
       const itemId = (await app.inject({ method: "POST", url: "/items", payload: { companyId, name: "CN Book", unit: "each", trackStock: false } })).json<{ id: string }>().id;
       const invoiceId = (await app.inject({
         method: "POST", url: "/invoices",
-        payload: { number: "INV-CN-1", businessId, customerId, paymentAccount: "CASH", lines: [{ itemId, description: "Book", quantity: 3, unitPricePaise: 10000 }] },
+        payload: { businessId, customerId, paymentAccount: "CASH", lines: [{ itemId, description: "Book", quantity: 3, unitPricePaise: 10000 }] },
       })).json<{ id: string }>().id;
       await app.inject({ method: "POST", url: `/invoices/${invoiceId}/finalize` });
 
       const tooMany = await app.inject({
         method: "POST", url: "/credit-notes",
-        payload: { invoiceId, number: "CN-0", reason: "Too many", lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }] },
+        payload: { invoiceId, reason: "Too many", lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }] },
       });
       expect(tooMany.statusCode).toBe(400);
 
       const created = await app.inject({
         method: "POST", url: "/credit-notes",
-        payload: { invoiceId, number: "CN-1", reason: "Damaged", lines: [{ itemId, description: "Book", quantity: 2, unitPricePaise: 10000 }] },
+        payload: { invoiceId, reason: "Damaged", lines: [{ itemId, description: "Book", quantity: 2, unitPricePaise: 10000 }] },
       });
       expect(created.statusCode).toBe(201);
       const creditNoteId = created.json<{ id: string }>().id;
 
       const drafts = await app.inject({ method: "GET", url: `/credit-notes?invoiceId=${invoiceId}` });
       expect(drafts.json<Array<{ status: string; totalPaise: number; invoiceNumber: string }>>())
-        .toEqual([expect.objectContaining({ status: "DRAFT", totalPaise: 20000, invoiceNumber: "INV-CN-1" })]);
+        .toEqual([expect.objectContaining({ status: "DRAFT", totalPaise: 20000, invoiceNumber: expect.stringMatching(/^INV-001\/\d{2}-\d{2}$/) })]);
       expect((await app.inject({ method: "GET", url: "/credit-notes?status=FINALIZED" })).json()).toEqual([]);
       expect((await app.inject({ method: "GET", url: "/credit-notes?status=BOGUS" })).statusCode).toBe(400);
 
       expect((await app.inject({ method: "POST", url: `/credit-notes/${creditNoteId}/finalize` })).statusCode).toBe(200);
       const finalized = (await app.inject({ method: "GET", url: "/credit-notes?status=FINALIZED" })).json<Array<{ number: string; totalPaise: number }>>();
-      expect(finalized).toEqual([expect.objectContaining({ number: "CN-1", totalPaise: 20000 })]);
+      expect(finalized).toEqual([expect.objectContaining({ number: expect.stringMatching(/^CN-001\/\d{2}-\d{2}$/), totalPaise: 20000 })]);
 
       const pl = (await app.inject({ method: "GET", url: "/reports/profit-and-loss" })).json<{ totalIncomePaise: number }>();
       expect(pl.totalIncomePaise).toBe(10000);
@@ -415,7 +406,7 @@ describe("local API", () => {
       const itemId = await idOf("/items", { companyId, name: "Refund Book", unit: "each", trackStock: false });
 
       const invoiceId = await idOf("/invoices", {
-        number: "INV-RF-1", businessId, customerId, paymentAccount: "RECEIVABLES",
+        businessId, customerId, paymentAccount: "RECEIVABLES",
         lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }],
       });
       await post(`/invoices/${invoiceId}/finalize`);
@@ -423,7 +414,7 @@ describe("local API", () => {
       expect((await post(`/invoices/${invoiceId}/payments`, { amountPaise: 40000, paidOn: inDays(-1) })).statusCode).toBe(201);
 
       const noteId = await idOf("/credit-notes", {
-        invoiceId, number: "CN-RF-1", reason: "Returned",
+        invoiceId, reason: "Returned",
         lines: [{ itemId, description: "Book", quantity: 2, unitPricePaise: 10000 }],
       });
       await post(`/credit-notes/${noteId}/finalize`);
@@ -444,7 +435,7 @@ describe("local API", () => {
       expect(refunded.json<{ balance: { outstandingPaise: number } }>().balance.outstandingPaise).toBe(15000);
 
       const nextInvoiceId = await idOf("/invoices", {
-        number: "INV-RF-2", businessId, customerId, paymentAccount: "RECEIVABLES",
+        businessId, customerId, paymentAccount: "RECEIVABLES",
         lines: [{ itemId, description: "Book", quantity: 4, unitPricePaise: 10000 }],
       });
       await post(`/invoices/${nextInvoiceId}/finalize`);
@@ -463,7 +454,7 @@ describe("local API", () => {
       // A discharged note cannot be cancelled; an untouched one can.
       expect((await post(`/credit-notes/${noteId}/cancel`)).statusCode).toBe(400);
       const cleanNoteId = await idOf("/credit-notes", {
-        invoiceId: nextInvoiceId, number: "CN-RF-2", reason: "Mistake",
+        invoiceId: nextInvoiceId, reason: "Mistake",
         lines: [{ itemId, description: "Book", quantity: 1, unitPricePaise: 10000 }],
       });
       await post(`/credit-notes/${cleanNoteId}/finalize`);

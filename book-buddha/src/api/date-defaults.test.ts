@@ -30,7 +30,7 @@ describe("schema date defaults", () => {
     // 20:00 UTC on 14 Jun = 01:30 IST on 15 Jun: UTC date and IST date differ.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2099-06-14T20:00:00Z"));
-    const inv = await post("/invoices", { id: "i1", number: "I1", businessId, customerId, paymentAccount: "RECEIVABLES", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }] });
+    const inv = await post("/invoices", { id: "i1",businessId, customerId, paymentAccount: "RECEIVABLES", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }] });
     const bill = await post("/purchase-bills", { businessId, supplierId, number: "B1", paymentAccount: "PAYABLES", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }] });
     expect(inv.status).toBeLessThan(300);
     expect(bill.status).toBeLessThan(300);
@@ -38,7 +38,7 @@ describe("schema date defaults", () => {
     expect(String(bill.body.billDate).slice(0, 10)).toBe("2099-06-15");
 
     vi.setSystemTime(new Date("2099-07-01T06:00:00Z"));
-    const inv2 = await post("/invoices", { id: "i2", number: "I2", businessId, customerId, paymentAccount: "RECEIVABLES", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }] });
+    const inv2 = await post("/invoices", { id: "i2",businessId, customerId, paymentAccount: "RECEIVABLES", lines: [{ description: "x", quantity: 1, unitPricePaise: 100 }] });
     expect(String(inv2.body.invoiceDate).slice(0, 10)).toBe("2099-07-01");
   });
 });
