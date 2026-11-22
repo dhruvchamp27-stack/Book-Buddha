@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrations, runMigrations } from "./migrations.js";
 import { applyInterFairClearingSchema } from "./inter-fair-clearing-schema.js";
-import { SEED_ACCOUNTS, V11_SEED_ACCOUNTS, V13_ADDED_ACCOUNTS, V15_ADDED_ACCOUNTS, V18_ADDED_ACCOUNTS, V19_ADDED_ACCOUNTS, V21_ADDED_ACCOUNTS } from "./chart-accounts-schema.js";
+import { SEED_ACCOUNTS, V11_SEED_ACCOUNTS, V13_ADDED_ACCOUNTS, V15_ADDED_ACCOUNTS, V18_ADDED_ACCOUNTS, V19_ADDED_ACCOUNTS, V21_ADDED_ACCOUNTS, V34_ADDED_ACCOUNTS } from "./chart-accounts-schema.js";
 
 /**
  * v15 adds INTER_FAIR_CLEARING (S5-11). Same trap as v13: if an earlier migration seeded from the
@@ -44,6 +44,9 @@ describe("the v15 seed list is frozen", () => {
       ...V18_ADDED_ACCOUNTS.map((a) => a.code),
       ...V19_ADDED_ACCOUNTS.map((a) => a.code),
       ...V21_ADDED_ACCOUNTS.map((a) => a.code),
+      // v34 (I, GST per line + round-off) seeds ROUND_OFF. Appended for the reason the comment above
+      // gives: this assertion is the concatenation of the frozen lists, not a snapshot of the chart.
+      ...V34_ADDED_ACCOUNTS.map((a) => a.code),
     ]);
   });
 
@@ -66,10 +69,10 @@ describe("v15 seeding from a database built to v14", () => {
     for (const row of before) expect(after.find((r) => r.code === row.code)).toEqual(row);
     const added = after.filter((r) => !before.some((b) => b.code === r.code));
     // This runs the WHOLE tail of the chain, not v15 alone, so every migration after v14 that
-    // seeds an account shows up here -- v18 added two. The assertion is still exact: the chart
-    // gained precisely the frozen accounts of v15 and v18, and nothing else crept in.
+    // seeds an account shows up here -- v18 added two, v34 added ROUND_OFF. The assertion is still
+    // exact: the chart gained precisely those frozen accounts, and nothing else crept in.
     expect(added.map((r) => r.code).sort()).toEqual(
-      [...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS, ...V19_ADDED_ACCOUNTS, ...V21_ADDED_ACCOUNTS].map((a) => a.code).sort(),
+      [...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS, ...V19_ADDED_ACCOUNTS, ...V21_ADDED_ACCOUNTS, ...V34_ADDED_ACCOUNTS].map((a) => a.code).sort(),
     );
     expect(added.find((r) => r.code === "INTER_FAIR_CLEARING"))
       .toMatchObject({ name: "Inter-fair Clearing", type: "ASSET", role: null, company_id: null, parent_code: null, active: 1 });

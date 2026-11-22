@@ -29,6 +29,8 @@ import { applyCashFlowSectionSchema } from "./cash-flow-section-schema.js";
 import { applyQuotationLinkSchema } from "./quotation-link-schema.js";
 import { applyInvoiceNumberIndexSchema } from "./invoice-number-index-schema.js";
 import { applyBeforeOpeningSchema } from "./before-opening-schema.js";
+import { applyLineTaxSchema } from "./line-tax-schema.js";
+import { applyBillRoundOffSchema } from "./bill-round-off-schema.js";
 
 export interface Migration {
   version: number;
@@ -380,6 +382,27 @@ export const migrations: readonly Migration[] = [
     // purchase_returns, payments, supplier_payments. Items dated on/before the opening date are kept
     // as HISTORY, never posted (rulings S16-2(c), Q13, S17-12). ALTER TABLE ADD COLUMN, no rebuild.
     up: applyBeforeOpeningSchema,
+  },
+  {
+    version: 34,
+    name: "line_tax",
+    // Additive: tax_rate_basis_points on the five document LINE tables (backfilled from the document,
+    // notes and returns joining through to the parent), items.default_tax_rate_basis_points as an
+    // optional pre-fill, invoices.round_off_paise and invoices.total_paise (the STORED rounded total,
+    // backfilled to open-items.ts's current figures so no receivable moves), the two reverses-link
+    // columns, and the roleless ROUND_OFF account. GST per line + rupee round-off (rulings S18-3
+    // I-Q1..I-Q10, S18-5 I-Q11..I-Q14). ALTER TABLE ADD COLUMN, no rebuild.
+    up: applyLineTaxSchema,
+  },
+  {
+    version: 35,
+    name: "bill_round_off",
+    // Additive: an OPTIONAL signed round_off_paise on purchase_bills and expenses, capped below one
+    // rupee by CHECK, so a bill can match the supplier's printed total (ruling I-Q6, confirmed
+    // 22 Nov). NOT calculated - unlike an invoice, a bill only carries what the owner types.
+    // Nothing is backfilled: every existing row keeps 0 from the DEFAULT, so no posted bill or
+    // expense moves. ALTER TABLE ADD COLUMN, no rebuild.
+    up: applyBillRoundOffSchema,
   },
 ];
 

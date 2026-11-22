@@ -221,9 +221,32 @@ export const V21_ADDED_ACCOUNTS: readonly SeedAccount[] = [
   { code: "ROUNDING", name: "Rounding", type: "INCOME" },
 ];
 
+/**
+ * v34 - the invoice round-off (ruling I-Q5), kept apart from the cash view's ROUNDING above.
+ *
+ * NO ROLE, deliberately (ruling I-Q11): `V9_ACCOUNT_ROLES` is FROZEN and the role CHECK is built
+ * from it, so a new role would mean rebuilding this table and replaying every trigger whose body
+ * mentions it - on the owner's real data, for a reporting exclusion. Instead the three aggregates
+ * that sum INCOME accounts (`salesByTax` net sales, the credit-note report's taxable figure, and the
+ * P&L's gross sales) leave this account out BY CODE, through `ROUND_OFF_ACCOUNT` below, so reported
+ * sales do not move. Same treatment STOCK_ADJUSTMENT and ROUNDING already get.
+ *
+ * SIGNED, like ROUNDING: a round-down is a debit to this one account, never split into an income
+ * side and an expense side.
+ */
+export const V34_ADDED_ACCOUNTS: readonly SeedAccount[] = [
+  { code: "ROUND_OFF", name: "Round off", type: "INCOME" },
+];
+
+/**
+ * The ONE literal for the invoice round-off account. Everything that posts it, and every income
+ * aggregate that must leave it out, imports this - never a string of its own (ruling I-Q11).
+ */
+export const ROUND_OFF_ACCOUNT = "ROUND_OFF";
+
 export const SEED_ACCOUNTS: readonly SeedAccount[] = [
   ...V11_SEED_ACCOUNTS, ...V13_ADDED_ACCOUNTS, ...V15_ADDED_ACCOUNTS, ...V18_ADDED_ACCOUNTS,
-  ...V19_ADDED_ACCOUNTS, ...V21_ADDED_ACCOUNTS,
+  ...V19_ADDED_ACCOUNTS, ...V21_ADDED_ACCOUNTS, ...V34_ADDED_ACCOUNTS,
 ];
 
 export const CHART_ACCOUNTS_TRIGGER_NAMES = [
