@@ -91,6 +91,37 @@ in a session use the harness convention `S<session>-<n>` (e.g. S1-1), newest at 
 
 ## Session decisions (harness convention, newest first)
 
+- **S18-7 (2026-11-22) — TEN CALLS MADE WHILE BUILDING I-2 AND I-3 THAT HE HAS NOT RULED ON, and three
+  gaps.** Each was surfaced by its builder and checked by the orchestrator; none is buried in the code.
+  They stand until he rules, and a later session must not treat them as settled.
+  **From I-2 (GST per line, invoice and credit-note round-off):**
+  (1) A positive total UNDER 50 paise is not rounded to Rs 0 but left exact with no round-off line,
+  because a zero-value invoice cannot post (`journal_lines` refuses a zero line) and the 3-paise
+  tiny-sale tests depend on it. Documented at `roundToRupee` in `engine.ts`.
+  (2) When earlier exact-paise notes have taken more than a rounded-DOWN invoice was worth, the note
+  that completes the invoice posts a small DEBIT to the settlement account to put the paisa back;
+  without it that entry would not balance.
+  (3) `salesByTax` splits each posted entry across its rate groups, because journal lines carry no rate
+  tag; where the posted figure differs from the computed one (a clamped note tax) it allocates by
+  taxable share. A mixed-rate invoice shows in EVERY rate row it touches, but once in the totals.
+  (4) Without an explicit `reversesInvoiceLineId`, a credit-note line matches by item and price; with no
+  match it takes the document's single rate, and is REFUSED when the document holds several rates.
+  **From I-3 (bill and expense round-off):**
+  (5) The API field is optional with `.default(0)`, like `discountPaise`, so existing request bodies
+  stay valid.
+  (6) Two message texts: the API's names the range "(from -99 to 99)", the repository and engine's does
+  not.
+  (7) The round-off is set at CREATE time on the draft, like `discountPaise`. There is no edit route.
+  (8) `purchaseEntry` refuses 100 or more, a fraction, or a non-integer, on top of the API check and the
+  database CHECK.
+  (9) `PurchaseEntryResult.totalPaise` stays the COMPUTED total; no round-off field was added to it.
+  (10) `roundOffPaise` is REQUIRED on `PurchaseBillRecord` and `ExpenseRecord`, kept separate from
+  `totalPaise`, which is what he asked for.
+  **Three gaps — not failures, but NOT verified:** no cash-basis P&L case with a round-off · the v34
+  backfill has never run against a real pre-v34 FILE database (the test builds a legacy-shaped invoice
+  by hand) · `items.default_tax_rate_basis_points` exists with nothing reading it (I-Q2 is pre-fill,
+  which is a screen concern, and this build was backend only).
+
 - **S18-6 (2026-11-22) — I-Q6 CONFIRMED: round-off on bills and expenses, migration v35.** His
   words: optional · default zero · stored in whole paise · bills and expenses only · kept separate
   from existing document totals · old posted bills and expenses unchanged · no historical document
