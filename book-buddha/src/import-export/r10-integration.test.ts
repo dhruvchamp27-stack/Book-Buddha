@@ -3,6 +3,7 @@ import type { Invoice } from "../accounting/types.js";
 import { verifyAuditChain } from "../database/audit-log.js";
 import { AccountingRepository } from "../database/repository.js";
 import { buildApi } from "../api/server.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * R10-E: integration checks through the real `buildApi` with a session (auth ON, both route sets
@@ -23,7 +24,7 @@ interface Rig {
 }
 
 async function setUp(): Promise<Rig> {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-04-10"));
   const app = buildApi(repository);
   expect((await app.inject({ method: "POST", url: "/auth/setup", payload: { password: PASSWORD } })).statusCode).toBe(201);
   const token = (await app.inject({ method: "POST", url: "/auth/login", payload: { password: PASSWORD } })).json<{ token: string }>().token;

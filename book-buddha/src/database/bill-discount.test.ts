@@ -4,6 +4,7 @@ import { buildApi } from "../api/server.js";
 import { migrations, runMigrations } from "./migrations.js";
 import { applyBillDiscountSchema } from "./bill-discount-schema.js";
 import { AccountingRepository } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R8 - a header-level discount and extra charge on a purchase bill (migration v18).
@@ -107,7 +108,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const supplierId = repository.createSupplier({ companyId, name: "Paper Co" });
@@ -320,7 +321,7 @@ describe("R8: what a bill discount is not allowed to be", () => {
 
 describe("R8: over HTTP", () => {
   it("takes the two fields on the body and gives back the discounted total", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
@@ -362,7 +363,7 @@ describe("R8: over HTTP", () => {
   });
 
   it("rejects a discount bigger than the bill with a 400 naming the field", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
@@ -629,7 +630,7 @@ describe("S17-7 Q2: a settlement discount taken at payment is Discount received"
   });
 
   it("is accepted over HTTP and refused when negative", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });

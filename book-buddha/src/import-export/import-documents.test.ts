@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "../database/repository.js";
 import type { ImportContext, ImportKindDefinition, MappedRow, UnitOutcome } from "./import-engine.js";
 import { DOCUMENT_IMPORT_KINDS } from "./import-documents.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * R10-D. Each test calls a definition's `post(context, rows)` directly, inside
@@ -24,7 +25,7 @@ interface World {
 }
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2025-12-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   repository.createCustomer({ companyId, name: "Acme Books" });

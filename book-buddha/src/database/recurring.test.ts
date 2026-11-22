@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { advanceRunDate, isValidIsoDate } from "../accounting/recurrence.js";
 import { AccountingRepository, type RecurringInvoiceTemplateInput } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 function setup(accountingBasis: "CASH" | "ACCRUAL" = "ACCRUAL") {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
   const companyId = repository.createCompany({ name: "Test Company", accountingBasis });
   const businessId = repository.createBusiness({ companyId, name: "Book Business" });
   const customerId = repository.createCustomer({ companyId, name: "Test Customer" });

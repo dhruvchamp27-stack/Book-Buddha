@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AccountingRepository, RepositoryValidationError } from "./repository.js";
 import { migrations, runMigrations } from "./migrations.js";
 import type { Invoice } from "../accounting/types.js";
+import { todayAt } from "./test-clock.js";
 
 /** Every version after v, derived from the list: 'upgrading a vN database applies the rest'.
  *  Adding a migration must never require editing a literal here. */
@@ -18,7 +19,7 @@ interface World {
 }
 
 function setup(accountingBasis: "CASH" | "ACCRUAL" = "ACCRUAL"): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-11-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const supplierId = repository.createSupplier({ companyId, name: "Paper House", gstin: "07AAAAA0000A1Z5" });
@@ -144,7 +145,7 @@ describe("purchase bills", () => {
         paymentAccount: "PAYABLES", taxType: "IGST", taxRateBasisPoints: 1800,
         lines: [{ description: "Paper", quantity: 1, unitPricePaise: 10000 }],
       });
-      repository.finalizePurchaseBill(bill.id);
+      repository.finalizePurchaseBill(bill.id, { confirmBackdatedMonth: true }); // PB-2 is an October bill; today is pinned to 1 Nov
       expect(balance(repository, "PAYABLES")).toBe(-11800);
       expect(repository.getPayables()).toMatchObject([
         { documentType: "BILL", documentId: bill.id, totalPaise: 11800, paidPaise: 0, outstandingPaise: 11800 },

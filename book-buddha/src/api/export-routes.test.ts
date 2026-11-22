@@ -4,13 +4,14 @@ import { AccountingRepository, RepositoryValidationError } from "../database/rep
 import type { Invoice } from "../accounting/types.js";
 import { registerExportRoutes } from "./export-routes.js";
 import { buildApi } from "./server.js";
+import { todayAt } from "../database/test-clock.js";
 
 let repository: AccountingRepository;
 let app: FastifyInstance;
 let companyId: string;
 
 beforeEach(async () => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
   // A bare Fastify app with the same RepositoryValidationError -> 400 mapping as buildApi's handler.
   app = Fastify();
   app.setErrorHandler((error, _request, reply) => {
@@ -91,7 +92,7 @@ describe("export routes", () => {
 
 describe("export routes through buildApi (R10-E)", () => {
   it("are behind auth: 401 without a session, 400 for an unknown dataset with one", async () => {
-    const repo = new AccountingRepository();
+    const repo = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const built = buildApi(repo);
     try {
       expect((await built.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } })).statusCode).toBe(201);
@@ -116,7 +117,7 @@ describe("report exports (Q18)", () => {
   let itemId: string;
 
   beforeEach(async () => {
-    repo = new AccountingRepository();
+    repo = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     server = Fastify();
     server.setErrorHandler((error, _request, reply) => {
       if (error instanceof RepositoryValidationError) return reply.code(400).send({ error: error.message });

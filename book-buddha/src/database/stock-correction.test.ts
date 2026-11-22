@@ -4,7 +4,8 @@ import { buildApi } from "../api/server.js";
 import { migrations, runMigrations } from "./migrations.js";
 import { applyStockAdjustmentSchema } from "./stock-adjustment-schema.js";
 import { datedStockLayers } from "./stock-layers.js";
-import { AccountingRepository, RepositoryValidationError, istDateOf } from "./repository.js";
+import { AccountingRepository, RepositoryValidationError } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Ruling S10-4 - stock can be taken OUT by hand (a write-down) and a hand-entered movement can be
@@ -23,8 +24,11 @@ interface World {
   itemId: string;
 }
 
+/** The pinned "today" of every world here (ruling G): a reversal is dated today, so it is also the expected date. */
+const TODAY = "2025-04-01";
+
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt(TODAY));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });
@@ -78,9 +82,9 @@ function refused(action: () => unknown, message: RegExp): void {
   expect(action).toThrow(message);
 }
 
-/** A year that covers TODAY (whatever today is when the suite runs), locked. */
+/** A year that covers the pinned TODAY, locked. */
 function lockCurrentYear(w: World): void {
-  const year = Number(istDateOf().slice(0, 4));
+  const year = Number(TODAY.slice(0, 4));
   const id = w.repository.createFinancialYear({ businessId: w.businessId, startsOn: `${year - 1}-01-01`, endsOn: `${year + 1}-12-31` });
   w.repository.setFinancialYearLocked(id, true, "filed");
 }
@@ -182,7 +186,7 @@ describe("S10-4 reversal (ADJUSTMENT_REVERSAL)", () => {
       expectTies(w);
       const entry = r.db.prepare("SELECT is_reversal, entry_date, source_type FROM journal_entries WHERE id = ?")
         .get(`je-stock-movement-${adj.id}-reversal`);
-      expect(entry).toEqual({ is_reversal: 1, entry_date: istDateOf(), source_type: "STOCK_MOVEMENT" });
+      expect(entry).toEqual({ is_reversal: 1, entry_date: TODAY, source_type: "STOCK_MOVEMENT" });
     } finally { r.close(); }
   });
 
@@ -220,7 +224,7 @@ describe("S10-4 reversal (ADJUSTMENT_REVERSAL)", () => {
       // of B (Rs 750) and 1 restored (Rs 100) = Rs 1,450. A restored lot that jumped the queue would cost Rs 1,300.
       const layers = datedStockLayers(r.db, w.itemId);
       expect(layers.map((l) => [l.quantity, l.unitCostPaise])).toEqual([[6, 10_000], [5, 15_000], [4, 10_000]]);
-      expect(layers[2]).toMatchObject({ dateBasis: "JOURNAL", receivedOn: istDateOf() });
+      expect(layers[2]).toMatchObject({ dateBasis: "JOURNAL", receivedOn: TODAY });
       sell(w, "I1", 12);
       expect(net(r, w.businessId, "COGS")).toBe(145_000);
       expectTies(w);

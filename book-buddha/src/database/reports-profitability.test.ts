@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountingRepository, RepositoryValidationError } from "./repository.js";
 import { itemProfitability, type ItemProfitabilityReport } from "./reports-profitability.js";
 import { salesByItem } from "./reports-sales.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Session 12, report 6: item profitability. Money is paise. "Today" is frozen at 2026-07-01 (IST);
@@ -30,7 +31,7 @@ afterEach(() => {
 });
 
 function world() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-04-02"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });
@@ -39,8 +40,8 @@ function world() {
   const fair1 = repository.createFair({ companyId, hostCustomerId: customerId, name: "Fair One" });
   const fair2 = repository.createFair({ companyId, hostCustomerId: customerId, name: "Fair Two" });
 
-  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 3, unitCostPaise: 5000, occurredOn: "2026-04-02" });
-  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 6000, occurredOn: "2026-04-10" });
+  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 3, unitCostPaise: 5000, occurredOn: "2026-04-02", confirmBackdatedMonth: true });
+  repository.addStockMovement({ itemId: atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 6000, occurredOn: "2026-04-10", confirmBackdatedMonth: true });
 
   const sell = (id: string, date: string, lines: Array<{ itemId: string; quantity: number; unitPricePaise: number }>, fairId?: string): void => {
     repository.saveDraft({
@@ -49,7 +50,7 @@ function world() {
       ...(fairId === undefined ? {} : { fairId }),
       lines: lines.map((line) => ({ ...line, description: "Line" })),
     });
-    repository.finalizeInvoice(id);
+    repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
   };
   const returnGoods = (noteId: string, invoiceId: string, date: string, quantity: number): void => {
     repository.saveCreditNote({
@@ -321,7 +322,7 @@ describe("item profitability", () => {
         invoiceDate: "2026-06-01", paymentAccount: "RECEIVABLES", status: "DRAFT", taxType: "NONE", taxRateBasisPoints: 0,
         lines: [{ description: "Courier", quantity: 1, unitPricePaise: 5000 }],
       });
-      w.repository.finalizeInvoice("INV-T");
+      w.repository.finalizeInvoice("INV-T", { confirmBackdatedMonth: true });
       const report = itemProfitability(w.repository.db);
       expect(report.rows).toHaveLength(1);
       expect(report.rows[0]).toMatchObject({ itemId: null, itemName: "Courier", cogsPaise: 0, netSalesPaise: 5000 });

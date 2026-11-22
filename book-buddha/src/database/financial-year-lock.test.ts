@@ -3,13 +3,14 @@ import { AccountingRepository } from "./repository.js";
 import { buildApi } from "../api/server.js";
 import { verifyAuditChain } from "./audit-log.js";
 import type { Invoice } from "../accounting/types.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R5 — the financial-year lock, enforced at the posting door (ledger.ts). The door is the only
  * writer of journal entries, so a locked year cannot be posted into by any route.
  */
 function world(): { repository: AccountingRepository; companyId: string; businessId: string; customerId: string; itemId: string } {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2024-01-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Business" });
   const customerId = repository.createCustomer({ companyId, name: "Customer" });

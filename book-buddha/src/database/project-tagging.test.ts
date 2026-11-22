@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AccountingRepository, RepositoryValidationError } from "./repository.js";
 import { applyProjectDimensionSchema } from "./project-dimension-schema.js";
 import { buildApi } from "../api/server.js";
+import { todayAt } from "./test-clock.js";
 
 interface World {
   repository: AccountingRepository;
@@ -15,7 +16,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-11-01"));
   const companyId = repository.createCompany({ name: "Co" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });

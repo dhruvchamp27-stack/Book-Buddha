@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import type { Invoice } from "../accounting/types.js";
 import { financialYearLabel } from "../banking/internal-transfers.js";
+import { todayAt } from "./test-clock.js";
 
 function createRepository(): AccountingRepository {
-  return new AccountingRepository();
+  return new AccountingRepository(":memory:", todayAt("2026-11-01"));
 }
 
 function createDraft(repository: AccountingRepository, accountingBasis: "CASH" | "ACCRUAL" = "ACCRUAL"): Invoice {

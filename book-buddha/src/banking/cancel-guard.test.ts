@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "../database/repository.js";
 import { insertStatementLine, reversedEntryIdOf } from "./statement-lines.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * R12 cancel guard (orchestrator, S15). Money that a bank statement line was added or matched to
@@ -34,7 +35,7 @@ const line = (date: string, description: string, amountPaise: number): string =>
 interface Done { line: { status: string }; links: Array<{ documentId: string | null; journalLineId: number }> }
 
 beforeEach(async () => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2025-10-01"));
   app = buildApi(repository, { __unsafeDisableAuthForTests: true });
   await app.ready();
   companyId = (await call<{ id: string }>("/companies", { name: "Fair Books", accountingBasis: "ACCRUAL" }, 201)).id;

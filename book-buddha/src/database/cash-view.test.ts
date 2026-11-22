@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository, RepositoryValidationError, istDateOf, type ProfitAndLossReport } from "./repository.js";
+import { moveToday, todayAt } from "./test-clock.js";
 
 /**
  * Derived Cash/Accrual Profit and Loss (sub-slice 7d). Posting stays accrual-always; the cash
@@ -21,7 +22,7 @@ interface World {
 }
 
 function world(accountingBasis: "CASH" | "ACCRUAL" = "ACCRUAL"): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-10"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Cust" });
@@ -666,7 +667,7 @@ describe("cash view: credit notes re-base the remainder (S2-2, S4-3, S4-6; figur
 
 describe("cash view: default basis resolution", () => {
   function twoCompanies(): { repository: AccountingRepository; cashBiz: string; accrualBiz: string } {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-10"));
     const seed = (basis: "CASH" | "ACCRUAL", name: string): string => {
       const companyId = repository.createCompany({ name, accountingBasis: basis });
       const businessId = repository.createBusiness({ companyId, name: `${name} Books` });
@@ -837,6 +838,7 @@ describe("payment dates: a payment can be entered after the fact with its real d
   it("no date given: both payments are stamped with the moment of recording, exactly as before", () => {
     const { w, billId } = entered();
     try {
+      moveToday(w.repository, istDateOf()); // ruling G: "no date" means the real moment only when the clock is the real one
       const before = Date.now();
       const customerPayment = w.repository.recordPayment("INV-1", 590000);
       const supplierPayment = w.repository.recordSupplierPayment({ billId, amountPaise: 354000 });
@@ -858,6 +860,7 @@ describe("payment dates: a payment can be entered after the fact with its real d
     const { w } = entered();
     try {
       const old = w.repository.recordPayment("INV-1", 100000, "2026-02-14");
+      moveToday(w.repository, istDateOf()); // an undated payment is stamped with the real moment (today)
       const now = w.repository.recordPayment("INV-1", 100000);
       expect(old.paidAt).toBe("2026-02-14T06:30:00.000Z");
       expect(w.repository.listPayments("INV-1").map((p) => p.id)).toEqual([old.id, now.id]);

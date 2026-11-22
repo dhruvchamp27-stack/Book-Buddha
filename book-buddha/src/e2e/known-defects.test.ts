@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "../database/repository.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * DEFECTS D1-D16 found by the S16 audit read. Each case asserts the CORRECT accounting behaviour.
@@ -17,7 +18,7 @@ const knownDefect = it.fails;
 let repository: AccountingRepository;
 let app: FastifyInstance;
 beforeEach(async () => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2025-01-01"));
   app = buildApi(repository, { __unsafeDisableAuthForTests: true });
   await app.ready();
 });
@@ -251,7 +252,7 @@ describe("known defects (each asserts the correct behaviour; passes while the de
   // Root cause: audit events are written without the signed-in user (actor_id stays NULL) even
   // when real authentication is on, so the tamper-evident log cannot say who did what.
   it("FIXED D13: audit events carry no actor (P13)", async () => {
-    const authRepo = new AccountingRepository();
+    const authRepo = new AccountingRepository(":memory:", todayAt("2025-01-01"));
     const authApp = buildApi(authRepo);
     try {
       await authApp.ready();

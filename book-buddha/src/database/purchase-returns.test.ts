@@ -4,6 +4,7 @@ import { buildApi } from "../api/server.js";
 import { migrations, runMigrations } from "./migrations.js";
 import { applyPurchaseReturnsSchema } from "./purchase-returns-schema.js";
 import { AccountingRepository } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R8 - purchase returns and supplier refunds (migration v19), the supplier mirror of a credit
@@ -87,7 +88,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-05-10"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const supplierId = repository.createSupplier({ companyId, name: "Paper Co" });
@@ -536,7 +537,7 @@ describe("R8: cancelling a purchase return", () => {
 
 describe("R8: over HTTP", () => {
   it("runs a return and a refund end to end", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-05-10"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });

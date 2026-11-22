@@ -12,6 +12,7 @@ import {
 } from "./bank-accounts.js";
 import { applyBankAccountsSchema } from "./bank-accounts-schema.js";
 import { assertMoneyAccount } from "./money-accounts.js";
+import { todayAt } from "../database/test-clock.js";
 
 /** Figures are PAISE in code; the rupee figure is in a comment. */
 let r: AccountingRepository;
@@ -21,7 +22,7 @@ let otherCompanyId: string;
 let seq = 0;
 
 beforeEach(() => {
-  r = new AccountingRepository();
+  r = new AccountingRepository(":memory:", todayAt("2026-10-01"));
   applyBankAccountsSchema(r.db); // v25 later; the orchestrator registers it in migrations.ts
   companyId = r.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   businessId = r.createBusiness({ companyId, name: "Book Fair Co" });

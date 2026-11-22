@@ -10,6 +10,7 @@ import { createInternalTransfer } from "./internal-transfers.js";
 import { finishReconciliation, setTicked, startReconciliation } from "./reconciliation.js";
 import { getStatementLine, insertStatementLine, linksOfLine } from "./statement-lines.js";
 import { getVoucher } from "./vouchers.js";
+import { todayAt } from "../database/test-clock.js";
 
 /** R12 12f. Figures are PAISE; the rupee figure is in the helper RS(). A line is + money IN, - money OUT. */
 const RS = (rupees: number): number => rupees * 100;
@@ -22,7 +23,7 @@ let bizY: string;
 let bizX2: string;
 
 beforeEach(() => {
-  r = new AccountingRepository();
+  r = new AccountingRepository(":memory:", todayAt("2025-04-01"));
   companyX = r.createCompany({ name: "X Co", accountingBasis: "ACCRUAL" });
   companyY = r.createCompany({ name: "Y Co", accountingBasis: "ACCRUAL" });
   bizX = r.createBusiness({ companyId: companyX, name: "X Biz" });

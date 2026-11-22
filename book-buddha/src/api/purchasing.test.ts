@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { buildApi } from "./server.js";
 import { AccountingRepository } from "../database/repository.js";
+import { todayAt } from "../database/test-clock.js";
 
 describe("purchasing & expenses API", () => {
   it("runs suppliers, bills, payments, expenses and reports end to end", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-10-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     const post = async (url: string, payload: unknown) => app.inject({ method: "POST", url, payload: payload as object });
     try {
@@ -106,7 +107,7 @@ describe("purchasing & expenses API", () => {
   });
 
   it("cancels a bill via the API and refuses unknown ids", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-10-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     const post = async (url: string, payload: unknown) => app.inject({ method: "POST", url, payload: payload as object });
     try {

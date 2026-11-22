@@ -156,6 +156,8 @@ export interface ExpenseRecord {
 export interface SupplierPaymentInput {
   /** F: confirm that a payment dated on or before the opening date is kept as history (not posted). */
   readonly confirmBeforeOpening?: boolean;
+  /** Q12: confirm that a payment dated in an earlier month than today changes figures already reported. */
+  readonly confirmBackdatedMonth?: boolean | undefined;
   readonly billId?: string;
   readonly expenseId?: string;
   /** The money that actually leaves the money account. */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import type { Invoice } from "../accounting/types.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R5-rem — splitting the DERIVED retained earnings into brought forward and profit for the year.
@@ -16,7 +17,7 @@ const FY25 = { startsOn: "2025-04-01", endsOn: "2026-03-31" } as const;
 const FY26 = { startsOn: "2026-04-01", endsOn: "2027-03-31" } as const;
 
 function world() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2025-03-31"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Business" });
   const customerId = repository.createCustomer({ companyId, name: "Customer" });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "../database/repository.js";
 import { buildApi } from "./server.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * R10-C: import routes over HTTP. The app is built by `buildApi` with authentication ON and the
@@ -15,7 +16,7 @@ const b64 = (text: string): string => Buffer.from(text, "utf8").toString("base64
 async function setUp(): Promise<{
   app: ReturnType<typeof buildApi>; repository: AccountingRepository; token: string; companyId: string; businessId: string;
 }> {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-04-01"));
   const app = buildApi(repository);
   expect((await app.inject({ method: "POST", url: "/auth/setup", payload: { password: PASSWORD } })).statusCode).toBe(201);
   const token = (await app.inject({ method: "POST", url: "/auth/login", payload: { password: PASSWORD } })).json<{ token: string }>().token;
@@ -203,7 +204,7 @@ describe("import routes", () => {
           method: "POST", url: "/imports/commit", headers: auth(token),
           payload: { kind, fileName, contentBase64: b64(csv), companyId, businessId, dateFormat: "YYYY-MM-DD", columnMap },
         })).json<{ created: number; skipped: number; failed: number }>();
-      expect(await app.inject({ method: "GET", url: "/imports/last", headers: auth(token) }).then((r) => r.json())).toEqual({ imports: [] });
+      expect(await app.inject({ method: "GET", url: `/imports/last?companyId=${companyId}`, headers: auth(token) }).then((r) => r.json())).toEqual({ imports: [] });
 
       const inv = await commit("invoices", "inv.csv", "Number,Invoice date,Customer,Description,Quantity,Unit price\r\nINV-1,2026-11-01,Acme Books,Binding,1,5000\r\n",
         { number: "Number", invoiceDate: "Invoice date", customer: "Customer", description: "Description", quantity: "Quantity", unitPrice: "Unit price" });
@@ -214,12 +215,45 @@ describe("import routes", () => {
       expect(await commit("payments", "pay.csv", pays, map)).toMatchObject({ created: 2, skipped: 0, failed: 0 });
       expect(await commit("payments", "pay.csv", pays, map)).toMatchObject({ created: 0, skipped: 2, failed: 0 });
 
-      const last = (await app.inject({ method: "GET", url: "/imports/last", headers: auth(token) })).json<{ imports: Array<Record<string, unknown>> }>();
+      const last = (await app.inject({ method: "GET", url: `/imports/last?companyId=${companyId}`, headers: auth(token) })).json<{ imports: Array<Record<string, unknown>> }>();
       expect(last.imports).toHaveLength(2);
       const byKind = Object.fromEntries(last.imports.map((i) => [i.kind as string, i]));
       expect(byKind["payments"]).toMatchObject({ kind: "payments", fileName: "pay.csv", created: 0, skipped: 2, failed: 0 });
       expect(typeof byKind["payments"]?.committedAt).toBe("string");
       expect(byKind["invoices"]).toMatchObject({ fileName: "inv.csv", created: 1 });
+    } finally {
+      await app.close();
+      repository.close();
+    }
+  });
+
+  it("GET /imports/last is per company: each company sees only its own last import; a company with none sees an empty list; a bad company is 400", async () => {
+    const { app, repository, token, companyId: coA } = await setUp();
+    try {
+      const coB = repository.createCompany({ name: "Co B" });
+      const coC = repository.createCompany({ name: "Co C" });
+      const commit = async (companyId: string, fileName: string) =>
+        app.inject({
+          method: "POST", url: "/imports/commit", headers: auth(token),
+          payload: { kind: "customers", fileName, contentBase64: b64("Name\r\nAcme\r\n"), companyId, dateFormat: "YYYY-MM-DD", columnMap: { name: "Name" } },
+        });
+      expect((await commit(coA, "a.csv")).statusCode).toBe(200);
+      expect((await commit(coB, "b.csv")).statusCode).toBe(200);
+      const last = async (companyId: string) =>
+        (await app.inject({ method: "GET", url: `/imports/last?companyId=${companyId}`, headers: auth(token) })).json<{ imports: Array<Record<string, unknown>> }>();
+
+      const a = await last(coA);
+      expect(a.imports).toHaveLength(1);
+      expect(a.imports[0]).toMatchObject({ kind: "customers", fileName: "a.csv" });
+      const b = await last(coB);
+      expect(b.imports).toHaveLength(1);
+      expect(b.imports[0]).toMatchObject({ kind: "customers", fileName: "b.csv" });
+      expect(await last(coC)).toEqual({ imports: [] });
+
+      const missing = await app.inject({ method: "GET", url: "/imports/last?companyId=nope", headers: auth(token) });
+      expect(missing.statusCode).toBe(400);
+      const noParam = await app.inject({ method: "GET", url: "/imports/last", headers: auth(token) });
+      expect(noParam.statusCode).toBe(400);
     } finally {
       await app.close();
       repository.close();

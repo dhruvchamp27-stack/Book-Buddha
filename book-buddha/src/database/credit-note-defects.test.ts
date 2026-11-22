@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import type { CreditNote, Invoice } from "../accounting/types.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R3 — the two CONFIRMED money defects. Both were silent: no error, no test, wrong figures.
@@ -17,7 +18,7 @@ import type { CreditNote, Invoice } from "../accounting/types.js";
 type World = { repository: AccountingRepository; businessId: string; customerId: string; itemId: string };
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Business" });
   const customerId = repository.createCustomer({ companyId, name: "Customer" });

@@ -3,6 +3,7 @@ import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "./repository.js";
 import type { AgeingReport } from "./repository.js";
 import type { Invoice } from "../accounting/types.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R7b — ageing of what is owed, and the filters the open-item reports never had.
@@ -37,7 +38,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const otherBusinessId = repository.createBusiness({ companyId, name: "Stationery" });

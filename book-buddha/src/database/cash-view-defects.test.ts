@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Cash-basis Profit and Loss: D9 (purchase returns, ruling S16-7(1)), D10 (GST payment voucher)
@@ -22,7 +23,7 @@ afterEach(() => {
 });
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2025-01-02"));
   open.push(repository);
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "CASH" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
@@ -288,7 +289,7 @@ describe("D16: a cancelled receipt is taken back in the month it is cancelled (r
 
 describe("D10: paying the GST over is not a sales reversal (both bases)", () => {
   it("a GST payment voucher leaves GST on sales at 18 on the accrual AND the cash basis (credit-note reversals stay in: see cash-view.test.ts)", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2025-01-02"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       await app.ready();

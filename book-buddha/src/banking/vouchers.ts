@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { appendAuditEvent } from "../database/audit-log.js";
 import { RepositoryValidationError } from "../database/errors.js";
-import { postJournalEntry } from "../database/ledger.js";
+import { assertPeriodOpen, postJournalEntry } from "../database/ledger.js";
+import { assertBackdatedConfirmed } from "../database/ist-date.js";
 import {
   assertPaymentMode, assertPositivePaise, assertRealDate, cancellationDate, nextDocumentNumber, optionalText,
   requireReason, reversalOf, type ListMovementsFilter,
@@ -60,6 +61,8 @@ export interface CreateVoucherInput {
   readonly partyName?: string | undefined;
   readonly narration?: string | undefined;
   readonly fairId?: string | undefined;
+  /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+  readonly confirmBackdatedMonth?: boolean | undefined;
 }
 
 export interface ListVouchersFilter extends ListMovementsFilter {
@@ -137,6 +140,9 @@ export function createVoucher(db: Database.Database, input: CreateVoucherInput):
       total += line.amountPaise;
     });
 
+    // Q12: the financial-year lock first (absolute), then the back-dated-month confirm.
+    assertPeriodOpen(db, input.businessId, input.date);
+    assertBackdatedConfirmed(db, input.date, input.confirmBackdatedMonth, input.kind === "RECEIPT" ? "receipt voucher" : "payment voucher", "post");
     const id = randomUUID();
     const prefix = input.kind === "RECEIPT" ? "RV" : "PV";
     const number = nextDocumentNumber(db, "vouchers", companyId, prefix, input.date);

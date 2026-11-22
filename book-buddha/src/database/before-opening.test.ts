@@ -4,6 +4,7 @@ import { buildExport } from "../import-export/exports.js";
 import { DOCUMENT_IMPORT_KINDS } from "../import-export/import-documents.js";
 import type { ImportContext, MappedRow } from "../import-export/import-engine.js";
 import { AccountingRepository, RepositoryValidationError } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * F (owner rulings S16-2(c), Q13, S17-12): a document or payment dated ON or BEFORE the business's
@@ -19,7 +20,7 @@ const CONFIRM = { confirmBeforeOpening: true } as const;
 const NEEDS_CONFIRM = `This is dated on or before your opening date (${OPENING}). It will be kept as history and not posted. Send it again with confirmBeforeOpening to continue.`;
 
 function world() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2025-03-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AccountingRepository, RepositoryValidationError } from "../database/repository.js";
 import { applyMoneyMovementsSchema } from "../banking/money-movements-schema.js";
 import { registerMoneyMovementRoutes } from "./money-movement-routes.js";
+import { todayAt } from "../database/test-clock.js";
 
 let repository: AccountingRepository;
 let app: FastifyInstance;
@@ -10,7 +11,7 @@ let companyId: string;
 let businessId: string;
 
 beforeEach(async () => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2025-10-01"));
   applyMoneyMovementsSchema(repository.db);
   // A bare Fastify app with the same RepositoryValidationError -> 400 mapping as buildApi's handler.
   app = Fastify();

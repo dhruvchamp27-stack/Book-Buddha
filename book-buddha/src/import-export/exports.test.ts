@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AccountingRepository } from "../database/repository.js";
 import type { Invoice } from "../accounting/types.js";
 import { EXPORT_DATASETS, buildExport, formatBasisPoints, formatPaise, toCsv, toJsonExport } from "./exports.js";
+import { todayAt } from "../database/test-clock.js";
 
 /** Minimal RFC 4180 reader, local to the test so it does not depend on the codec. */
 function readCsv(csv: string): string[][] {
@@ -27,7 +28,7 @@ let companyId: string;
 let businessId: string;
 
 beforeEach(() => {
-  repo = new AccountingRepository();
+  repo = new AccountingRepository(":memory:", todayAt("2026-03-01"));
   companyId = repo.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   businessId = repo.createBusiness({ companyId, name: "Biz" });
 });

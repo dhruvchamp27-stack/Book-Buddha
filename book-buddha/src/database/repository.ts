@@ -33,7 +33,7 @@ import type {
 } from "../accounting/types.js";
 import { ACCOUNT_CODES, type AccountingBasis } from "../accounting/types.js";
 import { AGEING_BANDS } from "./ageing-bands.js";
-import { istDateOf } from "./ist-date.js";
+import { assertBackdatedConfirmed, isBackdatedMonth, istDateOf, registerToday, todayOf } from "./ist-date.js";
 import { openCustomerItemRows, type OpenCustomerItem, type OpenCustomerItemRow } from "./open-items.js";
 
 export type { OpenCustomerItem };
@@ -916,21 +916,6 @@ export interface AsAtReportFilter {
   readonly asAtDate?: string;
 }
 
-const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-] as const;
-
-/** "2026-01-20" -> "20 January 2026": how a person reads a date, for messages they will see. */
-function readableDate(isoDate: string): string {
-  return `${Number(isoDate.slice(8, 10))} ${readableMonth(isoDate)}`;
-}
-
-/** "2026-01-20" -> "January 2026". */
-function readableMonth(isoDate: string): string {
-  return `${MONTH_NAMES[Number(isoDate.slice(5, 7)) - 1] ?? isoDate.slice(5, 7)} ${isoDate.slice(0, 4)}`;
-}
-
 // The IST conversion moved to ist-date.ts so the report modules share it without a circular import.
 export { istDateOf };
 
@@ -982,9 +967,24 @@ export interface OpeningBalanceSet {
 export class AccountingRepository {
   public readonly db: Database.Database;
 
-  public constructor(databasePath = ":memory:") {
+  /**
+   * `options.today` is the app's one settable "today" (ISO YYYY-MM-DD, IST). Default: the real
+   * IST date, read per call. EVERY "today" decision in the backend goes through it.
+   */
+  public constructor(databasePath = ":memory:", options: { readonly today?: () => string } = {}) {
     this.db = new Database(databasePath);
+    registerToday(this.db, options.today);
     runMigrations(this.db);
+  }
+
+  /** Today (IST, YYYY-MM-DD) as this app sees it: the one clock. */
+  public today(): string {
+    return todayOf(this.db);
+  }
+
+  /** Q12: is `date` in an EARLIER calendar month than today? (Posting such an entry needs `confirmBackdatedMonth`.) */
+  public isBackdatedMonth(date: string): boolean {
+    return isBackdatedMonth(this.db, date);
   }
 
   public close(): void {
@@ -1281,7 +1281,7 @@ export class AccountingRepository {
    * runs, only grouped by age, so the buckets sum to the valuation by construction.
    */
   public getStockAgeing(filter: StockReportFilter = {}): StockAgeingReport {
-    return stockAgeing(this.db, filter);
+    return stockAgeing(this.db, { ...filter, asAtDate: filter.asAtDate ?? this.today() });
   }
 
   /**
@@ -1289,7 +1289,7 @@ export class AccountingRepository {
    * came in and how firm that date is. `getInventoryValuation` is this grouped by item.
    */
   public getInventoryValuationDetail(filter: StockReportFilter = {}): InventoryValuationDetailReport {
-    return inventoryValuationDetail(this.db, filter);
+    return inventoryValuationDetail(this.db, { ...filter, asAtDate: filter.asAtDate ?? this.today() });
   }
 
   /** Session 12, report 1. One customer's account with a running balance. See reports-customers.ts. */
@@ -1304,7 +1304,7 @@ export class AccountingRepository {
 
   /** Session 12, report 3. The overdue subset of Customer Balance Detail, with contact details. */
   public getCollections(filter: CustomerBalanceFilter = {}): CollectionsReport {
-    return buildCollectionsReport(this.db, filter);
+    return buildCollectionsReport(this.db, { ...filter, asAtDate: filter.asAtDate ?? this.today() });
   }
 
   /** Session 12, report 6. Revenue less cost of goods, per item. See reports-profitability.ts. */
@@ -1410,6 +1410,8 @@ export class AccountingRepository {
     businessId?: string;
     /** The date the journal entry carries (YYYY-MM-DD, IST). Defaults to today. */
     occurredOn?: string;
+    /** Q12: confirm a movement dated in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
   }): StockMovement {
     if (input.movementType === "PURCHASE") {
       throw new RepositoryValidationError("Stock comes in through a purchase bill, opening stock, or a stock adjustment.");
@@ -1440,8 +1442,9 @@ export class AccountingRepository {
     const businessId = posts
       ? this.resolveStockMovementBusiness(item.company_id, input.businessId, input.movementType)
       : undefined;
-    const entryDate = input.occurredOn ?? istDateOf();
+    const entryDate = input.occurredOn ?? this.today();
     if (businessId === undefined) this.assertStockDateOpen(item.company_id, input.businessId, entryDate);
+    else this.assertPostable(businessId, entryDate, input.confirmBackdatedMonth, "stock movement", "record");
     const movementId = randomUUID();
     const journalEntryId = `je-stock-movement-${movementId}`;
     const movement: StockMovement = {
@@ -1505,6 +1508,8 @@ export class AccountingRepository {
     reason?: string;
     businessId?: string;
     fairId?: string;
+    /** Q12: confirm a write-down dated in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
   }): StockWriteDownResult {
     if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
       throw new RepositoryValidationError("A write-down quantity must be a positive whole number.");
@@ -1540,8 +1545,9 @@ export class AccountingRepository {
     const businessId = valuePaise > 0
       ? this.resolveStockMovementBusiness(item.company_id, input.businessId, "ADJUSTMENT")
       : undefined;
-    const entryDate = input.occurredOn ?? istDateOf();
+    const entryDate = input.occurredOn ?? this.today();
     if (businessId === undefined) this.assertStockDateOpen(item.company_id, input.businessId, entryDate);
+    else this.assertPostable(businessId, entryDate, input.confirmBackdatedMonth, "stock write-down", "record");
     const writedownId = randomUUID();
     const journalEntryId = `je-stock-writedown-${writedownId}`;
 
@@ -1669,7 +1675,7 @@ export class AccountingRepository {
         "This entry has no ledger entry to reverse (it pre-dates stock posting). Run the stock journal backfill first, then reverse it.",
       );
     }
-    const entryDate = istDateOf();
+    const entryDate = this.today();
     const kind = row.movement_type === "OPENING" ? "opening stock" : "stock adjustment";
     return this.db.transaction(() => {
       const movementId = this.insertStockMovement({
@@ -1712,7 +1718,7 @@ export class AccountingRepository {
     if (valuePaise > 0 && original === undefined) {
       throw new RepositoryValidationError("This write-down has no ledger entry to reverse.");
     }
-    const entryDate = istDateOf();
+    const entryDate = this.today();
     return this.db.transaction(() => {
       const movementIds = rows.map((row) => this.insertStockMovement({
         itemId: row.item_id, sourceId: writedownId, movementType: "ADJUSTMENT_REVERSAL",
@@ -2124,7 +2130,7 @@ export class AccountingRepository {
   /** Saves a draft invoice or quotation and returns its number (the app's, unless the import path gave one). */
   public saveDraft(invoice: NewInvoice & MoneyFieldsInput): string {
     return this.db.transaction((): string => {
-      const date = invoice.invoiceDate ?? istDateOf();
+      const date = invoice.invoiceDate ?? this.today();
       const number = invoice.number
         ?? this.nextBusinessNumber(invoice.status === "QUOTATION" ? "QUO" : "INV", invoice.businessId, date);
       this.saveDraftNumbered({ ...invoice, number });
@@ -2154,7 +2160,7 @@ export class AccountingRepository {
           // then read back by invoiceEntryDate and posted to the journal, so the document, the
           // P&L period and the General Ledger all carried it. The rest of the app has always
           // used IST for a business date (see journal-dimensions-schema.ts).
-          invoice.invoiceDate ?? istDateOf(),
+          invoice.invoiceDate ?? this.today(),
           invoice.dueDate ?? null,
           invoice.discountPaise ?? 0,
           invoice.extraChargePaise ?? 0,
@@ -2248,7 +2254,7 @@ export class AccountingRepository {
           // then read back by invoiceEntryDate and posted to the journal, so the document, the
           // P&L period and the General Ledger all carried it. The rest of the app has always
           // used IST for a business date (see journal-dimensions-schema.ts).
-          invoice.invoiceDate ?? istDateOf(),
+          invoice.invoiceDate ?? this.today(),
           invoice.dueDate ?? null,
           invoice.discountPaise ?? 0,
           invoice.extraChargePaise ?? 0,
@@ -2333,7 +2339,7 @@ export class AccountingRepository {
     const noteDate = note.noteDate ?? null;
     if (noteDate !== null) this.assertIsoDate("Credit note date", noteDate);
     const transaction = this.db.transaction((): string => {
-      const number = note.number ?? this.nextBusinessNumber("CN", invoice.businessId, noteDate ?? istDateOf());
+      const number = note.number ?? this.nextBusinessNumber("CN", invoice.businessId, noteDate ?? this.today());
       this.db.prepare("INSERT INTO credit_notes (id, invoice_id, number, reason, note_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(note.id, note.invoiceId, number, note.reason, noteDate, note.status, new Date().toISOString());
       const statement = this.db.prepare("INSERT INTO credit_note_lines (credit_note_id, item_id, description, quantity, unit_price_paise) VALUES (?, ?, ?, ?, ?)");
@@ -2353,7 +2359,7 @@ export class AccountingRepository {
     }
   }
 
-  public finalizeCreditNote(creditNoteId: string, options: { readonly confirmBackdatedMonth?: boolean; readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
+  public finalizeCreditNote(creditNoteId: string, options: { readonly confirmBackdatedMonth?: boolean | undefined; readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const note = this.getCreditNote(creditNoteId);
       if (note.status !== "DRAFT") throw new RepositoryValidationError("Only draft credit notes can be finalized.");
@@ -2365,7 +2371,7 @@ export class AccountingRepository {
       this.assertInvoiceTakesCreditNote(invoice);
       // F: dated (or, undated, posting today) on or before the opening date: kept as history. The
       // financial-year lock and the back-dated-month confirm do not apply: nothing is posted.
-      if (this.assertHistoryConfirmed(invoice.businessId, note.noteDate ?? istDateOf(), options.confirmBeforeOpening)) {
+      if (this.assertHistoryConfirmed(invoice.businessId, note.noteDate ?? this.today(), options.confirmBeforeOpening)) {
         this.validateCreditNoteLines(invoice, note.lines);
         this.db.prepare("UPDATE credit_notes SET status = 'FINALIZED', refundable_paise = 0, before_opening = 1 WHERE id = ?").run(note.id);
         this.insertAuditEvent({ action: "credit_note.recorded_as_history", entityId: note.id, occurredAt: new Date().toISOString() });
@@ -2374,12 +2380,7 @@ export class AccountingRepository {
       if (note.noteDate !== undefined) {
         // S11-20/S11-21. The financial-year lock is checked FIRST and is absolute: no confirmation
         // can override it. The month guard only governs an earlier month inside an OPEN year.
-        assertPeriodOpen(this.db, invoice.businessId, note.noteDate);
-        if (note.noteDate.slice(0, 7) < istDateOf().slice(0, 7) && options.confirmBackdatedMonth !== true) {
-          throw new RepositoryValidationError(
-            `This credit note is dated ${readableDate(note.noteDate)}, in a month that has already passed. Posting it will change the figures already reported for ${readableMonth(note.noteDate)}. If that is what you want, confirm and finalize it again.`,
-          );
-        }
+        this.assertPostable(invoice.businessId, note.noteDate, options.confirmBackdatedMonth, "credit note", "finalize");
       }
       this.validateCreditNoteLines(invoice, note.lines);
       const taxablePaise = note.lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
@@ -2423,7 +2424,7 @@ export class AccountingRepository {
       // date, the day the goods came back, and then posts on that date, not on the day it is
       // finalized. The date is SPECIFIED by the owner, never guessed: a note saved with no date
       // keeps note_date NULL and posts on the day it is FINALIZED, exactly as S4-8 ruled, so
-      // `note.noteDate ?? istDateOf()` below is load-bearing, not dead code.
+      // `note.noteDate ?? this.today()` below is load-bearing, not dead code.
       //
       // Why the date matters: two payments of 3,000 on 20 and 30 January and a freight note raised
       // 25 January and finalized 10 February. Finalize-date posting puts the note in February
@@ -2437,7 +2438,7 @@ export class AccountingRepository {
       // whatever was confirmed. Cancellation is unchanged: its reversal is dated today.
       const dims = {
         businessId: invoice.businessId,
-        entryDate: note.noteDate ?? istDateOf(),
+        entryDate: note.noteDate ?? this.today(),
         ...fairDim(invoice.fairId),
       };
       this.insertJournalEntry(entry, dims);
@@ -2520,6 +2521,8 @@ export class AccountingRepository {
     creditNoteId: string;
     amountPaise: number;
     refundedOn: string;
+    /** Q12: confirm a refund dated in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
     /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
     paymentAccount?: "CASH" | "BANK" | undefined;
   } & MoneyFieldsInput): JournalEntry {
@@ -2549,6 +2552,7 @@ export class AccountingRepository {
       if (input.refundedOn < noteDate) {
         throw new RepositoryValidationError(`A refund cannot predate its credit note (${noteDate}).`);
       }
+      this.assertPostable(invoice.businessId, input.refundedOn, input.confirmBackdatedMonth, "refund", "record");
       const balance = this.getCreditNoteBalance(note.id);
       if (input.amountPaise > balance.outstandingPaise) {
         throw new RepositoryValidationError(
@@ -2599,6 +2603,8 @@ export class AccountingRepository {
     invoiceId: string;
     amountPaise: number;
     appliedOn: string;
+    /** Q12: confirm an application dated in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
   }): JournalEntry {
     return this.db.transaction(() => {
       const note = this.getCreditNote(input.creditNoteId);
@@ -2649,6 +2655,7 @@ export class AccountingRepository {
       if (input.appliedOn < targetDate) {
         throw new RepositoryValidationError(`A credit cannot be applied before the invoice it settles (${targetDate}).`);
       }
+      this.assertPostable(target.businessId, input.appliedOn, input.confirmBackdatedMonth, "credit application", "apply");
       const balance = this.getCreditNoteBalance(note.id);
       if (input.amountPaise > balance.outstandingPaise) {
         throw new RepositoryValidationError(
@@ -2823,7 +2830,7 @@ export class AccountingRepository {
         });
       }
 
-      const dims = { businessId: invoice.businessId, entryDate: istDateOf(), ...fairDim(invoice.fairId) };
+      const dims = { businessId: invoice.businessId, entryDate: this.today(), ...fairDim(invoice.fairId) };
       const reverse = (sourceEntryId: string, id: string, description: string): JournalEntry | undefined => {
         const lines = this.db
           .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
@@ -2997,6 +3004,15 @@ export class AccountingRepository {
    * Decides whether something dated `date` is HISTORY. Not history: false. History without the
    * caller's confirmation: refused with the same wording everywhere. History and confirmed: true.
    */
+  /**
+   * Q12. Financial-year lock FIRST (absolute), then the back-dated-month confirm. Callers have
+   * already dealt with history items (they post nothing and are never asked).
+   */
+  private assertPostable(businessId: string, date: string, confirmed: boolean | undefined, noun: string, verb: string): void {
+    assertPeriodOpen(this.db, businessId, date);
+    assertBackdatedConfirmed(this.db, date, confirmed, noun, verb);
+  }
+
   private assertHistoryConfirmed(businessId: string, date: string, confirmed: boolean | undefined): boolean {
     const opening = this.openingDateOf(businessId);
     if (opening === undefined || date.slice(0, 10) > opening) return false;
@@ -3021,7 +3037,7 @@ export class AccountingRepository {
     return row?.b === 1;
   }
 
-  public finalizeInvoice(invoiceId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
+  public finalizeInvoice(invoiceId: string, options: { readonly confirmBeforeOpening?: boolean; readonly confirmBackdatedMonth?: boolean } = {}): JournalEntry {
     const finalized = this.db.transaction(() => {
       const invoice = this.getInvoice(invoiceId);
       if (invoice.status !== "QUOTATION") this.assertInvoiceNumberFree(invoice.businessId, invoice.number, invoice.id); // safety net (D11)
@@ -3032,6 +3048,7 @@ export class AccountingRepository {
         this.insertAuditEvent({ action: "invoice.recorded_as_history", entityId: invoiceId, occurredAt: new Date().toISOString() });
         return this.historyNoEntry(invoiceId, `Invoice ${invoice.number} kept as history`, false);
       }
+      this.assertPostable(invoice.businessId, this.invoiceEntryDate(invoiceId), options.confirmBackdatedMonth, "invoice", "finalize");
       // R12b. A document paid at once debits the cash/bank account it was paid into. The engine
       // posts the settlement line to `paymentAccount` ('CASH' = paid at once), so that one line is
       // pointed at the chosen account here. The default (CASH) is the identical entry as before.
@@ -3115,7 +3132,7 @@ export class AccountingRepository {
         .prepare("UPDATE invoices SET status = ? WHERE id = ?")
         .run(result.invoice.status, invoiceId);
       // A cancellation is its own event, dated the day it happens (never the invoice's date).
-      const dims = { businessId: invoice.businessId, entryDate: istDateOf(), ...fairDim(invoice.fairId) };
+      const dims = { businessId: invoice.businessId, entryDate: this.today(), ...fairDim(invoice.fairId) };
       this.insertJournalEntry(result.reversalEntry, dims);
       if (inventoryCostPaise > 0) {
         this.insertJournalEntry(this.inventoryJournalEntry(invoice, inventoryCostPaise, true), dims);
@@ -3132,14 +3149,19 @@ export class AccountingRepository {
    * stable under both IST conversion and a plain UTC slice.
    */
   private paymentInstant(paidOn: string | undefined): string {
-    if (paidOn === undefined) return new Date().toISOString();
+    if (paidOn === undefined) {
+      // No date given: "today" from the one clock. The real instant when the clock is the real
+      // one (keeps the time of day); noon IST of the pinned day when "today" has been set.
+      const now = new Date().toISOString();
+      return istDateOf(now) === this.today() ? now : new Date(`${this.today()}T12:00:00+05:30`).toISOString();
+    }
     this.assertIsoDate("Payment date", paidOn);
     return new Date(`${paidOn}T12:00:00+05:30`).toISOString();
   }
 
   public recordPayment(
     invoiceId: string, amountPaise: number, paidOn?: string, moneyInput: MoneyFieldsInput = {},
-    options: { readonly confirmBeforeOpening?: boolean } = {},
+    options: { readonly confirmBeforeOpening?: boolean; readonly confirmBackdatedMonth?: boolean } = {},
   ): Payment & MoneyFields {
     const payment = this.db.transaction(() => {
       const paidAt = this.paymentInstant(paidOn);
@@ -3184,6 +3206,7 @@ export class AccountingRepository {
         this.insertAuditEvent({ action: "payment.recorded_as_history", entityId: invoiceId, occurredAt: new Date().toISOString() });
         return historyPayment;
       }
+      this.assertPostable(invoice.businessId, istDateOf(paidAt), options.confirmBackdatedMonth, "payment", "record");
       // DEFECT FIXED: this capped against the ORIGINAL invoice total and counted only the
       // `payments` table, so a credit note did not reduce what the customer could still pay.
       // On a credited invoice they could overpay, driving RECEIVABLES NEGATIVE with no error
@@ -3292,7 +3315,7 @@ export class AccountingRepository {
       const invoice = this.getInvoice(row.invoice_id);
       // The cancellation is dated today, so TODAY is the period that has to be open. The
       // original payment's own period stays untouched, which is the point of reversing.
-      const cancelledOn = istDateOf();
+      const cancelledOn = this.today();
       assertPeriodOpen(this.db, invoice.businessId, cancelledOn);
 
       const reversal = this.reversalOfPostedEntry(
@@ -3338,7 +3361,7 @@ export class AccountingRepository {
         ? (() => { const bill = this.getPurchaseBill(row.bill_id as string); return { id: bill.id, businessId: bill.businessId, fairId: bill.fairId, number: bill.number }; })()
         : (() => { const expense = this.getExpense(row.expense_id as string); return { id: expense.id, businessId: expense.businessId, fairId: expense.fairId, number: expense.number }; })();
 
-      const cancelledOn = istDateOf();
+      const cancelledOn = this.today();
       assertPeriodOpen(this.db, document.businessId, cancelledOn);
 
       const reversal = this.reversalOfPostedEntry(
@@ -3418,7 +3441,7 @@ export class AccountingRepository {
 
   /** The as-at date a report should use: the caller's, validated, or today in IST. */
   private asAtOrToday(asAtDate?: string): string {
-    if (asAtDate === undefined) return istDateOf();
+    if (asAtDate === undefined) return this.today();
     if (!isValidIsoDate(asAtDate)) {
       throw new RepositoryValidationError("As-at date must be a real date written as YYYY-MM-DD.");
     }
@@ -4513,7 +4536,7 @@ export class AccountingRepository {
     }
     // The year to report is the one containing the sheet's own date - its as-at date, or today
     // when it has none, which is the date an unbounded sheet is in fact read on.
-    const onDate = filter.asAtDate ?? istDateOf();
+    const onDate = filter.asAtDate ?? this.today();
     const year = years.find((candidate) => candidate.startsOn <= onDate && onDate <= candidate.endsOn);
     if (year === undefined) {
       return unsplit(`No financial year covers ${onDate}, so there is no year boundary to split at.`);
@@ -4917,7 +4940,7 @@ export class AccountingRepository {
   /** The invoice's own date (plain YYYY-MM-DD), or today in IST when the nullable column is empty. */
   private invoiceEntryDate(invoiceId: string): string {
     const row = this.db.prepare("SELECT invoice_date FROM invoices WHERE id = ?").get(invoiceId) as { invoice_date: string | null } | undefined;
-    return row?.invoice_date ?? istDateOf();
+    return row?.invoice_date ?? this.today();
   }
 
   private inventoryJournalEntry(invoice: Invoice, costPaise: number, reversal: boolean): JournalEntry {
@@ -4943,11 +4966,13 @@ export class AccountingRepository {
   /**
    * S17-10: a bill discount applies to STOCK items only, so it is refused when it is more than the
    * value of the stock lines (quantity x unit cost, before tax: the base spreadBillDiscount spreads
-   * over) and refused outright on a bill with no stock lines. Equal is allowed (stock at nil cost).
+   * over) and refused outright on a bill with no stock lines. Equal is allowed (stock at nil cost)
+   * unless it leaves nothing payable (S18-1).
    */
   private assertBillDiscountFitsStock(
     lines: ReadonlyArray<{ itemId?: string | undefined; quantity: number; unitPricePaise: number }>,
     discountPaise: number,
+    extraChargePaise = 0,
   ): void {
     if (discountPaise <= 0) return;
     const rupees = (paise: number): string => `Rs ${Math.floor(paise / 100)}.${String(paise % 100).padStart(2, "0")}`;
@@ -4968,6 +4993,15 @@ export class AccountingRepository {
       throw new RepositoryValidationError(
         `The bill discount (${rupees(discountPaise)}) is more than the value of the stock items on this bill (${rupees(stockValuePaise)}). ` +
           "A bill discount applies to stock items only — lower the discount or check the lines.",
+      );
+    }
+    // S18-1: payable = (all lines - discount + extra charges) + tax, as getPurchaseBill computes it;
+    // tax follows the taxable value, so a nil taxable value means a nil payable and the ledger would
+    // refuse the nil payable line at finalize. Refused at save instead.
+    const allLinesPaise = lines.reduce((sum, line) => sum + line.quantity * line.unitPricePaise, 0);
+    if (allLinesPaise - discountPaise + extraChargePaise <= 0) {
+      throw new RepositoryValidationError(
+        "The bill discount equals the whole bill, so nothing is payable. Record free stock as a stock adjustment instead.",
       );
     }
   }
@@ -5252,7 +5286,7 @@ export class AccountingRepository {
    * the draft insert so a period can never be generated twice. Drafts are never
    * finalized here; the user reviews and finalizes them through the normal flow.
    */
-  public generateDueInvoices(asOfDate: string = new Date().toISOString().slice(0, 10)): GenerateDueInvoicesResult {
+  public generateDueInvoices(asOfDate: string = this.today()): GenerateDueInvoicesResult {
     if (!isValidIsoDate(asOfDate)) {
       throw new RepositoryValidationError("As-of date must be a valid YYYY-MM-DD date.");
     }
@@ -5640,7 +5674,7 @@ export class AccountingRepository {
       if (!Number.isInteger(extraChargePaise) || extraChargePaise < 0) {
         throw new RepositoryValidationError("Bill extra charges must be a non-negative whole number of paise.");
       }
-      this.assertBillDiscountFitsStock(input.lines, discountPaise);
+      this.assertBillDiscountFitsStock(input.lines, discountPaise, extraChargePaise);
       if (discountPaise > subtotal) {
         throw new RepositoryValidationError("A bill discount cannot exceed the bill subtotal.");
       }
@@ -5724,7 +5758,7 @@ export class AccountingRepository {
     return ids.map((row) => this.getPurchaseBill(row.id));
   }
 
-  public finalizePurchaseBill(billId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
+  public finalizePurchaseBill(billId: string, options: { readonly confirmBeforeOpening?: boolean; readonly confirmBackdatedMonth?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const bill = this.getPurchaseBill(billId);
       if (bill.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase bills can be finalized.");
@@ -5735,7 +5769,8 @@ export class AccountingRepository {
         this.insertAuditEvent({ action: "purchase_bill.recorded_as_history", entityId: bill.id, occurredAt: new Date().toISOString() });
         return this.historyNoEntry(bill.id, `Purchase bill ${bill.number} kept as history`, false);
       }
-      this.assertBillDiscountFitsStock(bill.lines, bill.discountPaise);
+      this.assertPostable(bill.businessId, bill.billDate, options.confirmBackdatedMonth, "purchase bill", "finalize");
+      this.assertBillDiscountFitsStock(bill.lines, bill.discountPaise, bill.extraChargePaise);
       let expensePaise = 0;
       // S17-7 (owner ruling Q1): the header discount is on stock items only, so it is spread into
       // the stock lots; non-stock lines keep their full price.
@@ -5828,7 +5863,7 @@ export class AccountingRepository {
         });
       }
       const reversal = this.guard(() => reverseEntry(original, `je-bill-${bill.id}-reversal`, `Cancellation of purchase bill ${bill.number}`));
-      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: istDateOf(), ...fairDim(bill.fairId) });
+      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: this.today(), ...fairDim(bill.fairId) });
       this.db.prepare("UPDATE purchase_bills SET status = 'CANCELLED' WHERE id = ?").run(bill.id);
       this.insertAuditEvent({ action: "purchase_bill.cancelled", entityId: bill.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -5862,7 +5897,7 @@ export class AccountingRepository {
       }
       this.assertBillTakesReturn(bill);
       if (input.lines.length === 0) throw new RepositoryValidationError("A purchase return needs at least one line.");
-      const returnDate = input.returnDate ?? istDateOf();
+      const returnDate = input.returnDate ?? this.today();
       this.assertIsoDate("Return date", returnDate);
       if (returnDate < bill.billDate) {
         throw new RepositoryValidationError(`A return cannot predate the bill (${bill.billDate}).`);
@@ -5925,7 +5960,7 @@ export class AccountingRepository {
    *   Cr EXPENSE     for everything else
    *   Cr INPUT_CGST/SGST/IGST  - the input tax credit reversed
    */
-  public finalizePurchaseReturn(returnId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
+  public finalizePurchaseReturn(returnId: string, options: { readonly confirmBeforeOpening?: boolean; readonly confirmBackdatedMonth?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const ret = this.getPurchaseReturn(returnId);
       if (ret.status !== "DRAFT") throw new RepositoryValidationError("Only draft purchase returns can be finalized.");
@@ -5943,6 +5978,7 @@ export class AccountingRepository {
         this.insertAuditEvent({ action: "purchase_return.recorded_as_history", entityId: ret.id, occurredAt: new Date().toISOString() });
         return this.historyNoEntry(ret.id, `Purchase return ${ret.number} kept as history`, false);
       }
+      this.assertPostable(bill.businessId, ret.returnDate, options.confirmBackdatedMonth, "purchase return", "finalize");
 
       // The goods go back first: this both writes the PURCHASE_REVERSAL movements and tells us
       // how much of the value was stock, so INVENTORY is credited with exactly what left the
@@ -6028,7 +6064,7 @@ export class AccountingRepository {
       }
       const original = this.getJournalEntryById(`je-purchase-return-${ret.id}`);
       const reversal = this.guard(() => reverseEntry(original, `je-purchase-return-${ret.id}-reversal`, `Cancellation of purchase return ${ret.number}`));
-      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: istDateOf(), ...fairDim(bill.fairId) });
+      this.insertJournalEntry(reversal, { businessId: bill.businessId, entryDate: this.today(), ...fairDim(bill.fairId) });
       // The goods come back to us, at the very cost they left at, so the lot is restored to the
       // shape it had. Rebuilt from the RETURN'S OWN LINES rather than read back out of
       // stock_movements: those rows are stamped with the bill, because that is how getStockLayers
@@ -6109,6 +6145,8 @@ export class AccountingRepository {
     purchaseReturnId: string;
     amountPaise: number;
     refundedOn: string;
+    /** Q12: confirm a refund dated in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
     /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
     paymentAccount?: "CASH" | "BANK" | undefined;
   } & MoneyFieldsInput): JournalEntry {
@@ -6134,6 +6172,7 @@ export class AccountingRepository {
       }
       const bill = this.getPurchaseBill(ret.billId);
       if (bill === undefined) throw new RepositoryValidationError(`No purchase bill ${ret.billId}.`);
+      this.assertPostable(bill.businessId, input.refundedOn, input.confirmBackdatedMonth, "refund", "record");
       const refundDefault = input.moneyAccount === undefined && input.paymentAccount === undefined
         ? this.defaultRefundAccount("purchase_bills", "supplier_payments", "bill_id", bill.id, bill.paymentAccount)
         : undefined;
@@ -6559,7 +6598,7 @@ export class AccountingRepository {
     return ids.map((row) => this.getExpense(row.id));
   }
 
-  public finalizeExpense(expenseId: string, options: { readonly confirmBeforeOpening?: boolean } = {}): JournalEntry {
+  public finalizeExpense(expenseId: string, options: { readonly confirmBeforeOpening?: boolean; readonly confirmBackdatedMonth?: boolean } = {}): JournalEntry {
     return this.db.transaction(() => {
       const expense = this.getExpense(expenseId);
       if (expense.status !== "DRAFT") throw new RepositoryValidationError("Only draft expenses can be finalized.");
@@ -6569,6 +6608,7 @@ export class AccountingRepository {
         this.insertAuditEvent({ action: "expense.recorded_as_history", entityId: expense.id, occurredAt: new Date().toISOString() });
         return this.historyNoEntry(expense.id, `Expense ${expense.number} kept as history`, false);
       }
+      this.assertPostable(expense.businessId, expense.expenseDate, options.confirmBackdatedMonth, "expense", "finalize");
       const result = this.guard(() => purchaseEntry({
         entryId: `je-expense-${expense.id}`,
         sourceId: expense.id,
@@ -6603,7 +6643,7 @@ export class AccountingRepository {
       }
       const original = this.getSourceJournalEntry(expense.id, "EXPENSE");
       const reversal = this.guard(() => reverseEntry(original, `je-expense-${expense.id}-reversal`, `Cancellation of expense ${expense.number}`));
-      this.insertJournalEntry(reversal, { businessId: expense.businessId, entryDate: istDateOf(), ...fairDim(expense.fairId) });
+      this.insertJournalEntry(reversal, { businessId: expense.businessId, entryDate: this.today(), ...fairDim(expense.fairId) });
       this.db.prepare("UPDATE expenses SET status = 'CANCELLED' WHERE id = ?").run(expense.id);
       this.insertAuditEvent({ action: "expense.cancelled", entityId: expense.id, occurredAt: new Date().toISOString() });
       return reversal;
@@ -6685,6 +6725,7 @@ export class AccountingRepository {
           throw new RepositoryValidationError("A payment kept as history (dated on or before your opening date) cannot carry a settlement discount: nothing is posted for it.");
         }
       }
+      if (!paymentIsHistory) this.assertPostable(doc.businessId, istDateOf(paidAt), input.confirmBackdatedMonth, "payment", "record");
       const payment: SupplierPayment & MoneyFields = {
         id: randomUUID(),
         supplierId: doc.supplierId,
@@ -7215,6 +7256,8 @@ export class AccountingRepository {
     id: string;
     businessId: string;
     asAt: string;
+    /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
     lines: readonly OpeningBalanceLineInput[];
   }): string {
     const { companyId } = this.requireBusinessCompany(input.businessId);
@@ -7266,6 +7309,7 @@ export class AccountingRepository {
       );
     }
 
+    this.assertPostable(input.businessId, input.asAt, input.confirmBackdatedMonth, "opening balance", "save");
     const debitTotal = input.lines.reduce((total, line) => total + line.debitPaise, 0);
     const creditTotal = input.lines.reduce((total, line) => total + line.creditPaise, 0);
     const gap = debitTotal - creditTotal; // > 0: debits exceed credits, so the plug is a credit
@@ -7320,7 +7364,7 @@ export class AccountingRepository {
   }
 
   /** Posts the negation of the set's entry, dated `reversedOn`. The original is never touched. */
-  public reverseOpeningBalances(input: { id: string; reversedOn: string }): JournalEntry {
+  public reverseOpeningBalances(input: { id: string; reversedOn: string; confirmBackdatedMonth?: boolean | undefined }): JournalEntry {
     const header = this.db
       .prepare("SELECT id, business_id, as_at, journal_entry_id, reversed_at FROM opening_balances WHERE id = ?")
       .get(input.id) as
@@ -7334,6 +7378,7 @@ export class AccountingRepository {
     if (input.reversedOn < header.as_at) {
       throw new RepositoryValidationError(`The reversal date cannot be before the opening balance date ${header.as_at}.`);
     }
+    this.assertPostable(header.business_id, input.reversedOn, input.confirmBackdatedMonth, "reversal", "record");
     return this.db.transaction(() => {
       const lines = this.db
         .prepare("SELECT account, debit_paise, credit_paise FROM journal_lines WHERE journal_entry_id = ? ORDER BY id")
@@ -7422,6 +7467,8 @@ export class AccountingRepository {
     amountPaise: number;
     incomePaise: number;
     incomeAccount?: string;
+    /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
   }): string {
     const { companyId } = this.requireBusinessCompany(input.businessId);
     this.assertIsoDate("The opening balance date", input.asAt);
@@ -7448,6 +7495,7 @@ export class AccountingRepository {
       throw new RepositoryValidationError("That customer belongs to another company.");
     }
     if (input.incomeAccount !== undefined) this.requireOpeningIncomeAccount(input.incomeAccount, companyId);
+    this.assertPostable(input.businessId, input.asAt, input.confirmBackdatedMonth, "opening balance", "save");
     if (this.db.prepare("SELECT 1 FROM opening_customer_balances WHERE id = ?").get(input.id) !== undefined) {
       throw new RepositoryValidationError(`Opening customer balance ${input.id} already exists.`);
     }
@@ -7505,7 +7553,7 @@ export class AccountingRepository {
     return input.id;
   }
 
-  public reverseOpeningCustomerBalance(input: { id: string; reversedOn: string }): JournalEntry {
+  public reverseOpeningCustomerBalance(input: { id: string; reversedOn: string; confirmBackdatedMonth?: boolean | undefined }): JournalEntry {
     const header = this.db
       .prepare("SELECT id, business_id, as_at, journal_entry_id, reversed_at FROM opening_customer_balances WHERE id = ?")
       .get(input.id) as { id: string; business_id: string; as_at: string; journal_entry_id: string; reversed_at: string | null } | undefined;
@@ -7517,6 +7565,7 @@ export class AccountingRepository {
     if (input.reversedOn < header.as_at) {
       throw new RepositoryValidationError(`The reversal date cannot be before the opening balance date ${header.as_at}.`);
     }
+    this.assertPostable(header.business_id, input.reversedOn, input.confirmBackdatedMonth, "reversal", "record");
     // Once money has been collected, reversing the balance would leave the receipts with nothing to
     // settle and the cash view with income it had already recognised. Nothing is edited or deleted:
     // the way to correct it is to reverse the receipts' effect first, which this slice does not offer.
@@ -7583,6 +7632,8 @@ export class AccountingRepository {
     openingCustomerBalanceId: string;
     amountPaise: number;
     receivedOn: string;
+    /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
     /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
     paymentAccount?: "CASH" | "BANK" | undefined;
   } & MoneyFieldsInput): JournalEntry {
@@ -7603,6 +7654,7 @@ export class AccountingRepository {
       if (input.receivedOn <= balance.as_at) {
         throw new RepositoryValidationError(`This receipt is dated on or before the opening date (${balance.as_at}), so it is already included in the opening balance.`);
       }
+      this.assertPostable(balance.business_id, input.receivedOn, input.confirmBackdatedMonth, "receipt", "record");
       if (this.db.prepare("SELECT 1 FROM opening_balance_receipts WHERE id = ?").get(input.id) !== undefined) {
         throw new RepositoryValidationError(`Receipt ${input.id} already exists.`);
       }
@@ -7650,6 +7702,8 @@ export class AccountingRepository {
     supplierId: string;
     asAt: string;
     amountPaise: number;
+    /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
   }): string {
     const { companyId } = this.requireBusinessCompany(input.businessId);
     this.assertIsoDate("The opening balance date", input.asAt);
@@ -7670,6 +7724,7 @@ export class AccountingRepository {
         `This supplier already has an opening balance (${live.id}). Reverse it first, then enter the corrected one.`,
       );
     }
+    this.assertPostable(input.businessId, input.asAt, input.confirmBackdatedMonth, "opening balance", "save");
     const journalEntryId = `je-opening-supplier-${input.id}`;
     const now = new Date().toISOString();
     this.db.transaction(() => {
@@ -7703,7 +7758,7 @@ export class AccountingRepository {
     return input.id;
   }
 
-  public reverseOpeningSupplierBalance(input: { id: string; reversedOn: string }): JournalEntry {
+  public reverseOpeningSupplierBalance(input: { id: string; reversedOn: string; confirmBackdatedMonth?: boolean | undefined }): JournalEntry {
     const header = this.db
       .prepare("SELECT id, business_id, as_at, journal_entry_id, reversed_at FROM opening_supplier_balances WHERE id = ?")
       .get(input.id) as { id: string; business_id: string; as_at: string; journal_entry_id: string; reversed_at: string | null } | undefined;
@@ -7715,6 +7770,7 @@ export class AccountingRepository {
     if (input.reversedOn < header.as_at) {
       throw new RepositoryValidationError(`The reversal date cannot be before the opening balance date ${header.as_at}.`);
     }
+    this.assertPostable(header.business_id, input.reversedOn, input.confirmBackdatedMonth, "reversal", "record");
     if (this.db.prepare("SELECT 1 FROM opening_balance_settlements WHERE opening_supplier_balance_id = ?").get(input.id) !== undefined) {
       throw new RepositoryValidationError(`Opening supplier balance ${input.id} has settlements recorded against it, so it can no longer be reversed.`);
     }
@@ -7758,6 +7814,8 @@ export class AccountingRepository {
     openingSupplierBalanceId: string;
     amountPaise: number;
     paidOn: string;
+    /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+    confirmBackdatedMonth?: boolean | undefined;
     /** The old CASH | BANK choice; still accepted. Same as `moneyAccount`; the two must agree. */
     paymentAccount?: "CASH" | "BANK" | undefined;
   } & MoneyFieldsInput): JournalEntry {
@@ -7778,6 +7836,7 @@ export class AccountingRepository {
       if (input.paidOn <= balance.as_at) {
         throw new RepositoryValidationError(`This settlement is dated on or before the opening date (${balance.as_at}), so it is already included in the opening balance.`);
       }
+      this.assertPostable(balance.business_id, input.paidOn, input.confirmBackdatedMonth, "settlement", "record");
       if (this.db.prepare("SELECT 1 FROM opening_balance_settlements WHERE id = ?").get(input.id) !== undefined) {
         throw new RepositoryValidationError(`Settlement ${input.id} already exists.`);
       }

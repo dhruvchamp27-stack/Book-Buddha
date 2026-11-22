@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import { excludedOpeningBalances, openCustomerItemRows } from "./open-items.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Session 12, section 0a: the shared open-items query — the ONE definition of what a customer
@@ -15,7 +16,7 @@ import { excludedOpeningBalances, openCustomerItemRows } from "./open-items.js";
 const AS_AT = "2026-04-01";
 
 function world() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-03-20"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });

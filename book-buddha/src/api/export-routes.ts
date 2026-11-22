@@ -43,7 +43,7 @@ export function registerExportRoutes(app: FastifyInstance, context: ExportRoutes
     const scope = Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined));
     const exported = buildExport(context.repository, dataset, scope);
     const now = new Date();
-    const day = now.toISOString().slice(0, 10);
+    const day = context.repository.today(); // file-name date: IST today from the one clock
     if (format === "json") {
       return reply
         .header("Content-Disposition", `attachment; filename="${dataset}-${day}.json"`)

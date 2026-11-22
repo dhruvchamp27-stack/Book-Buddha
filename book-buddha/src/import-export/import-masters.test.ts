@@ -4,6 +4,7 @@ import { parseTabular, type DateFormat } from "./codec.js";
 import { buildExport, toCsv } from "./exports.js";
 import { runImport, suggestColumnMap, type ImportMode, type ImportResult } from "./import-engine.js";
 import { MASTER_IMPORT_KINDS } from "./import-masters.js";
+import { moveToday, todayAt } from "../database/test-clock.js";
 
 /**
  * R10-C: the master-data import kinds. Each "Must pass" item of the design has a named test.
@@ -11,7 +12,7 @@ import { MASTER_IMPORT_KINDS } from "./import-masters.js";
  */
 
 function world(): { repository: AccountingRepository; companyId: string; businessId: string } {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-03-31"));
   const companyId = repository.createCompany({ name: "Co" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   return { repository, companyId, businessId };
@@ -258,6 +259,27 @@ describe("master data import kinds", () => {
     expect(statuses(result)).toEqual(["CREATED", "FAILED"]);
     expect(w.repository.listOpeningSupplierBalances(w.businessId)[0]).toMatchObject({ amountPaise: 750050 });
     expect(statuses(run(w, "opening-supplier-balances", file))).toEqual(["SKIPPED", "FAILED"]);
+  });
+
+  it("Q12 + R10: opening imports dated in a month already passed still post (the commit is the confirmation)", () => {
+    const w = world();
+    moveToday(w.repository, "2026-09-15");
+    run(w, "customers", csv([["Name"], ["Greenfield School"]]));
+    run(w, "suppliers", csv([["Name"], ["Paper Mill"]]));
+    // the guard is real: the same save straight to the repository, unconfirmed, is refused
+    const supplierId = w.repository.listSuppliers(w.companyId)[0]?.id ?? "";
+    expect(() => w.repository.saveOpeningSupplierBalance({
+      id: "direct", businessId: w.businessId, supplierId, asAt: "2026-03-31", amountPaise: 100,
+    })).toThrow(/in a month that has already passed/);
+    expect(statuses(run(w, "opening-balances", csv([
+      ["As at", "Account", "Debit", "Credit"], ["2026-04-01", "BANK", "100", ""], ["2026-04-01", "CAPITAL", "", "100"],
+    ])))).toEqual(["CREATED"]);
+    expect(statuses(run(w, "opening-customer-balances", csv([
+      ["Customer", "As at", "Amount"], ["Greenfield School", "2026-03-31", "5000"],
+    ])))).toEqual(["CREATED"]);
+    expect(statuses(run(w, "opening-supplier-balances", csv([
+      ["Supplier", "As at", "Amount"], ["Paper Mill", "2026-03-31", "7500"],
+    ])))).toEqual(["CREATED"]);
   });
 
   it("a bad amount or date fails that row and names the row and column", () => {

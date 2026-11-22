@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { registerToday } from "../database/ist-date.js";
 import { registerAttachmentRoutes } from "./attachment-routes.js";
 import { registerBackupRoutes } from "./backup-routes.js";
 import { registerExportRoutes } from "./export-routes.js";
@@ -18,7 +19,6 @@ import { suggestFor } from "../banking/bank-rules.js";
 import type { NewCreditNote, NewInvoice } from "../accounting/types.js";
 import { ACCOUNT_TYPES } from "../database/chart-accounts-schema.js";
 import { auditActor } from "../database/audit-log.js";
-import { istDateOf } from "../database/ist-date.js";
 import {
   AccountingRepository,
   AuthenticationError,
@@ -119,11 +119,12 @@ const cancellationInput = z.object({ reason: z.string().trim().min(1).optional()
 const openingBalanceInput = z.object({
   businessId: id,
   asAt: isoDate,
+  confirmBackdatedMonth: z.boolean().optional(),
   lines: z
     .array(z.object({ account: id, debitPaise: z.number().int().nonnegative(), creditPaise: z.number().int().nonnegative() }))
     .min(1),
 });
-const openingBalanceReverseInput = z.object({ reversedOn: isoDate });
+const openingBalanceReverseInput = z.object({ reversedOn: isoDate, confirmBackdatedMonth: z.boolean().optional() });
 const openingCustomerBalanceInput = z.object({
   businessId: id,
   customerId: id,
@@ -131,10 +132,11 @@ const openingCustomerBalanceInput = z.object({
   amountPaise: z.number().int().positive(),
   incomePaise: z.number().int().nonnegative().default(0),
   incomeAccount: id.optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
 });
-const openingSupplierBalanceInput = z.object({ businessId: id, supplierId: id, asAt: isoDate, amountPaise: z.number().int().positive() });
-const openingReceiptInput = z.object({ amountPaise: z.number().int().positive(), receivedOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]).optional(), ...moneyFields });
-const openingSettlementInput = z.object({ amountPaise: z.number().int().positive(), paidOn: isoDate, paymentAccount: z.enum(["CASH", "BANK"]).optional(), ...moneyFields });
+const openingSupplierBalanceInput = z.object({ businessId: id, supplierId: id, asAt: isoDate, amountPaise: z.number().int().positive(), confirmBackdatedMonth: z.boolean().optional() });
+const openingReceiptInput = z.object({ amountPaise: z.number().int().positive(), receivedOn: isoDate, confirmBackdatedMonth: z.boolean().optional(), paymentAccount: z.enum(["CASH", "BANK"]).optional(), ...moneyFields });
+const openingSettlementInput = z.object({ amountPaise: z.number().int().positive(), paidOn: isoDate, confirmBackdatedMonth: z.boolean().optional(), paymentAccount: z.enum(["CASH", "BANK"]).optional(), ...moneyFields });
 const activeOnlyQuery = (value: string | undefined): boolean => value === "true" || value === "1";
 const invoiceInput = z.object({
   id: id.optional(),
@@ -146,7 +148,7 @@ const invoiceInput = z.object({
   fairId: id.optional(),
   buyerName: name.optional(),
   buyerContact: z.string().trim().min(1).optional(),
-  invoiceDate: z.string().date().default(() => istDateOf()),
+  invoiceDate: z.string().date().optional(), // omitted: filled from the one clock at request time
   dueDate: z.string().date().optional(),
   discountPaise: z.number().int().nonnegative().default(0),
   extraChargePaise: z.number().int().nonnegative().default(0),
@@ -156,7 +158,7 @@ const invoiceInput = z.object({
   taxRateBasisPoints: z.number().int().min(0).max(10000).default(0),
   lines: z.array(invoiceLine).min(1),
 }).superRefine((input, context) => {
-  if (input.dueDate !== undefined && input.dueDate < input.invoiceDate) {
+  if (input.dueDate !== undefined && input.invoiceDate !== undefined && input.dueDate < input.invoiceDate) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["dueDate"],
@@ -217,7 +219,7 @@ const purchaseBillInput = z.object({
   fairId: id.optional(),
   number: name,
   supplierInvoiceNumber: optionalText.optional(),
-  billDate: z.string().date().default(() => istDateOf()),
+  billDate: z.string().date().optional(),
   dueDate: z.string().date().optional(),
   notes: z.string().trim().optional(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
@@ -239,7 +241,7 @@ const expenseInput = z.object({
   categoryId: id.optional(),
   fairId: id.optional(),
   number: name,
-  expenseDate: z.string().date().default(() => istDateOf()),
+  expenseDate: z.string().date().optional(),
   description: name,
   amountPaise: z.number().int().positive(),
   paymentAccount: z.enum(["CASH", "PAYABLES"]),
@@ -254,12 +256,17 @@ const supplierPaymentInput = z.object({
   settlementDiscountPaise: z.number().int().min(0).optional(),
   paidOn,
   confirmBeforeOpening: z.boolean().optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
   ...moneyFields,
 });
 // F: finalize bodies for the documents that can be dated on or before the opening date (kept as history).
-const finalizeHistoryInput = z.object({ confirmBeforeOpening: z.boolean().optional() }).optional();
-const historyOptions = (input: { confirmBeforeOpening?: boolean | undefined } | undefined): { confirmBeforeOpening?: boolean } =>
-  input?.confirmBeforeOpening === true ? { confirmBeforeOpening: true } : {};
+const finalizeHistoryInput = z.object({ confirmBeforeOpening: z.boolean().optional(), confirmBackdatedMonth: z.boolean().optional() }).optional();
+const historyOptions = (
+  input: { confirmBeforeOpening?: boolean | undefined; confirmBackdatedMonth?: boolean | undefined } | undefined,
+): { confirmBeforeOpening?: boolean; confirmBackdatedMonth?: boolean } => ({
+  ...(input?.confirmBeforeOpening === true ? { confirmBeforeOpening: true } : {}),
+  ...(input?.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}),
+});
 const documentStatus = (value: string | undefined): "DRAFT" | "FINALIZED" | "CANCELLED" | undefined => {
   if (value === undefined) return undefined;
   if (value !== "DRAFT" && value !== "FINALIZED" && value !== "CANCELLED") {
@@ -271,6 +278,7 @@ const paymentInput = z.object({
   amountPaise: z.number().int().positive(),
   paidOn,
   confirmBeforeOpening: z.boolean().optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
   ...moneyFields,
 });
 const fairInput = z.object({
@@ -290,6 +298,7 @@ const stockMovementInput = z.object({
   businessId: id.optional(),
   /** R4c: the date the journal entry carries. The stock layer itself stays append-only. */
   occurredOn: z.string().date().optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
 });
 /** S10-4: take stock out by hand (shrinkage, breakage). Strict: an unknown key is a 400, not ignored. */
 const stockWriteDownInput = z.object({
@@ -299,6 +308,7 @@ const stockWriteDownInput = z.object({
   reason: z.string().trim().min(1).max(500).optional(),
   businessId: id.optional(),
   fairId: id.optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
 }).strict();
 /** S10-4: reverse a hand-entered movement or a whole write-down. */
 const stockReverseInput = z.object({
@@ -338,6 +348,7 @@ const supplierRefundInput = z.object({
   // The old CASH | BANK choice is still accepted; `moneyAccount` names ANY cash/bank account. If both
   // are sent they must agree. Neither sent = CASH.
   paymentAccount: z.enum(["CASH", "BANK"]).optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
   ...moneyFields,
 });
 
@@ -347,6 +358,7 @@ const creditNoteRefundInput = z.object({
   // The old CASH | BANK choice is still accepted; `moneyAccount` names ANY cash/bank account. If both
   // are sent they must agree. Neither sent = CASH.
   paymentAccount: z.enum(["CASH", "BANK"]).optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
   ...moneyFields,
 });
 
@@ -354,6 +366,7 @@ const creditNoteApplicationInput = z.object({
   invoiceId: id,
   amountPaise: z.number().int().positive(),
   appliedOn: z.string().date("Use a real date written as YYYY-MM-DD."),
+  confirmBackdatedMonth: z.boolean().optional(),
 });
 
 const recurringTemplateInput = z.object({
@@ -613,6 +626,11 @@ export interface BuildApiOptions {
    * here, in code, where a reader can see it.
    */
   readonly __unsafeDisableAuthForTests?: boolean;
+  /**
+   * G: the app's one settable "today" (ISO YYYY-MM-DD, IST), passed through to the repository's
+   * clock. Omitted, the repository keeps the clock it was built with (default: the real IST date).
+   */
+  readonly today?: () => string;
 
   /**
    * Folder the attachment FILES live in (R9). The metadata rows live in the database like
@@ -659,6 +677,19 @@ export function buildApi(
   options: BuildApiOptions = {},
 ): FastifyInstance {
   const app = Fastify({ logger: false });
+  if (options.today !== undefined) registerToday(repository.db, options.today);
+  // A date the caller left out is "today" from the repository's one clock, read per request.
+  const withToday = <T extends object, K extends string>(parsed: T, key: K): T & Record<K, string> => {
+    const given = (parsed as Record<string, string | undefined>)[key];
+    const filled = given ?? repository.today();
+    const dueDate = (parsed as Record<string, string | undefined>)["dueDate"];
+    // The schema cannot see the clock, so the "due date before the invoice date" check for a
+    // defaulted invoice date is made here, with the same wording the schema uses.
+    if (given === undefined && key === "invoiceDate" && dueDate !== undefined && dueDate < filled) {
+      throw new RequestValidationError([{ code: "custom", path: ["dueDate"], message: "Due date cannot be before the invoice date." }]);
+    }
+    return { ...parsed, [key]: filled } as T & Record<K, string>;
+  };
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof RequestValidationError) {
@@ -928,7 +959,7 @@ export function buildApi(
   /** Correction is by reversal only: the original set and its journal entry are never edited or deleted. */
   app.post<{ Params: { id: string } }>("/opening-balances/:id/reverse", async (request) => {
     const input = parseBody(openingBalanceReverseInput, request.body);
-    return { journalEntry: repository.reverseOpeningBalances({ id: request.params.id, reversedOn: input.reversedOn }) };
+    return { journalEntry: repository.reverseOpeningBalances({ id: request.params.id, reversedOn: input.reversedOn, confirmBackdatedMonth: input.confirmBackdatedMonth }) };
   });
 
   /**
@@ -946,6 +977,7 @@ export function buildApi(
       amountPaise: input.amountPaise,
       incomePaise: input.incomePaise,
       ...(input.incomeAccount === undefined ? {} : { incomeAccount: input.incomeAccount }),
+      confirmBackdatedMonth: input.confirmBackdatedMonth,
     });
     return reply.code(201).send({ id: balanceId });
   });
@@ -965,7 +997,7 @@ export function buildApi(
   /** Correction is by reversal only; refused once any money has been collected against the balance. */
   app.post<{ Params: { id: string } }>("/opening-customer-balances/:id/reverse", async (request) => {
     const input = parseBody(openingBalanceReverseInput, request.body);
-    return { journalEntry: repository.reverseOpeningCustomerBalance({ id: request.params.id, reversedOn: input.reversedOn }) };
+    return { journalEntry: repository.reverseOpeningCustomerBalance({ id: request.params.id, reversedOn: input.reversedOn, confirmBackdatedMonth: input.confirmBackdatedMonth }) };
   });
 
   app.post("/opening-supplier-balances", async (request, reply) => {
@@ -987,7 +1019,7 @@ export function buildApi(
 
   app.post<{ Params: { id: string } }>("/opening-supplier-balances/:id/reverse", async (request) => {
     const input = parseBody(openingBalanceReverseInput, request.body);
-    return { journalEntry: repository.reverseOpeningSupplierBalance({ id: request.params.id, reversedOn: input.reversedOn }) };
+    return { journalEntry: repository.reverseOpeningSupplierBalance({ id: request.params.id, reversedOn: input.reversedOn, confirmBackdatedMonth: input.confirmBackdatedMonth }) };
   });
 
   app.get<{ Querystring: { companyId?: string; includeInactive?: string } }>("/accounts", async (request) => {
@@ -1074,6 +1106,7 @@ export function buildApi(
       ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
       ...(input.businessId === undefined ? {} : { businessId: input.businessId }),
       ...(input.occurredOn === undefined ? {} : { occurredOn: input.occurredOn }),
+      ...(input.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}),
     }));
   });
 
@@ -1087,6 +1120,7 @@ export function buildApi(
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       ...(input.businessId === undefined ? {} : { businessId: input.businessId }),
       ...(input.fairId === undefined ? {} : { fairId: input.fairId }),
+      ...(input.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}),
     }));
   });
 
@@ -1118,7 +1152,7 @@ export function buildApi(
 
   app.post("/invoices", async (request, reply) => {
     refuseNumber(request.body);
-    const input = parseBody(invoiceInput, request.body);
+    const input = withToday(parseBody(invoiceInput, request.body), "invoiceDate");
     const invoice: NewInvoice = {
       id: input.id ?? randomUUID(),
       businessId: input.businessId,
@@ -1221,6 +1255,7 @@ export function buildApi(
       invoiceId: input.invoiceId,
       amountPaise: input.amountPaise,
       appliedOn: input.appliedOn,
+      ...(input.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}),
     });
     return reply.code(201).send({ journalEntry, balance: repository.getCreditNoteBalance(request.params.creditNoteId) });
   });
@@ -1231,7 +1266,7 @@ export function buildApi(
 
   app.post("/quotations", async (request, reply) => {
     refuseNumber(request.body);
-    const input = parseBody(invoiceInput, request.body);
+    const input = withToday(parseBody(invoiceInput, request.body), "invoiceDate");
     const quotation: NewInvoice = {
       id: input.id ?? randomUUID(),
       businessId: input.businessId,
@@ -1271,7 +1306,7 @@ export function buildApi(
     "/invoices/:invoiceId",
     async (request) => {
       refuseNumber(request.body);
-      const input = parseBody(invoiceInput, request.body);
+      const input = withToday(parseBody(invoiceInput, request.body), "invoiceDate");
       const invoice: NewInvoice = {
         id: request.params.invoiceId,
         businessId: input.businessId,
@@ -1460,7 +1495,7 @@ export function buildApi(
   );
 
   app.post("/purchase-bills", async (request, reply) => {
-    const input = parseBody(purchaseBillInput, request.body);
+    const input = withToday(parseBody(purchaseBillInput, request.body), "billDate");
     const { lines, ...rest } = input;
     const bill = repository.createPurchaseBill({
       ...definedOnly(rest),
@@ -1544,7 +1579,7 @@ export function buildApi(
     ({ reversalEntry: repository.cancelPurchaseBill(request.params.id) }));
 
   app.post("/expenses", async (request, reply) => {
-    const input = parseBody(expenseInput, request.body);
+    const input = withToday(parseBody(expenseInput, request.body), "expenseDate");
     return reply.code(201).send(repository.createExpense({
       ...definedOnly(input),
       businessId: input.businessId,
@@ -1582,6 +1617,7 @@ export function buildApi(
       ...(input.expenseId === undefined ? {} : { expenseId: input.expenseId }),
       ...(input.paidOn === undefined ? {} : { paidOn: input.paidOn }),
       ...(input.confirmBeforeOpening === true ? { confirmBeforeOpening: true } : {}),
+      ...(input.confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}),
       ...definedOnly({ moneyAccount: input.moneyAccount, paymentMode: input.paymentMode, paymentReference: input.paymentReference }),
     }));
   });

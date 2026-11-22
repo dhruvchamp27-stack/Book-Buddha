@@ -5,13 +5,14 @@ import { verifyAuditChain } from "../database/audit-log.js";
 import { applyMoneyMovementsSchema } from "./money-movements-schema.js";
 import { cancelInternalTransfer, createInternalTransfer } from "./internal-transfers.js";
 import { cancelVoucher, createVoucher, getVoucher, listVouchers } from "./vouchers.js";
+import { todayAt } from "../database/test-clock.js";
 
 const rs = (n: number): number => Math.round(n * 100);
 
 interface World { r: AccountingRepository; companyX: string; companyY: string; bizX: string; bizY: string }
 
 function world(): World {
-  const r = new AccountingRepository();
+  const r = new AccountingRepository(":memory:", todayAt("2025-10-20"));
   applyMoneyMovementsSchema(r.db);
   const companyX = r.createCompany({ name: "X Co", accountingBasis: "ACCRUAL" });
   const companyY = r.createCompany({ name: "Y Co", accountingBasis: "ACCRUAL" });

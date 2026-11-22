@@ -5,6 +5,7 @@ import {
   buildCollectionsReport, buildCustomerBalanceDetail, buildCustomerStatement,
   type CustomerStatement,
 } from "./reports-customers.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Session 12, reports 1, 2 and 3: customer statement, Customer Balance Detail and Collections.
@@ -46,7 +47,7 @@ afterEach(() => {
 const at = (isoDate: string): void => { vi.setSystemTime(new Date(`${isoDate}T06:00:00.000Z`)); };
 
 function world() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-03-31"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School", email: "school@example.test", phone: "111" });
@@ -64,7 +65,7 @@ function world() {
       // 100 units, so several credit notes can each return one without exceeding the quantity sold.
       lines: [{ itemId, description: "Novel", quantity: 100, unitPricePaise: paise / 100 }],
     });
-    repository.finalizeInvoice(id);
+    repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
   };
   const note = (id: string, invoiceId: string, paise: number, noteDate: string): void => {
     repository.saveCreditNote({
@@ -82,7 +83,7 @@ function handExample(w: World): { cancelledPaymentId: string } {
   const r = w.repository;
   at("2026-04-01");
   w.invoice("inv0", 500000, "2026-03-31");
-  r.recordPayment("inv0", 500000, "2026-03-31");
+  r.recordPayment("inv0", 500000, "2026-03-31", {}, { confirmBackdatedMonth: true });
   r.saveOpeningCustomerBalance({ id: "ocb1", businessId: w.businessId, customerId: w.customerId, asAt: "2026-04-01", amountPaise: 1000000, incomePaise: 0 });
   at("2026-04-05");
   w.invoice("inv1", 2500000, "2026-04-05");
@@ -91,9 +92,9 @@ function handExample(w: World): { cancelledPaymentId: string } {
   at("2026-04-07");
   w.note("cn1", "inv1", 500000, "2026-04-07");
   at("2026-04-09");
-  r.recordPayment("inv1", 1200000, "2026-04-09");
+  r.recordPayment("inv1", 1200000, "2026-04-09", {}, { confirmBackdatedMonth: true });
   at("2026-04-11");
-  const cancelled = r.recordPayment("inv1", 400000, "2026-04-11");
+  const cancelled = r.recordPayment("inv1", 400000, "2026-04-11", {}, { confirmBackdatedMonth: true });
   r.cancelPayment(cancelled.id, "Cheque bounced");
   at("2026-04-13");
   r.applyCreditNote({ id: "ap1", creditNoteId: "cn0", invoiceId: "inv1", amountPaise: 300000, appliedOn: "2026-04-13" });
@@ -261,7 +262,7 @@ describe("customer balance detail", () => {
       w.invoice("a", 300000, "2026-01-10");
       w.invoice("b", 900000, "2026-05-01");
       at("2026-03-01");
-      w.repository.recordPayment("a", 100000, "2026-03-01"); // AFTER the as-at below
+      w.repository.recordPayment("a", 100000, "2026-03-01", {}, { confirmBackdatedMonth: true }); // AFTER the as-at below
       at("2026-06-01");
       const detail = buildCustomerBalanceDetail(w.repository.db, { asAtDate: "2026-02-01" });
       const items = detail.groups.flatMap((g) => g.items);

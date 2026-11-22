@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildApi } from "../api/server.js";
 import { verifyAuditChain } from "./audit-log.js";
 import { AccountingRepository } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R4b - opening customer and supplier balances. Figures are PAISE in code; the rupee figure is in a
@@ -11,7 +12,7 @@ import { AccountingRepository } from "./repository.js";
 function world(): {
   repository: AccountingRepository; companyId: string; businessId: string; customerId: string; supplierId: string;
 } {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2024-04-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Book Fair Co" });
   const customerId = repository.createCustomer({ companyId, name: "Customer" });

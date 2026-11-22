@@ -4,6 +4,7 @@ import type { Invoice } from "../accounting/types.js";
 import { insertStatementLine, type LineSuggestion, type StatementLine } from "../banking/statement-lines.js";
 import { AccountingRepository, RepositoryValidationError } from "../database/repository.js";
 import { registerReviewQueueRoutes } from "./review-queue-routes.js";
+import { todayAt } from "../database/test-clock.js";
 
 const RS = (rupees: number): number => rupees * 100;
 
@@ -29,7 +30,7 @@ async function build(suggest?: (line: StatementLine) => LineSuggestion | null): 
 }
 
 beforeEach(() => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2025-10-02"));
   companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   businessId = repository.createBusiness({ companyId, name: "Biz" });
   const now = new Date().toISOString();

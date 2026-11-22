@@ -3,6 +3,7 @@ import { AccountingRepository } from "../database/repository.js";
 import { applyMoneyMovementsSchema } from "./money-movements-schema.js";
 import { createInternalTransfer } from "./internal-transfers.js";
 import { createVoucher } from "./vouchers.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * R12c test 11. Depends on Builder B's change to AccountingRepository.deriveCashView (entries with
@@ -12,7 +13,7 @@ let r: AccountingRepository;
 let businessId: string;
 
 beforeEach(() => {
-  r = new AccountingRepository();
+  r = new AccountingRepository(":memory:", todayAt("2025-10-01"));
   applyMoneyMovementsSchema(r.db);
   const companyId = r.createCompany({ name: "Co", accountingBasis: "CASH" });
   businessId = r.createBusiness({ companyId, name: "Biz" });

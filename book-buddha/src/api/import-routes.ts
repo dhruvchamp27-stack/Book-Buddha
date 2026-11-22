@@ -6,8 +6,9 @@
  *                          rowCount, the first 10 rows, and a suggested column map
  *   POST /imports/preview  { kind, fileName, contentBase64, columnMap, companyId, businessId?, dateFormat }
  *   POST /imports/commit   the same body; preview runs the real posting path and rolls back, commit keeps it
+ *                          (both answer `backdated`: rows dated in an earlier month than today, flagged per row in the outcomes)
  *                          (and writes one `import.committed` audit event)
- *   GET  /imports/last     per kind, the latest commit: { kind, committedAt, fileName, created, skipped, failed }
+ *   GET  /imports/last?companyId=  per kind, for that company only, the latest commit: { kind, committedAt, fileName, created, skipped, failed }
  *
  * TRANSPORT: base64 inside a JSON body, like attachments (S11-19), so every route that takes a
  * file carries a per-route `bodyLimit` (`IMPORT_BODY_LIMIT_BYTES`); Fastify's 1 MB default would
@@ -24,6 +25,7 @@ import { appendAuditEvent } from "../database/audit-log.js";
 import { RepositoryValidationError, type AccountingRepository } from "../database/repository.js";
 import { CodecError, parseTabular, type ParsedTabular } from "../import-export/codec.js";
 import { getImportKind, registeredKinds, runImport, suggestColumnMap } from "../import-export/import-engine.js";
+import { BACKDATED_MESSAGE } from "../import-export/import-documents.js";
 
 export const IMPORT_BODY_LIMIT_BYTES = 20 * 1024 * 1024;
 const SAMPLE_ROWS = 10;
@@ -45,6 +47,8 @@ const runBody = z.object({
   businessId: z.string().trim().min(1).optional(),
   dateFormat: z.enum(["YYYY-MM-DD", "DD/MM/YYYY", "DD-MM-YYYY"]),
 });
+
+const lastQuery = z.object({ companyId: z.string().trim().min(1) });
 
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
@@ -115,6 +119,10 @@ export function registerImportRoutes(app: FastifyInstance, context: ImportRoutes
         dateFormat: body.dateFormat,
         mode,
       });
+      // G: how many ROWS were dated in a month already reported (the preview flags them per row).
+      const backdated = result.outcomes
+        .filter((outcome) => outcome.message === BACKDATED_MESSAGE)
+        .reduce((total, outcome) => total + outcome.rowNumbers.length, 0);
       if (mode === "COMMIT") {
         appendAuditEvent(repository.db, {
           action: "import.committed",
@@ -122,17 +130,21 @@ export function registerImportRoutes(app: FastifyInstance, context: ImportRoutes
           entityType: "import",
           occurredAt: new Date().toISOString(),
           companyId: body.companyId,
-          afterValues: { kind: result.kind, fileName: body.fileName, created: result.created, skipped: result.skipped, failed: result.failed },
+          afterValues: { kind: result.kind, fileName: body.fileName, created: result.created, skipped: result.skipped, failed: result.failed, backdated },
         });
       }
-      return result;
+      return { ...result, backdated };
     });
   }
 
-  app.get("/imports/last", async () => {
+  app.get("/imports/last", async (request) => {
+    const { companyId } = parseBody(lastQuery, request.query);
+    if (!repository.listCompanies().some((c) => c.id === companyId)) {
+      throw new RepositoryValidationError(`Company ${companyId} was not found.`);
+    }
     const rows = repository.db
-      .prepare("SELECT occurred_at, after_values FROM audit_events WHERE action = 'import.committed' ORDER BY id DESC")
-      .all() as Array<{ occurred_at: string; after_values: string | null }>;
+      .prepare("SELECT occurred_at, after_values FROM audit_events WHERE action = 'import.committed' AND company_id = ? ORDER BY id DESC")
+      .all(companyId) as Array<{ occurred_at: string; after_values: string | null }>;
     const latest = new Map<string, { kind: string; committedAt: string; fileName: string; created: number; skipped: number; failed: number }>();
     for (const r of rows) {
       if (r.after_values === null) continue;

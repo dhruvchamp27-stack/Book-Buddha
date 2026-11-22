@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AccountingRepository, RepositoryValidationError, assertRoundingWithinTolerance } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * S11-22: the derived cash view must tie to the cash that actually moved, to the paise, with a
@@ -20,7 +21,7 @@ interface World {
 }
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-10"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Cust" });

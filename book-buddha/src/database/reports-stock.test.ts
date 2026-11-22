@@ -7,6 +7,7 @@ import {
   type InventoryValuationDetailReport, type StockAgeingReport,
 } from "./reports-stock.js";
 import { datedStockLayers } from "./stock-layers.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Session 12, reports 4 and 5: stock ageing and inventory valuation detail. Money is paise.
@@ -33,7 +34,7 @@ afterEach(() => {
 });
 
 function world() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-04-02"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });
@@ -45,7 +46,7 @@ function world() {
       id, number: id, businessId, customerId, paymentAccount: "CASH", status: "DRAFT",
       lines: [{ itemId, description: "Sale", quantity, unitPricePaise }],
     });
-    repository.finalizeInvoice(id);
+    repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
   };
   return { repository, companyId, businessId, customerId, supplierId, atlas, globe, sell };
 }
@@ -53,13 +54,13 @@ type World = ReturnType<typeof world>;
 
 function stockTheWorld(w: World): void {
   const r = w.repository;
-  r.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 5000, occurredOn: "2026-04-02" });
+  r.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 5000, occurredOn: "2026-04-02", confirmBackdatedMonth: true });
   const bill = r.createPurchaseBill({
     businessId: w.businessId, supplierId: w.supplierId, number: "BILL-A", billDate: "2026-06-01", paymentAccount: "PAYABLES",
     lines: [{ itemId: w.atlas, description: "Atlas", quantity: 20, unitPricePaise: 6000 }],
   });
-  r.finalizePurchaseBill(bill.id);
-  r.addStockMovement({ itemId: w.atlas, movementType: "ADJUSTMENT", quantity: 5, unitCostPaise: 7000, occurredOn: "2026-05-31" });
+  r.finalizePurchaseBill(bill.id, { confirmBackdatedMonth: true });
+  r.addStockMovement({ itemId: w.atlas, movementType: "ADJUSTMENT", quantity: 5, unitCostPaise: 7000, occurredOn: "2026-05-31", confirmBackdatedMonth: true });
   // S17: the door refuses a bare PURCHASE; this old-database shape (source-less, posts nothing) is
   // inserted by hand so the ageing and valuation figures stay as they were.
   r.db
@@ -194,13 +195,12 @@ describe("stock ageing and inventory valuation detail", () => {
       try {
         const r = w.repository;
         // The first layer goes in FIRST (so it is first in FIFO) at Rs 1. (S17: OPENING, not a bare PURCHASE.)
-        r.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 5, unitCostPaise: 100 });
+        r.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 5, unitCostPaise: 100, confirmBackdatedMonth: true });
         vi.setSystemTime(new Date("2026-07-01T07:00:00.000Z"));
         // The opening layer goes in LATER, optionally dated months earlier, at Rs 3.
         r.addStockMovement({
           itemId: w.atlas, movementType: "OPENING", quantity: 5, unitCostPaise: 300,
-          ...(occurredOn === undefined ? {} : { occurredOn }),
-        });
+          ...(occurredOn === undefined ? {} : { occurredOn }), confirmBackdatedMonth: true });
         vi.setSystemTime(new Date("2026-07-01T08:00:00.000Z"));
         w.sell("INV-1", w.atlas, 5, 900);
 
@@ -239,8 +239,8 @@ describe("stock ageing and inventory valuation detail", () => {
   it("boundary: a layer exactly 30 days old is in 0-30 and exactly 31 days old is in 31-60", () => {
     const w = world();
     try {
-      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 3, unitCostPaise: 1000, occurredOn: "2026-06-01" }); // 30 days
-      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 7, unitCostPaise: 1000, occurredOn: "2026-05-31" }); // 31 days
+      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 3, unitCostPaise: 1000, occurredOn: "2026-06-01", confirmBackdatedMonth: true }); // 30 days
+      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 7, unitCostPaise: 1000, occurredOn: "2026-05-31", confirmBackdatedMonth: true }); // 31 days
       const buckets = new Map(ageingFor(stockAgeing(w.repository.db, { asAtDate: AS_AT }), w.atlas).buckets.map((bucket) => [bucket.label, bucket] as const));
       expect(buckets.get("0-30 days")?.quantity).toBe(3);
       expect(buckets.get("31-60 days")?.quantity).toBe(7);
@@ -252,8 +252,8 @@ describe("stock ageing and inventory valuation detail", () => {
   it("boundary: exactly 90 days is 61-90 and exactly 91 days is Over 90 days", () => {
     const w = world();
     try {
-      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 2, unitCostPaise: 100, occurredOn: "2026-04-02" }); // 90 days
-      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 5, unitCostPaise: 100, occurredOn: "2026-04-01" }); // 91 days
+      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 2, unitCostPaise: 100, occurredOn: "2026-04-02", confirmBackdatedMonth: true }); // 90 days
+      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 5, unitCostPaise: 100, occurredOn: "2026-04-01", confirmBackdatedMonth: true }); // 91 days
       const buckets = new Map(ageingFor(stockAgeing(w.repository.db, { asAtDate: AS_AT }), w.atlas).buckets.map((bucket) => [bucket.label, bucket.quantity] as const));
       expect(buckets.get("61-90 days")).toBe(2);
       expect(buckets.get("Over 90 days")).toBe(5);
@@ -275,13 +275,13 @@ describe("stock ageing and inventory valuation detail", () => {
   it("returned goods age from the credit note's date and are NOT counted as a fallback", () => {
     const w = world();
     try {
-      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 5000, occurredOn: "2026-04-02" });
+      w.repository.addStockMovement({ itemId: w.atlas, movementType: "OPENING", quantity: 10, unitCostPaise: 5000, occurredOn: "2026-04-02", confirmBackdatedMonth: true });
       w.repository.saveDraft({
         id: "INV-R", number: "INV-R", businessId: w.businessId, customerId: w.customerId, paymentAccount: "RECEIVABLES", status: "DRAFT",
         taxType: "NONE", taxRateBasisPoints: 0,
         lines: [{ itemId: w.atlas, description: "Atlas", quantity: 4, unitPricePaise: 9000 }],
       });
-      w.repository.finalizeInvoice("INV-R");
+      w.repository.finalizeInvoice("INV-R", { confirmBackdatedMonth: true });
       w.repository.saveCreditNote({
         id: "CN-R", invoiceId: "INV-R", number: "CN-R", reason: "Returned", status: "DRAFT", noteDate: "2026-06-20",
         lines: [{ itemId: w.atlas, description: "Atlas", quantity: 3, unitPricePaise: 9000 }],

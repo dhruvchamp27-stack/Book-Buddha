@@ -17,6 +17,7 @@ import {
   runAutomaticBackup,
   verifyBackup,
 } from "./backup.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * Every file this suite touches lives in ONE fresh directory under os.tmpdir(), removed afterwards.
@@ -90,7 +91,7 @@ const figures = (repo: AccountingRepository) => ({
 
 describe("backup of real books", () => {
   it("restored books show exactly the same numbers", async () => {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     buildBooks(live);
     const before = figures(live);
     expect(before.trialBalance.length).toBeGreaterThan(3);
@@ -109,7 +110,7 @@ describe("backup of real books", () => {
     expect(result.preRestoreBackup).toBeNull();
     expect(result.verification.every((c) => c.ok)).toBe(true);
 
-    const restored = track(new AccountingRepository(target));
+    const restored = track(new AccountingRepository(target, todayAt("2026-01-01")));
     expect(figures(restored)).toEqual(before);
     const restoredEvents = restored.db.prepare("SELECT entity_id, entity_type FROM audit_events WHERE action = 'backup.restored'").all();
     expect(restoredEvents).toEqual([{ entity_id: manifest.id, entity_type: "backup" }]);
@@ -143,7 +144,7 @@ describe("backup of real books", () => {
 
 describe("verification", () => {
   async function oneBackup(): Promise<string> {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     buildBooks(live);
     const m = await createBackup(live.db, { backupsRoot, scope: "DATABASE_ONLY" });
     live.close();
@@ -204,7 +205,7 @@ describe("verification", () => {
 
 describe("scope", () => {
   it("EVERYTHING carries attachment files byte for byte; DATABASE_ONLY does not and says so", async () => {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     fs.mkdirSync(path.join(attachmentsRoot, "2026"), { recursive: true });
     const payload = Buffer.from([0, 1, 2, 3, 250, 251, 252]);
     fs.writeFileSync(path.join(attachmentsRoot, "2026", "scan.bin"), payload);
@@ -228,7 +229,7 @@ describe("scope", () => {
 
 describe("restore", () => {
   it("backs up what it replaces first, moves it aside, restores attachments, and keeps users and counters on request", async () => {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     const companyId = live.createCompany({ name: "Co" });
     live.createCustomer({ companyId, name: "A" });
     fs.mkdirSync(attachmentsRoot, { recursive: true });
@@ -265,7 +266,7 @@ describe("restore", () => {
     expect(fs.readFileSync(path.join(attachmentsRoot, "old.txt"), "utf8")).toBe("in the backup");
     expect(fs.existsSync(path.join(attachmentsRoot, "new.txt"))).toBe(false);
 
-    const restored = track(new AccountingRepository(dbPath));
+    const restored = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     expect(restored.db.prepare("SELECT COUNT(*) AS n FROM customers").get()).toEqual({ n: 1 });
     // preserveUsers: the current admin can still sign in.
     expect(restored.login(password).token).toBeTruthy();
@@ -275,7 +276,7 @@ describe("restore", () => {
   });
 
   it("without preserveUsers the backup's own users come back, and old sessions are discarded", async () => {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     const password = "Correct-Horse-Battery-42";
     live.setupAdmin({ password });
     live.login(password);
@@ -286,14 +287,14 @@ describe("restore", () => {
     const target = path.join(tmp, "elsewhere", "book-buddha.db");
     const result = await restoreBackup({ folder: resolveBackupFolder(backupsRoot, backup.id), targetDbPath: target });
     expect(result.warnings.join(" ")).toContain("sign in again");
-    const restored = track(new AccountingRepository(target));
+    const restored = track(new AccountingRepository(target, todayAt("2026-01-01")));
     expect((restored.db.prepare("SELECT COUNT(*) AS n FROM auth_sessions").get() as { n: number }).n).toBe(0);
     expect(restored.login(password).token).toBeTruthy();
     restored.close();
   });
 
   it("refuses a tampered backup and leaves an existing database exactly as it was", async () => {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     buildBooks(live);
     const backup = await createBackup(live.db, { backupsRoot, scope: "DATABASE_ONLY" });
     live.close();
@@ -306,7 +307,7 @@ describe("restore", () => {
   }, 15_000); // ~2s alone but 4-5s under the full suite's load; 5s default timed out once (S16).
 
   it("refuses to replace an existing database when no pre-restore location is given", async () => {
-    const live = track(new AccountingRepository(dbPath));
+    const live = track(new AccountingRepository(dbPath, todayAt("2026-01-01")));
     const backup = await createBackup(live.db, { backupsRoot, scope: "DATABASE_ONLY" });
     live.close();
     await expect(restoreBackup({ folder: resolveBackupFolder(backupsRoot, backup.id), targetDbPath: dbPath })).rejects.toThrow(/pre-restore/);
@@ -318,7 +319,7 @@ describe("automatic backups", () => {
   const hours = (n: number): Date => new Date(T0.getTime() + n * 3600_000);
 
   it("a second call within 24 hours does nothing, and one after 24 hours makes a new backup", async () => {
-    const repo = track(new AccountingRepository());
+    const repo = track(new AccountingRepository(":memory:", todayAt("2026-01-01")));
     const first = await runAutomaticBackup(repo.db, { backupsRoot, now: T0 });
     expect(first.created?.kind).toBe("AUTOMATIC");
     expect(first.created?.scope).toBe("DATABASE_ONLY");
@@ -330,7 +331,7 @@ describe("automatic backups", () => {
   });
 
   it("prunes automatic backups to exactly `keep` and never deletes a manual one", async () => {
-    const repo = track(new AccountingRepository());
+    const repo = track(new AccountingRepository(":memory:", todayAt("2026-01-01")));
     const manual = await createBackup(repo.db, { backupsRoot, scope: "DATABASE_ONLY", now: T0 });
     for (let day = 0; day < 5; day += 1) {
       await runAutomaticBackup(repo.db, { backupsRoot, keep: 3, now: hours(day * 24) });
@@ -344,14 +345,14 @@ describe("automatic backups", () => {
   });
 
   it("rejects a nonsense keep", async () => {
-    const repo = track(new AccountingRepository());
+    const repo = track(new AccountingRepository(":memory:", todayAt("2026-01-01")));
     await expect(runAutomaticBackup(repo.db, { backupsRoot, keep: 0 })).rejects.toBeInstanceOf(BackupError);
   });
 });
 
 describe("backup ids", () => {
   it("only an exact generated id is accepted", async () => {
-    const repo = track(new AccountingRepository());
+    const repo = track(new AccountingRepository(":memory:", todayAt("2026-01-01")));
     const m = await createBackup(repo.db, { backupsRoot, scope: "DATABASE_ONLY" });
     expect(BACKUP_ID_PATTERN.test(m.id)).toBe(true);
     for (const bad of ["..", "../x", "..\\x", "bk-1", ".tmp-" + m.id, m.id + "/..", "C:\\Windows"]) {

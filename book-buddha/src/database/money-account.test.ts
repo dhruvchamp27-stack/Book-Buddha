@@ -7,6 +7,7 @@ import { postJournalEntry } from "./ledger.js";
 import { migrations, runMigrations } from "./migrations.js";
 import { AccountingRepository } from "./repository.js";
 import { buildExport } from "../import-export/exports.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R12b - every money movement can go through ANY cash or bank account, with a payment mode and a
@@ -33,7 +34,7 @@ function addAccount(repository: AccountingRepository, code: string, companyId: s
 }
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2025-03-31"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const otherCompanyId = repository.createCompany({ name: "Other Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
@@ -283,7 +284,7 @@ describe("R12b money through any cash/bank account", () => {
       const fine = await post("/opening-customer-balances/ocb1/receipts", { amountPaise: 1_000, receivedOn: "2025-04-10", moneyAccount: "HDFC", paymentMode: "UPI", paymentReference: "UPI-9" });
       expect(fine.statusCode).toBe(201);
       const supplierBill = creditBill(w);
-      const sp = await post("/supplier-payments", { billId: supplierBill.id, amountPaise: 5_000, ...HDFC_FIELDS });
+      const sp = await post("/supplier-payments", { billId: supplierBill.id, amountPaise: 5_000, paidOn: "2025-10-06", ...HDFC_FIELDS }); // dated: today is pinned to 31 Mar, before the bill
       expect(sp.statusCode).toBe(201);
       expect(sp.json()).toMatchObject(HDFC_FIELDS);
       expect((await post("/supplier-payments", { billId: supplierBill.id, amountPaise: 5_000, moneyAccount: "AXIS_OTHER" })).statusCode).toBe(400);

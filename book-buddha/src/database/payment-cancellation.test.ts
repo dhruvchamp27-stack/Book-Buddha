@@ -5,6 +5,7 @@ import { migrations, runMigrations } from "./migrations.js";
 import { applyPaymentCancellationSchema } from "./payment-cancellation-schema.js";
 import { AccountingRepository } from "./repository.js";
 import type { Invoice } from "../accounting/types.js";
+import { moveToday, todayAt } from "./test-clock.js";
 
 /**
  * R8 — cancelling a payment, by reversal.
@@ -92,7 +93,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Asha" });
@@ -280,7 +281,7 @@ describe("R8: cancelling a customer payment", () => {
 
       // A year covering TODAY, locked. The payment's own period is irrelevant: the correction
       // lands today, so today is the period that has to be open.
-      const today = new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);
+      const today = w.repository.today(); // the pinned clock (ruling G)
       const year = w.repository.createFinancialYear({
         businessId: w.businessId, startsOn: `${today.slice(0, 4)}-01-01`, endsOn: `${today.slice(0, 4)}-12-31`,
       });
@@ -310,13 +311,16 @@ describe("R8: what a cancellation does to the two bases is NOT symmetric", () =>
       const may = { businessId: w.businessId, basis: "CASH", fromDate: "2026-05-01", toDate: "2026-05-31" } as const;
       expect(w.repository.getProfitAndLoss(may).netProfitPaise).toBe(100000);
 
+      // Ruling G: "today" is the repository's clock. Move it to June so the cancellation lands in a
+      // LATER month than May, which is what this test is about (the suite used to rely on the wall clock).
+      moveToday(w.repository, "2026-06-15");
       w.repository.cancelPayment(payment.id);
 
       // CASH (owner ruling S16-7(3), which REPLACES the old S8-1 rule that took the collection
       // back out of May): May stays at 100,000, a closed month never changes. The take-back is
       // dated by the reversal journal entry (today), so it shows there as minus 100,000.
       expect(w.repository.getProfitAndLoss(may).netProfitPaise).toBe(100000);
-      const today = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+      const today = w.repository.today();
       expect(w.repository.getProfitAndLoss({ businessId: w.businessId, basis: "CASH", fromDate: today, toDate: today }).netProfitPaise).toBe(-100000);
       expect(w.repository.getProfitAndLoss({ businessId: w.businessId, basis: "CASH" }).netProfitPaise).toBe(0);
 

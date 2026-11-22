@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { buildApi } from "./server.js";
 import { AccountingRepository } from "../database/repository.js";
+import { todayAt } from "../database/test-clock.js";
 
 describe("local API", () => {
   it("supports a validated invoice lifecycle", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyResponse = await app.inject({
@@ -90,7 +91,7 @@ describe("local API", () => {
   });
 
   it("returns a clear validation response", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const response = await app.inject({
@@ -109,7 +110,7 @@ describe("local API", () => {
   });
 
   it("rejects invoice references from different companies", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyA = (await app.inject({
@@ -180,7 +181,7 @@ describe("local API", () => {
   });
 
   it("updates drafts but rejects edits after finalization", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = app
@@ -231,7 +232,7 @@ describe("local API", () => {
   });
 
   it("records receivable payments and exposes ageing data", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Payment Company" } })).json<{ id: string }>().id;
@@ -265,7 +266,7 @@ describe("local API", () => {
   });
 
   it("creates fairs and reports finalized fair sales", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Fair API Company" } })).json<{ id: string }>().id;
@@ -303,7 +304,7 @@ describe("local API", () => {
   });
 
   it("adds inventory and rejects a sale that would make stock negative", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Stock API Company" } })).json<{ id: string }>().id;
@@ -339,7 +340,7 @@ describe("local API", () => {
   });
 
   it("lists credit notes, rejects over-returns and keeps ledger balanced", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "CN Company" } })).json<{ id: string }>().id;
@@ -367,13 +368,13 @@ describe("local API", () => {
 
       const drafts = await app.inject({ method: "GET", url: `/credit-notes?invoiceId=${invoiceId}` });
       expect(drafts.json<Array<{ status: string; totalPaise: number; invoiceNumber: string }>>())
-        .toEqual([expect.objectContaining({ status: "DRAFT", totalPaise: 20000, invoiceNumber: expect.stringMatching(/^INV-001\/\d{2}-\d{2}$/) })]);
+        .toEqual([expect.objectContaining({ status: "DRAFT", totalPaise: 20000, invoiceNumber: "INV-001/25-26" })]);
       expect((await app.inject({ method: "GET", url: "/credit-notes?status=FINALIZED" })).json()).toEqual([]);
       expect((await app.inject({ method: "GET", url: "/credit-notes?status=BOGUS" })).statusCode).toBe(400);
 
       expect((await app.inject({ method: "POST", url: `/credit-notes/${creditNoteId}/finalize` })).statusCode).toBe(200);
       const finalized = (await app.inject({ method: "GET", url: "/credit-notes?status=FINALIZED" })).json<Array<{ number: string; totalPaise: number }>>();
-      expect(finalized).toEqual([expect.objectContaining({ number: expect.stringMatching(/^CN-001\/\d{2}-\d{2}$/), totalPaise: 20000 })]);
+      expect(finalized).toEqual([expect.objectContaining({ number: "CN-001/25-26", totalPaise: 20000 })]);
 
       const pl = (await app.inject({ method: "GET", url: "/reports/profit-and-loss" })).json<{ totalIncomePaise: number }>();
       expect(pl.totalIncomePaise).toBe(10000);
@@ -388,7 +389,7 @@ describe("local API", () => {
    * refund path existed only inside the repository and nothing could reach it.
    */
   it("refunds, applies and cancels a credit note over HTTP", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       // A credit note is dated by its created_at, i.e. now, so every discharge date has to be
@@ -471,7 +472,7 @@ describe("local API", () => {
   });
 
   it("runs the auth flow: setup, login, session, change-password, logout", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       expect((await app.inject({ method: "GET", url: "/auth/status" })).json()).toEqual({ configured: false, locked: false });
@@ -503,7 +504,7 @@ describe("local API", () => {
   });
 
   it("locks the account after repeated wrong passwords (423)", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       await app.inject({ method: "POST", url: "/auth/setup", payload: { password: "Secret123" } });
@@ -521,7 +522,7 @@ describe("local API", () => {
   });
 
   it("manages recurring invoice templates and generates drafts", async () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const app = buildApi(repository, { __unsafeDisableAuthForTests: true });
     try {
       const companyId = (await app.inject({ method: "POST", url: "/companies", payload: { name: "Rec Co" } })).json<{ id: string }>().id;

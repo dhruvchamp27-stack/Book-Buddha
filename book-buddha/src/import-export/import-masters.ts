@@ -340,7 +340,8 @@ const openingBalancesKind: ImportKindDefinition = {
       debitPaise: cell(row, "debit") === "" ? 0 : parseField(row, "debit", "Debit", (t) => parseRupeesToPaise(t)),
       creditPaise: cell(row, "credit") === "" ? 0 : parseField(row, "credit", "Credit", (t) => parseRupeesToPaise(t)),
     }));
-    context.repository.saveOpeningBalances({ id: randomUUID(), businessId, asAt, lines });
+    // R10: committing the previewed file IS the confirmation, so a past-month As-at date is confirmed (Q12).
+    context.repository.saveOpeningBalances({ id: randomUUID(), businessId, asAt, lines, confirmBackdatedMonth: true });
     return { status: "CREATED", reference: asAt, message: `${lines.length} line${lines.length === 1 ? "" : "s"}` };
   },
 };
@@ -378,6 +379,7 @@ const openingCustomerBalancesKind: ImportKindDefinition = {
       amountPaise,
       incomePaise,
       ...(incomeAccount === undefined ? {} : { incomeAccount }),
+      confirmBackdatedMonth: true, // R10: the commit is the confirmation (Q12)
     });
     return { status: "CREATED", reference: name };
   },
@@ -404,7 +406,8 @@ const openingSupplierBalancesKind: ImportKindDefinition = {
     if (context.repository.listOpeningSupplierBalances(businessId).some((b) => b.supplierId === supplier.id && b.reversedAt === null)) {
       return { status: "SKIPPED", reference: name, message: "already has an opening balance" };
     }
-    context.repository.saveOpeningSupplierBalance({ id: randomUUID(), businessId, supplierId: supplier.id, asAt, amountPaise });
+    // R10: the commit is the confirmation (Q12).
+    context.repository.saveOpeningSupplierBalance({ id: randomUUID(), businessId, supplierId: supplier.id, asAt, amountPaise, confirmBackdatedMonth: true });
     return { status: "CREATED", reference: name };
   },
 };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /** S17-10: a bill discount applies to stock items only; too big, or no stock at all, is refused. */
 
@@ -11,7 +12,7 @@ const NO_STOCK =
   "This bill has no stock items, so it cannot carry a bill discount. A bill discount applies to stock items only.";
 
 function setup() {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-05-10"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const supplierId = repository.createSupplier({ companyId, name: "Paper Co" });
@@ -29,6 +30,72 @@ const stockLines = (w: World) => [
 const bill = (w: World, discountPaise: number, lines: ReturnType<typeof stockLines>, number = "B1") => ({
   businessId: w.businessId, supplierId: w.supplierId, number, billDate: "2026-05-10",
   paymentAccount: "PAYABLES" as const, discountPaise, lines,
+});
+
+const NOTHING_PAYABLE =
+  "The bill discount equals the whole bill, so nothing is payable. Record free stock as a stock adjustment instead.";
+
+describe("S18-1: a discount that leaves nothing payable is refused", () => {
+  const count = (w: World) =>
+    (w.repository.db.prepare("SELECT COUNT(*) AS c FROM purchase_bills").get() as { c: number }).c;
+
+  it("refuses at save an all-stock bill whose discount equals the stock value; nothing saved", () => {
+    const w = setup();
+    try {
+      expect(() => w.repository.createPurchaseBill(bill(w, 70000, stockLines(w)))).toThrow(NOTHING_PAYABLE);
+      expect(count(w)).toBe(0);
+    } finally { w.repository.close(); }
+  });
+
+  it("refuses at finalize (backstop) a draft that reached the nil-payable state directly", () => {
+    // The app has no draft-bill edit path, so the state is forced as the other refusals here do.
+    const w = setup();
+    try {
+      const saved = w.repository.createPurchaseBill(bill(w, 10000, stockLines(w)));
+      w.repository.db.prepare("UPDATE purchase_bills SET discount_paise = 70000 WHERE id = ?").run(saved.id);
+      expect(() => w.repository.finalizePurchaseBill(saved.id)).toThrow(NOTHING_PAYABLE);
+      expect(w.repository.getPurchaseBill(saved.id).status).toBe("DRAFT");
+    } finally { w.repository.close(); }
+  });
+
+  it("returns 400 with the message over HTTP", async () => {
+    const w = setup();
+    const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
+    try {
+      const response = await app.inject({
+        method: "POST", url: "/purchase-bills",
+        payload: { businessId: w.businessId, supplierId: w.supplierId, number: "B1", billDate: "2026-05-10", paymentAccount: "PAYABLES", discountPaise: 70000, lines: stockLines(w) },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.body).toContain(NOTHING_PAYABLE);
+    } finally {
+      await app.close();
+      w.repository.close();
+    }
+  });
+
+  it("still saves and posts when freight keeps the payable above zero (journal balanced)", () => {
+    const w = setup();
+    try {
+      const lines = [...stockLines(w), { itemId: w.serviceItemId, description: "Freight", quantity: 1, unitPricePaise: 5000 }];
+      const saved = w.repository.createPurchaseBill(bill(w, 70000, lines));
+      const entry = w.repository.finalizePurchaseBill(saved.id);
+      const debit = entry.lines.reduce((s, l) => s + l.debitPaise, 0);
+      const credit = entry.lines.reduce((s, l) => s + l.creditPaise, 0);
+      expect(debit).toBe(credit);
+      expect(w.repository.getPurchaseBill(saved.id).totalPaise).toBe(5000);
+    } finally { w.repository.close(); }
+  });
+
+  it("still saves and posts a discount one paisa below the stock value", () => {
+    const w = setup();
+    try {
+      const saved = w.repository.createPurchaseBill(bill(w, 69999, stockLines(w)));
+      const entry = w.repository.finalizePurchaseBill(saved.id);
+      expect(entry.lines.reduce((s, l) => s + l.debitPaise, 0)).toBe(entry.lines.reduce((s, l) => s + l.creditPaise, 0));
+      expect(w.repository.getPurchaseBill(saved.id).totalPaise).toBe(1);
+    } finally { w.repository.close(); }
+  });
 });
 
 describe("S17-10: bill discount versus stock value", () => {
@@ -64,14 +131,6 @@ describe("S17-10: bill discount versus stock value", () => {
         .prepare("SELECT COALESCE(SUM(quantity_delta * unit_cost_paise), 0) AS c FROM stock_movements WHERE item_id = ?")
         .get(w.stockItemId) as { c: number };
       expect(cost.c).toBe(0);
-    } finally { w.repository.close(); }
-  });
-
-  it("saves (but cannot post) a discount equal to the whole of an all-stock bill: nil total", () => {
-    const w = setup();
-    try {
-      const saved = w.repository.createPurchaseBill(bill(w, 70000, stockLines(w)));
-      expect(saved.status).toBe("DRAFT");
     } finally { w.repository.close(); }
   });
 

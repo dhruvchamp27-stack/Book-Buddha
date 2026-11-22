@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApi } from "../api/server.js";
 import { verifyAuditChain } from "../database/audit-log.js";
 import { AccountingRepository } from "../database/repository.js";
+import { todayAt } from "../database/test-clock.js";
 
 /**
  * ACCEPTANCE R12 set two, END TO END (orchestrator, S15). The same HDFC October as set one, but the
@@ -28,7 +29,7 @@ let repository: AccountingRepository;
 let app: FastifyInstance;
 
 beforeEach(async () => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2025-10-01"));
   app = buildApi(repository, { __unsafeDisableAuthForTests: true });
   await app.ready();
 });

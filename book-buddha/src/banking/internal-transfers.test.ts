@@ -5,6 +5,7 @@ import { verifyAuditChain } from "../database/audit-log.js";
 import { istDateOf } from "../database/ist-date.js";
 import { applyMoneyMovementsSchema } from "./money-movements-schema.js";
 import { cancelInternalTransfer, createInternalTransfer, listInternalTransfers } from "./internal-transfers.js";
+import { todayAt } from "../database/test-clock.js";
 
 /** Rupees to paise. */
 const rs = (n: number): number => Math.round(n * 100);
@@ -27,7 +28,7 @@ function addBank(r: AccountingRepository, code: string, companyId: string, type:
 }
 
 function world(): World {
-  const r = new AccountingRepository();
+  const r = new AccountingRepository(":memory:", todayAt("2025-04-01"));
   applyMoneyMovementsSchema(r.db);
   const companyX = r.createCompany({ name: "X Co", accountingBasis: "ACCRUAL" });
   const companyY = r.createCompany({ name: "Y Co", accountingBasis: "ACCRUAL" });
@@ -199,7 +200,7 @@ describe("internal transfers (R12c)", () => {
     expect(() => cancelInternalTransfer(w.r.db, t.id, "again")).toThrow(/already been cancelled/);
     // The number of a cancelled transfer is never reused (the year is reopened so a new one can be dated in it).
     w.r.setFinancialYearLocked(yearId, false);
-    expect(createInternalTransfer(w.r.db, { businessId: w.bizX, date: "2025-12-01", fromAccount: "CASH", toAccount: "HDFC", amountPaise: 1000 }).number).toBe("TRF-002/25-26");
+    expect(createInternalTransfer(w.r.db, { businessId: w.bizX, date: "2025-12-01", fromAccount: "CASH", toAccount: "HDFC", amountPaise: 1000, confirmBackdatedMonth: true }).number).toBe("TRF-002/25-26");
     // The audit trail holds the post, the cancel (with its reason), and still verifies.
     const actions = w.r.db.prepare("SELECT action, reason FROM audit_events WHERE entity_id = ? ORDER BY id").all(t.id);
     expect(actions).toEqual([

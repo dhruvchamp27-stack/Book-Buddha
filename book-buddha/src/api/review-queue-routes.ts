@@ -11,6 +11,7 @@
  *   POST  /bank-feed/lines/:id/exclude      { reason? }
  *   POST  /bank-feed/lines/:id/undo         { reason?, confirm? }
  *
+ * Every posting action also takes confirmBackdatedMonth (Q12): a bank line dated in an earlier month than today is refused without it.
  * confirm: false (or missing, where an action posts) answers { confirmed: false, willPost: [...] } and
  * writes NOTHING; confirm: true does it and answers { confirmed: true, line, links }.
  * Amounts are whole paise; a line's amount is + money IN to the bank account, - money OUT (a bank's
@@ -45,14 +46,16 @@ const addBody = z.object({
   partyName: z.string().optional(),
   narration: z.string().optional(),
   paymentMode: z.string().optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
   confirm: z.boolean(),
 });
-const confirmBody = z.object({ confirm: z.boolean() });
-const transferBody = z.object({ otherAccountCode: text, paymentMode: z.string().optional(), confirm: z.boolean() });
+const confirmBody = z.object({ confirm: z.boolean(), confirmBackdatedMonth: z.boolean().optional() });
+const transferBody = z.object({ otherAccountCode: text, paymentMode: z.string().optional(), confirm: z.boolean(), confirmBackdatedMonth: z.boolean().optional() });
 const matchBody = z.object({
   documents: z.array(z.object({ kind: z.enum(["INVOICE", "BILL"]), id: text, amountPaise: z.number().int() })).optional(),
   journalLineIds: z.array(z.number().int()).optional(),
   paymentMode: z.string().optional(),
+  confirmBackdatedMonth: z.boolean().optional(),
   confirm: z.boolean().optional(),
 });
 const excludeBody = z.object({ reason: z.string().optional() });

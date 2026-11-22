@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "./repository.js";
 import type { CreditNote, Invoice } from "../accounting/types.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R7b — `reports-sales.ts` and `reports-transactions.ts` were written and tested and then never
@@ -26,7 +27,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-08-15"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const otherBusinessId = repository.createBusiness({ companyId, name: "Stationery" });
@@ -68,11 +69,11 @@ function invoice(
 function books(): World {
   const w = setup();
   w.repository.saveDraft(invoice(w, "INV-1", { date: "2026-05-10", paise: 60000, fairId: w.fairId }));
-  w.repository.finalizeInvoice("INV-1");
+  w.repository.finalizeInvoice("INV-1", { confirmBackdatedMonth: true });
   w.repository.saveDraft(invoice(w, "INV-2", { date: "2026-06-20", paise: 30000, customerId: w.otherCustomerId }));
-  w.repository.finalizeInvoice("INV-2");
+  w.repository.finalizeInvoice("INV-2", { confirmBackdatedMonth: true });
   w.repository.saveDraft(invoice(w, "INV-3", { date: "2026-07-05", paise: 10000, businessId: w.otherBusinessId }));
-  w.repository.finalizeInvoice("INV-3");
+  w.repository.finalizeInvoice("INV-3", { confirmBackdatedMonth: true });
 
   const note: CreditNote = {
     id: "CN-1", invoiceId: "INV-1", number: "CN-1", reason: "Returned", status: "DRAFT",
@@ -229,7 +230,7 @@ describe("R7b: the General Ledger shows the transaction date, not when it was po
     try {
       // Dated well in the past; it is being posted right now.
       w.repository.saveDraft(invoice(w, "OLD", { date: "2020-01-15", paise: 50000 }));
-      w.repository.finalizeInvoice("OLD");
+      w.repository.finalizeInvoice("OLD", { confirmBackdatedMonth: true });
 
       const rows = w.repository.getGeneralLedger();
       expect(rows.length).toBeGreaterThan(0);

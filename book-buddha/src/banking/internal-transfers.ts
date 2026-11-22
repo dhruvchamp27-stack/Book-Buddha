@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { JournalEntry, JournalSourceType } from "../accounting/types.js";
 import { appendAuditEvent } from "../database/audit-log.js";
 import { RepositoryValidationError } from "../database/errors.js";
-import { istDateOf } from "../database/ist-date.js";
+import { assertBackdatedConfirmed, todayOf } from "../database/ist-date.js";
 import { assertPeriodOpen, postJournalEntry } from "../database/ledger.js";
 import { assertMoneyAccount, companyOfBusiness } from "./money-accounts.js";
 import { assertNotOnBankLine } from "./statement-lines.js";
@@ -47,6 +47,8 @@ export interface CreateInternalTransferInput {
   readonly paymentReference?: string | undefined;
   readonly memo?: string | undefined;
   readonly fairId?: string | undefined;
+  /** Q12: confirm a date in an earlier month than today changes figures already reported. */
+  readonly confirmBackdatedMonth?: boolean | undefined;
 }
 
 export interface ListMovementsFilter {
@@ -162,7 +164,7 @@ export function reversalOf(
  * the one that has to be open (assertPeriodOpen, repository.ts:2914).
  */
 export function cancellationDate(db: Database.Database, businessId: string): string {
-  const cancelledOn = istDateOf();
+  const cancelledOn = todayOf(db);
   assertPeriodOpen(db, businessId, cancelledOn);
   return cancelledOn;
 }
@@ -205,6 +207,9 @@ export function createInternalTransfer(db: Database.Database, input: CreateInter
     assertMoneyAccount(db, input.toAccount, companyId);
     assertPaymentMode(db, input.paymentMode, companyId);
 
+    // Q12: the financial-year lock first (absolute), then the back-dated-month confirm.
+    assertPeriodOpen(db, input.businessId, input.date);
+    assertBackdatedConfirmed(db, input.date, input.confirmBackdatedMonth, "internal transfer", "post");
     const id = randomUUID();
     const number = nextDocumentNumber(db, "internal_transfers", companyId, "TRF", input.date);
     const journalEntryId = `je-trf-${id}`;

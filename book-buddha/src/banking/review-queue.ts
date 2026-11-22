@@ -79,6 +79,8 @@ export interface AddLineInput {
   readonly partyName?: string | undefined;
   readonly narration?: string | undefined;
   readonly paymentMode?: string | undefined;
+  /** Q12: confirm a bank line dated in an earlier month than today changes figures already reported. */
+  readonly confirmBackdatedMonth?: boolean | undefined;
   readonly confirm: boolean;
 }
 
@@ -92,6 +94,8 @@ export interface MatchLineInput {
   readonly documents?: readonly MatchDocumentInput[] | undefined;
   readonly journalLineIds?: readonly number[] | undefined;
   readonly paymentMode?: string | undefined;
+  /** Q12: confirm a bank line dated in an earlier month than today changes figures already reported. */
+  readonly confirmBackdatedMonth?: boolean | undefined;
   readonly confirm?: boolean | undefined;
 }
 
@@ -352,6 +356,7 @@ function addWork(db: Database.Database, id: string, input: AddLineInput, uncateg
       partyName: input.partyName,
       narration: input.narration,
       fairId: line.fairId ?? undefined,
+      confirmBackdatedMonth: input.confirmBackdatedMonth,
     });
     insertLink(db, line, bankJournalLineId(db, voucher.journalEntryId, line.accountCode), voucher.journalEntryId, "VOUCHER", voucher.id, true);
     setStatus(db, id, "ADDED");
@@ -375,13 +380,14 @@ export function addLine(ctx: ReviewContext, id: string, input: AddLineInput): Re
 }
 
 /** Add to the Uncategorised account (UNCATEGORIZED for money out, UNCATEGORIZED_INCOME for money in). */
-export function uncategoriseLine(ctx: ReviewContext, id: string, input: { confirm: boolean }): ReviewResult {
+export function uncategoriseLine(ctx: ReviewContext, id: string, input: { confirm: boolean; confirmBackdatedMonth?: boolean | undefined }): ReviewResult {
   const db = dbOf(ctx);
   const line = getStatementLine(db, id);
   const accountCode = line.amountPaise > 0 ? "UNCATEGORIZED_INCOME" : "UNCATEGORIZED";
   const add: AddLineInput = {
     splits: [{ accountCode, amountPaise: Math.abs(line.amountPaise), description: "Uncategorised" }],
     confirm: input.confirm,
+    confirmBackdatedMonth: input.confirmBackdatedMonth,
   };
   return execute(db, id, input.confirm !== true, addWork(db, id, add, true));
 }
@@ -392,7 +398,7 @@ export function uncategoriseLine(ctx: ReviewContext, id: string, input: { confir
 export function transferLine(
   ctx: ReviewContext,
   id: string,
-  input: { otherAccountCode: string; paymentMode?: string | undefined; confirm: boolean },
+  input: { otherAccountCode: string; paymentMode?: string | undefined; confirm: boolean; confirmBackdatedMonth?: boolean | undefined },
 ): ReviewResult {
   const db = dbOf(ctx);
   return execute(db, id, input.confirm !== true, () => {
@@ -410,6 +416,7 @@ export function transferLine(
       paymentReference: line.reference ?? undefined,
       memo: line.description,
       fairId: line.fairId ?? undefined,
+      confirmBackdatedMonth: input.confirmBackdatedMonth,
     });
     insertLink(db, line, bankJournalLineId(db, transfer.journalEntryId, line.accountCode), transfer.journalEntryId, "INTERNAL_TRANSFER", transfer.id, true);
     setStatus(db, id, "TRANSFERRED");
@@ -580,11 +587,12 @@ export function matchLine(ctx: ReviewContext, id: string, input: MatchLineInput)
     return execute(db, id, false, () => matchPostedLines(db, id, input.journalLineIds as readonly number[]));
   }
   const repository = repositoryOf(ctx);
-  return execute(db, id, input.confirm !== true, () => matchDocuments(repository, id, input.documents as readonly MatchDocumentInput[], input.paymentMode));
+  return execute(db, id, input.confirm !== true, () => matchDocuments(repository, id, input.documents as readonly MatchDocumentInput[], input.paymentMode, input.confirmBackdatedMonth));
 }
 
 function matchDocuments(
   repository: AccountingRepository, id: string, documents: readonly MatchDocumentInput[], paymentMode: string | undefined,
+  confirmBackdatedMonth?: boolean,
 ): void {
   const db = repository.db;
   const line = getStatementLine(db, id);
@@ -641,13 +649,14 @@ function matchDocuments(
     if (doc.kind === "INVOICE") {
       const payment = repository.recordPayment(doc.id, amountPaise, line.txnDate, {
         moneyAccount: line.accountCode, paymentMode, paymentReference: line.reference,
-      });
+      }, { ...(confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}) });
       const entryId = `je-payment-${payment.id}`;
       links.push({ journalLineId: bankJournalLineId(db, entryId, line.accountCode), entryId, kind: "PAYMENT", documentId: payment.id });
     } else {
       const payment = repository.recordSupplierPayment({
         billId: doc.id, amountPaise, paidOn: line.txnDate,
         moneyAccount: line.accountCode, paymentMode, paymentReference: line.reference,
+        ...(confirmBackdatedMonth === true ? { confirmBackdatedMonth: true } : {}),
       });
       const entryId = `je-supplier-payment-${payment.id}`;
       links.push({ journalLineId: bankJournalLineId(db, entryId, line.accountCode), entryId, kind: "SUPPLIER_PAYMENT", documentId: payment.id });

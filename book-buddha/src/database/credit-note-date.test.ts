@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../api/server.js";
 import { migrations, runMigrations } from "./migrations.js";
 import { AccountingRepository, istDateOf } from "./repository.js";
+import { moveToday, todayAt } from "./test-clock.js";
 
 /**
  * S11-4 - a credit note carries its own transaction date (migration v20), the mirror of a
@@ -21,7 +22,7 @@ interface World {
 }
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-10"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Asha" });
@@ -156,6 +157,7 @@ describe("back-dating into an earlier month needs confirmation (S11-21)", () => 
     try {
       invoice(w, "INV-1", "2026-01-10");
       draftNote(w, "CN-1", "INV-1", "2026-01-20");
+      moveToday(w.repository, "2026-03-05"); // ruling G: the invoice was posted in January; now it is March
       let message = "";
       try { w.repository.finalizeCreditNote("CN-1"); } catch (error) { message = (error as Error).message; }
       expect(message).toBe(REFUSAL_JAN_20);
@@ -263,6 +265,7 @@ describe("over HTTP", () => {
     const app = buildApi(w.repository, { __unsafeDisableAuthForTests: true });
     try {
       invoice(w, "INV-1", "2026-01-10");
+      moveToday(w.repository, "2026-03-05"); // ruling G: the invoice was posted in January; now it is March
       const created = await app.inject({
         method: "POST", url: "/credit-notes",
         payload: {

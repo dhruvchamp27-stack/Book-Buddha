@@ -107,6 +107,20 @@ const BEFORE_OPENING_FIELD: ImportField = field("beforeOpening", "Before opening
 const HISTORY_MESSAGE = "kept as history (before opening date)";
 
 /**
+ * G (Q12): a row posted dated in an EARLIER CALENDAR MONTH than today changes figures already
+ * reported. The preview flags each such row with this message; committing the previewed file is
+ * the confirmation (R10 rule), so the commit posts it with `confirmBackdatedMonth: true` and the
+ * commit result counts these rows. History rows post nothing and are never flagged.
+ */
+export const BACKDATED_MESSAGE = "dated in a month already reported";
+
+/** The note a posted row carries: history first (nothing posted), else the back-dated warning. */
+function postedNote(context: ImportContext, date: string, history: boolean): string | undefined {
+  if (history) return HISTORY_MESSAGE;
+  return context.repository.isBackdatedMonth(date) ? BACKDATED_MESSAGE : undefined;
+}
+
+/**
  * F (S16-2(c), Q13): a row dated on or before the business's opening date is kept as HISTORY - not
  * refused. The rule itself is the repository's (`openingDateOf`, the one place that decides it);
  * document runs never write opening balances, so the date is read once per run.
@@ -355,9 +369,9 @@ const invoicesKind: ImportKindDefinition = {
       lines,
     };
     repo.saveDraft(invoice);
-    repo.finalizeInvoice(id, { confirmBeforeOpening: true });
+    repo.finalizeInvoice(id, { confirmBeforeOpening: true, confirmBackdatedMonth: true });
     invoices.set(wanted, { id, number }); // last step, nothing below can throw: a rolled-back unit leaves no entry
-    return created(number, history ? HISTORY_MESSAGE : undefined);
+    return created(number, postedNote(context, invoiceDate, history));
   },
 };
 
@@ -447,9 +461,9 @@ const purchaseBillsKind: ImportKindDefinition = {
       ...(fair === undefined ? {} : { fairId: fair.id }),
       lines,
     });
-    repo.finalizePurchaseBill(bill.id, { confirmBeforeOpening: true });
+    repo.finalizePurchaseBill(bill.id, { confirmBeforeOpening: true, confirmBackdatedMonth: true });
     bills.set(wanted, { id: bill.id, number }); // last step: see the header note on indexes
-    return created(number, history ? HISTORY_MESSAGE : undefined);
+    return created(number, postedNote(context, billDate, history));
   },
 };
 
@@ -539,9 +553,9 @@ const expensesKind: ImportKindDefinition = {
       taxRateBasisPoints: optionalRate(first),
       paymentAccount,
     });
-    repo.finalizeExpense(expense.id, { confirmBeforeOpening: true });
+    repo.finalizeExpense(expense.id, { confirmBeforeOpening: true, confirmBackdatedMonth: true });
     expenses.set(wanted, { id: expense.id, number }); // last step: see the header note on indexes
-    return created(number, history ? HISTORY_MESSAGE : undefined);
+    return created(number, postedNote(context, expenseDate, history));
   },
 };
 
@@ -595,10 +609,10 @@ const creditNotesKind: ImportKindDefinition = {
       lines,
     };
     repo.saveCreditNote(note);
-    // The preview is the user's confirmation that a date in an earlier month is what they mean.
+    // The preview is the user's confirmation that a date in an earlier month is what they mean (R10 rule).
     repo.finalizeCreditNote(id, { confirmBackdatedMonth: true, confirmBeforeOpening: true });
     notes.add(wanted); // last step: see the header note on indexes
-    return created(number, history ? HISTORY_MESSAGE : undefined);
+    return created(number, postedNote(context, noteDate, history));
   },
 };
 
@@ -666,8 +680,8 @@ const paymentsKind: ImportKindDefinition = {
       return skipped(reference, "already exists");
     }
     const history = isHistoryDate(context, businessId, paidOn);
-    repo.recordPayment(invoice.id, amountPaise, paidOn, {}, { confirmBeforeOpening: true });
-    return created(reference, history ? HISTORY_MESSAGE : undefined);
+    repo.recordPayment(invoice.id, amountPaise, paidOn, {}, { confirmBeforeOpening: true, confirmBackdatedMonth: true });
+    return created(reference, postedNote(context, paidOn, history));
   },
 };
 
@@ -698,8 +712,8 @@ const supplierPaymentsKind: ImportKindDefinition = {
       return skipped(reference, "already exists");
     }
     const history = isHistoryDate(context, businessId, paidOn);
-    repo.recordSupplierPayment({ billId: bill.id, amountPaise, paidOn, confirmBeforeOpening: true });
-    return created(reference, history ? HISTORY_MESSAGE : undefined);
+    repo.recordSupplierPayment({ billId: bill.id, amountPaise, paidOn, confirmBeforeOpening: true, confirmBackdatedMonth: true });
+    return created(reference, postedNote(context, paidOn, history));
   },
 };
 

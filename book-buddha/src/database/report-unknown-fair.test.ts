@@ -4,6 +4,7 @@ import {
   creditNoteReport, salesByBusiness, salesByCustomer, salesByFair, salesByItem, salesByTax, salesReturnReport,
 } from "./reports-sales.js";
 import { stockMovementReport, transactionDetailByAccount, transactionListByDate } from "./reports-transactions.js";
+import { todayAt } from "./test-clock.js";
 
 // S11-9: a report for a fair that does not exist must say so, not return zero rows (which reads as
 // "no sales at that fair"). A real fair with no activity still legitimately yields an empty report.
@@ -11,7 +12,7 @@ import { stockMovementReport, transactionDetailByAccount, transactionListByDate 
 interface World { repository: AccountingRepository; fairA: string; fairB: string }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-11-30"));
   const companyId = repository.createCompany({ name: "Co" });
   const businessId = repository.createBusiness({ companyId, name: "Books A" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });
@@ -23,7 +24,7 @@ function setup(): World {
     id: "B0", businessId, supplierId, number: "B0", billDate: "2026-10-01", paymentAccount: "CASH",
     lines: [{ itemId, description: "Atlas", quantity: 20, unitPricePaise: 4000 }],
   });
-  repository.finalizePurchaseBill(bill.id);
+  repository.finalizePurchaseBill(bill.id, { confirmBackdatedMonth: true }); // October bill, today pinned in late November
   const sell = (id: string, quantity: number, fairId: string, date: string): void => {
     repository.saveDraft({
       id, number: id, businessId, customerId, paymentAccount: "CASH", status: "DRAFT", fairId, invoiceDate: date,

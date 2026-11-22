@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountingRepository } from "./repository.js";
 import { ACCOUNT_ROLES, SEED_ACCOUNTS, SETTLEMENT_ROLES } from "./chart-accounts-schema.js";
 import { runMigrations } from "./migrations.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * Migrations v11 and v12 - the credit-discharge slice (S4-1, S4-4, S4-5).
@@ -16,7 +17,7 @@ describe("v11: widening the chart_accounts role CHECK", () => {
       .sql;
 
   it("rebuilds the table so the new role is accepted, and keeps every account", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       expect(sqlOf(repository, "chart_accounts")).toContain("'CUSTOMER_CREDITS'");
       // Every role the engine knows about is in the CHECK, so no reader can name one the table
@@ -40,7 +41,7 @@ describe("v11: widening the chart_accounts role CHECK", () => {
   });
 
   it("replays every trigger the rebuild had to drop, including the one on another table", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       const triggers = (
         repository.db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all() as Array<{
@@ -68,7 +69,7 @@ describe("v11: widening the chart_accounts role CHECK", () => {
   });
 
   it("is idempotent: re-running the migrations changes nothing", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       const snapshot = () =>
         JSON.stringify({
@@ -99,7 +100,7 @@ describe("v11: widening the chart_accounts role CHECK", () => {
 
 describe("v12: the credit-discharge tables", () => {
   it("adds both tables and the persisted refundable column", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       const columns = (repository.db.pragma("table_info(credit_notes)") as Array<{ name: string }>).map((c) => c.name);
       expect(columns).toContain("refundable_paise");
@@ -116,7 +117,7 @@ describe("v12: the credit-discharge tables", () => {
   });
 
   it("refuses a refund out of an account that is not cash or bank", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       expect(() =>
         repository.db
@@ -155,7 +156,7 @@ describe("refunding a credit note", () => {
   }
 
   function world(): World {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
     const businessId = repository.createBusiness({ companyId, name: "Business" });
     const customerId = repository.createCustomer({ companyId, name: "Customer" });
@@ -176,7 +177,7 @@ describe("refunding a credit note", () => {
       taxRateBasisPoints: 0,
       lines: [{ itemId: w.itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
     });
-    w.repository.finalizeInvoice(id);
+    w.repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
   }
 
   function note(w: World, id: string, invoiceId: string, taxablePaise: number): void {
@@ -209,7 +210,7 @@ describe("refunding a credit note", () => {
     const w = world();
     try {
       invoice(w, "inv1", 100000);
-      w.repository.recordPayment("inv1", 100000, "2026-01-05");
+      w.repository.recordPayment("inv1", 100000, "2026-01-05", {}, { confirmBackdatedMonth: true });
       note(w, "cn1", "inv1", 99999); // odd value, fully refundable
       assertCreditsAgree(w);
 
@@ -240,7 +241,7 @@ describe("refunding a credit note", () => {
     const w = world();
     try {
       invoice(w, "inv1", 50000);
-      w.repository.recordPayment("inv1", 50000, "2026-01-05");
+      w.repository.recordPayment("inv1", 50000, "2026-01-05", {}, { confirmBackdatedMonth: true });
       note(w, "cn1", "inv1", 50000);
       // payments.payment_account is still CHECK IN ('CASH'), so this is the first money-out path
       // in the app that can use the bank at all. Its own table is why.
@@ -257,7 +258,7 @@ describe("refunding a credit note", () => {
     const w = world();
     try {
       invoice(w, "inv1", 50000);
-      w.repository.recordPayment("inv1", 50000, "2026-01-05");
+      w.repository.recordPayment("inv1", 50000, "2026-01-05", {}, { confirmBackdatedMonth: true });
       note(w, "cn1", "inv1", 50000);
       const refund = (amountPaise: number, refundedOn: string) =>
         w.repository.recordCreditNoteRefund({ id: `rf-${amountPaise}-${refundedOn}`, creditNoteId: "cn1", amountPaise, refundedOn, paymentAccount: "CASH" });
@@ -293,7 +294,7 @@ describe("refunding a credit note", () => {
       for (const [index, paid] of [100000, 70000, 0].entries()) {
         const id = `inv${index}`;
         invoice(w, id, 100000);
-        if (paid > 0) w.repository.recordPayment(id, paid, "2026-01-05");
+        if (paid > 0) w.repository.recordPayment(id, paid, "2026-01-05", {}, { confirmBackdatedMonth: true });
         note(w, `cn${index}`, id, 100000);
         const row = w.repository.db
           .prepare(
@@ -330,7 +331,7 @@ describe("applying a credit note to a later invoice", () => {
   });
 
   function world() {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
     const businessId = repository.createBusiness({ companyId, name: "Business" });
     const otherBusinessId = repository.createBusiness({ companyId, name: "Other business" });
@@ -355,7 +356,7 @@ describe("applying a credit note to a later invoice", () => {
         taxRateBasisPoints: 0,
         lines: [{ itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
       });
-      repository.finalizeInvoice(id);
+      repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
     };
     const note = (id: string, invoiceId: string, taxablePaise: number): void => {
       repository.saveCreditNote({
@@ -386,7 +387,7 @@ describe("applying a credit note to a later invoice", () => {
       // January: invoice A for Rs 1,000, collected in full.
       vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
       w.invoice("A", 100000, "2026-01-10");
-      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.repository.recordPayment("A", 100000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(100000);
 
       // February: Rs 400 of it comes back. Nothing is owed, so the whole Rs 400 is owed BACK.
@@ -428,7 +429,7 @@ describe("applying a credit note to a later invoice", () => {
       // Until it is, cash (1,000) is deliberately BELOW accrual (1,600) - this scenario is not a
       // convergence test on its own. Collecting it closes the gap exactly.
       vi.setSystemTime(new Date("2026-04-10T06:00:00.000Z"));
-      w.repository.recordPayment("B", 60000, "2026-04-10");
+      w.repository.recordPayment("B", 60000, "2026-04-10", {}, { confirmBackdatedMonth: true });
       expect(period("2026-04-01", "2026-04-30").totalIncomePaise).toBe(60000);
       expect(w.repository.getProfitAndLoss({ basis: "CASH" }).totalIncomePaise).toBe(160000);
       expect(w.repository.getProfitAndLoss({ basis: "ACCRUAL" }).totalIncomePaise).toBe(160000);
@@ -445,7 +446,7 @@ describe("applying a credit note to a later invoice", () => {
     try {
       vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
       w.invoice("A", 100000, "2026-01-10");
-      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.repository.recordPayment("A", 100000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
       w.note("cn1", "A", 100000);
       w.invoice("B", 100000, "2026-02-01");
@@ -459,7 +460,7 @@ describe("applying a credit note to a later invoice", () => {
 
       // Fully settled by credit: no further payment, and it cannot be cancelled either. Counting
       // only the payments table would have let this invoice be cancelled while the credit stood.
-      expect(() => w.repository.recordPayment("B", 1, "2026-02-12")).toThrow(/outstanding balance of 0 paise/);
+      expect(() => w.repository.recordPayment("B", 1, "2026-02-12", {}, { confirmBackdatedMonth: true })).toThrow(/outstanding balance of 0 paise/);
       expect(() => w.repository.cancelInvoice("B")).toThrow(/payments or applied credits/);
       expect(w.repository.getReceivables().filter((r) => r.invoiceId === "B")).toHaveLength(0);
     } finally {
@@ -472,7 +473,7 @@ describe("applying a credit note to a later invoice", () => {
     try {
       vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
       w.invoice("A", 100000, "2026-01-10");
-      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.repository.recordPayment("A", 100000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       vi.setSystemTime(new Date("2026-02-10T06:00:00.000Z"));
       w.note("cn1", "A", 100000);
       w.invoice("B", 100000, "2026-02-01");
@@ -500,7 +501,7 @@ describe("applying a credit note to a later invoice", () => {
       expect(() => apply("E", 50000, "2026-02-11")).toThrow(/before the invoice it settles/);
 
       // A target that owes less than the credit is refused rather than pushed past settled.
-      w.repository.recordPayment("B", 90000, "2026-02-11");
+      w.repository.recordPayment("B", 90000, "2026-02-11", {}, { confirmBackdatedMonth: true });
       expect(() => apply("B", 50000, "2026-02-12")).toThrow(/only owes 10000 paise/);
     } finally {
       w.repository.close();
@@ -529,7 +530,7 @@ describe("an invoice carrying a credit note can never be cancelled out from unde
   });
 
   function world() {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
     const businessId = repository.createBusiness({ companyId, name: "Business" });
     const customerId = repository.createCustomer({ companyId, name: "Customer" });
@@ -547,7 +548,7 @@ describe("an invoice carrying a credit note can never be cancelled out from unde
         taxRateBasisPoints: 0,
         lines: [{ itemId, description: "Line", quantity: 1, unitPricePaise: totalPaise }],
       });
-      repository.finalizeInvoice(id);
+      repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
     };
     const note = (id: string, invoiceId: string, taxablePaise: number): void => {
       repository.saveCreditNote({
@@ -568,7 +569,7 @@ describe("an invoice carrying a credit note can never be cancelled out from unde
     try {
       // Fully refundable note (invoice paid first, so the note offsets nothing).
       w.invoice("A", 100000);
-      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.repository.recordPayment("A", 100000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       w.note("cnA", "A", 100000);
       expect(w.repository.getCreditNoteBalance("cnA").refundablePaise).toBe(100000);
       expect(() => w.repository.cancelInvoice("A")).toThrow();
@@ -581,7 +582,7 @@ describe("an invoice carrying a credit note can never be cancelled out from unde
 
       // Split note: part off the bill, part owed back.
       w.invoice("C", 100000);
-      w.repository.recordPayment("C", 60000, "2026-01-20");
+      w.repository.recordPayment("C", 60000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       w.note("cnC", "C", 100000);
       expect(w.repository.getCreditNoteBalance("cnC").refundablePaise).toBe(60000);
       expect(() => w.repository.cancelInvoice("C")).toThrow();
@@ -612,7 +613,7 @@ describe("cancelling a credit note", () => {
   });
 
   function world(trackStock = false) {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
     const businessId = repository.createBusiness({ companyId, name: "Business" });
     const customerId = repository.createCustomer({ companyId, name: "Customer" });
@@ -633,7 +634,7 @@ describe("cancelling a credit note", () => {
         taxRateBasisPoints: 0,
         lines: [{ itemId, description: "Line", quantity, unitPricePaise }],
       });
-      repository.finalizeInvoice(id);
+      repository.finalizeInvoice(id, { confirmBackdatedMonth: true });
     };
     const note = (id: string, invoiceId: string, unitPricePaise: number, quantity = 1): void => {
       repository.saveCreditNote({
@@ -684,7 +685,7 @@ describe("cancelling a credit note", () => {
     try {
       // Fully refundable: paid first, so the note created a liability and nothing else.
       w.invoice("A", 100000);
-      w.repository.recordPayment("A", 100000, "2026-01-20");
+      w.repository.recordPayment("A", 100000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       w.note("cn1", "A", 100000);
       expect(-w.ledger("CUSTOMER_CREDITS", "A")).toBe(100000);
       w.repository.cancelCreditNote("cn1");
@@ -695,7 +696,7 @@ describe("cancelling a credit note", () => {
 
       // Split: part off the bill, part owed back. Both halves must come back.
       w.invoice("B", 100000);
-      w.repository.recordPayment("B", 60000, "2026-01-20");
+      w.repository.recordPayment("B", 60000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       w.note("cn2", "B", 100000);
       expect(-w.ledger("CUSTOMER_CREDITS", "B")).toBe(60000);
       expect(w.ledger("RECEIVABLES", "B")).toBe(0);
@@ -706,7 +707,7 @@ describe("cancelling a credit note", () => {
       const receivable = w.repository.getReceivables().find((r) => r.invoiceId === "B");
       expect(receivable?.outstandingPaise).toBe(40000);
       // And that 40,000 can be collected, which it could not while the note stood.
-      expect(() => w.repository.recordPayment("B", 40000, "2026-02-11")).not.toThrow();
+      expect(() => w.repository.recordPayment("B", 40000, "2026-02-11", {}, { confirmBackdatedMonth: true })).not.toThrow();
     } finally {
       w.repository.close();
     }
@@ -762,7 +763,7 @@ describe("cancelling a credit note", () => {
 
       // A note with money already given back cannot be undone: that cash is gone.
       w.invoice("B", 100000);
-      w.repository.recordPayment("B", 100000, "2026-01-20");
+      w.repository.recordPayment("B", 100000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       w.note("cn3", "B", 100000);
       w.repository.recordCreditNoteRefund({ id: "rf1", creditNoteId: "cn3", amountPaise: 1, refundedOn: "2026-02-11", paymentAccount: "CASH" });
       expect(() => w.repository.cancelCreditNote("cn3")).toThrow(/already refunded or applied/);
@@ -779,7 +780,7 @@ describe("cancelling a credit note", () => {
 
       vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
       w.invoice("A", 100000);
-      w.repository.recordPayment("A", 60000, "2026-01-20");
+      w.repository.recordPayment("A", 60000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(60000);
 
       // A note in February, then cancelled in March.
@@ -794,7 +795,7 @@ describe("cancelling a credit note", () => {
       expect(period("2026-01-01", "2026-01-31").totalIncomePaise).toBe(60000);
 
       // The invoice owes its last 40,000 again; paying it converges on accrual.
-      w.repository.recordPayment("A", 40000, "2026-03-15");
+      w.repository.recordPayment("A", 40000, "2026-03-15", {}, { confirmBackdatedMonth: true });
       const accrual = w.repository.getProfitAndLoss({ basis: "ACCRUAL" });
       const cash = w.repository.getProfitAndLoss({ basis: "CASH" });
       expect(accrual.totalIncomePaise).toBe(100000);
@@ -824,7 +825,7 @@ describe("cancelling respects FINALIZE order, not draft order", () => {
   });
 
   it("refuses the note finalized FIRST, whichever was drafted first", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
       const businessId = repository.createBusiness({ companyId, name: "Business" });
@@ -835,8 +836,8 @@ describe("cancelling respects FINALIZE order, not draft order", () => {
         paymentAccount: "RECEIVABLES", taxType: "NONE", taxRateBasisPoints: 0,
         lines: [{ itemId, description: "Line", quantity: 2, unitPricePaise: 50000 }],
       });
-      repository.finalizeInvoice("A");
-      repository.recordPayment("A", 60000, "2026-01-20");
+      repository.finalizeInvoice("A", { confirmBackdatedMonth: true });
+      repository.recordPayment("A", 60000, "2026-01-20", {}, { confirmBackdatedMonth: true });
 
       const draft = (id: string): void => {
         repository.saveCreditNote({
@@ -899,7 +900,7 @@ describe("ACCEPTANCE S4-8: an UNDATED credit note is dated at FINALIZE, so a rep
   afterEach(() => vi.useRealTimers());
 
   it("leaves January untouched when a January draft is finalized in February", () => {
-    const repository = new AccountingRepository();
+    const repository = new AccountingRepository(":memory:", todayAt("2026-01-01"));
     try {
       vi.setSystemTime(new Date("2026-01-10T06:00:00.000Z"));
       const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
@@ -917,13 +918,13 @@ describe("ACCEPTANCE S4-8: an UNDATED credit note is dated at FINALIZE, so a rep
           { itemId: freightId, description: "Freight", quantity: 1, unitPricePaise: 500000 },
         ],
       });
-      repository.finalizeInvoice("INV");
+      repository.finalizeInvoice("INV", { confirmBackdatedMonth: true });
 
       vi.setSystemTime(new Date("2026-01-20T06:00:00.000Z"));
-      repository.recordPayment("INV", 300000, "2026-01-20");
+      repository.recordPayment("INV", 300000, "2026-01-20", {}, { confirmBackdatedMonth: true });
       // The second payment falls AFTER the date the note will be back-dated to.
       vi.setSystemTime(new Date("2026-01-30T06:00:00.000Z"));
-      repository.recordPayment("INV", 300000, "2026-01-30");
+      repository.recordPayment("INV", 300000, "2026-01-30", {}, { confirmBackdatedMonth: true });
 
       const january = () => repository.getProfitAndLoss({ basis: "CASH", fromDate: "2026-01-01", toDate: "2026-01-31" });
       // 600,000 of 1,500,000 collected: 40% of a 600,000 cost.
@@ -953,8 +954,8 @@ describe("ACCEPTANCE S4-8: an UNDATED credit note is dated at FINALIZE, so a rep
       // And the re-based remainder still converges: 1,500,000 billed less the 500,000 freight
       // credited less 600,000 already paid leaves 400,000, and paying it lands on accrual.
       vi.setSystemTime(new Date("2026-03-10T06:00:00.000Z"));
-      repository.recordPayment("INV", 400000, "2026-03-10");
-      expect(() => repository.recordPayment("INV", 1, "2026-03-10")).toThrow(/outstanding balance of 0 paise/);
+      repository.recordPayment("INV", 400000, "2026-03-10", {}, { confirmBackdatedMonth: true });
+      expect(() => repository.recordPayment("INV", 1, "2026-03-10", {}, { confirmBackdatedMonth: true })).toThrow(/outstanding balance of 0 paise/);
       const accrual = repository.getProfitAndLoss({ basis: "ACCRUAL" });
       const cash = repository.getProfitAndLoss({ basis: "CASH" });
       expect(accrual).toMatchObject({ totalIncomePaise: 1000000, totalExpensesPaise: 600000 });

@@ -2,12 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApi } from "../api/server.js";
 import { AccountingRepository } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 /** Regression tests for sales-side defects D4, D5, D6, D11, D12 (fixed in repository.ts / stock-layers.ts). */
 let repository: AccountingRepository;
 let app: FastifyInstance;
 beforeEach(async () => {
-  repository = new AccountingRepository();
+  repository = new AccountingRepository(":memory:", todayAt("2025-04-01"));
   app = buildApi(repository, { __unsafeDisableAuthForTests: true });
   await app.ready();
 });

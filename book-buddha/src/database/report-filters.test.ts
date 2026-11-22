@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../api/server.js";
 import type { JournalEntry } from "../accounting/types.js";
 import { AccountingRepository, RepositoryValidationError, istDateOf } from "./repository.js";
+import { todayAt } from "./test-clock.js";
 
 interface World {
   repository: AccountingRepository;
@@ -13,7 +14,7 @@ interface World {
 }
 
 function setup(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2026-01-10"));
   const companyId = repository.createCompany({ name: "Co" });
   const bizA = repository.createBusiness({ companyId, name: "Books A" });
   const bizB = repository.createBusiness({ companyId, name: "Books B" });

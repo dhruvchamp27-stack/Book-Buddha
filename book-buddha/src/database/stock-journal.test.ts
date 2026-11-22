@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AccountingRepository, RepositoryValidationError, istDateOf } from "./repository.js";
 import { verifyAuditChain } from "./audit-log.js";
 import { buildApi } from "../api/server.js";
+import { todayAt } from "./test-clock.js";
 
 /**
  * R4c - opening stock and stock adjustments reach the GENERAL LEDGER (owner ruling S5-3), and the
@@ -22,7 +23,7 @@ interface World {
 }
 
 function world(): World {
-  const repository = new AccountingRepository();
+  const repository = new AccountingRepository(":memory:", todayAt("2025-04-01"));
   const companyId = repository.createCompany({ name: "Co", accountingBasis: "ACCRUAL" });
   const businessId = repository.createBusiness({ companyId, name: "Books" });
   const customerId = repository.createCustomer({ companyId, name: "Host School" });
